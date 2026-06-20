@@ -10,13 +10,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test"
+    "test": "node --import tsx --test $(find src -name '*.test.ts')"
   },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+  "comments": {
+    "dependencies": "@anthropic-ai/claude-agent-sdk is added in the ADR-0003 Worker-adapter phase; the current code (domain/ports/in-process substrate/fake worker) needs no runtime deps."
   },
   "devDependencies": {
     "typescript": "^5.5.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "tsx": "^4.16.0"
   }
 }
