@@ -73,6 +73,27 @@ Bun it uses the built-in `bun:sqlite` substrate (zero native addons); under Node
 npm run build:bin && ./weave task "ship it" && ./weave up --fake
 ```
 
+## Looping research agents
+
+A first-class loop (ADR-0008) re-declares a task routed to any skill each tick. The built-in
+**arXiv research agent** discovers recent papers and fans out a detail task per paper:
+
+```bash
+weave loop --skill arxiv --interval 6h "large language models"
+```
+
+```
+researcher  arXiv "llm": 3 papers, 3 detail task(s) declared
+researcher  Sparse Attention for Million-Token LLMs — A. Researcher, B. Scientist
+researcher  Agentic Tool Use Benchmarks — C. Engineer
+```
+
+The `arxiv` skill `http_fetch`es the feed and `spawn_task`s an `arxiv-paper` detail task per
+paper (subject `arxiv:<id>`). Because the subject is the paper id, weave's claim-once dedup
+means each paper is processed **once ever** — re-runs only pick up *new* papers. `weave loop`
+works with any skill; `--feed`/`--max` configure the arXiv source (point it at a local fixture
+to test offline).
+
 ## Skills (plugins) — how weave knows what to do
 
 A peer doesn't hardcode behaviour: it loads **skills** and routes each task to the one that

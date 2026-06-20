@@ -10,6 +10,7 @@ Append-only log of architectural decisions for `weave`. Newest at top.
 | [0009](ADR-0009-networked-substrate.md) | NetworkedSubstrate — replicated log with HLC ordering | Proposed | 2026-06-19 |
 | [0013](ADR-0013-context-reducer.md) | ContextReducer — reduced context for skills/LLMs | Proposed | 2026-06-20 |
 | [0007](ADR-0007-memory-compaction.md) | Memory — log compaction via snapshot events | Proposed | 2026-06-20 |
+| [0008](ADR-0008-loops-and-task-fanout.md) | First-class loops + task fan-out (handoff-as-tool-call) | Proposed | 2026-06-20 |
 | [0005](ADR-0005-peer-loop-usecase.md) | The peer loop (agent runtime use-case) | Proposed | 2026-06-19 |
 | [0004](ADR-0004-toolhost-capability-model.md) | ToolHost capability & effect model | Proposed | 2026-06-19 |
 | [0003](ADR-0003-worker-port-and-claude-sdk-adapter.md) | Worker port & Claude Agent SDK adapter | Proposed | 2026-06-19 |

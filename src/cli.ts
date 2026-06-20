@@ -25,7 +25,11 @@ import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
 import { probeSkill, summarySkill, echoSkill, claudeSkill, analyzeSkill } from "./adapters/secondary/builtin-skills.js";
 import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { networkStateTool } from "./adapters/secondary/network-state-tool.js";
+import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
+import { arxivDiscoverSkill, arxivPaperSkill } from "./adapters/secondary/arxiv-skills.js";
 import { reduceContext } from "./domain/context.js";
+import { LoopRunner } from "./usecases/loop.js";
+import { SystemTimer } from "./adapters/secondary/system-timer.js";
 
 const DEFAULT_DB = ".weave/weave.db";
 
@@ -105,14 +109,22 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
  *  is present and not --fake, else echo), plus a ToolRegistry holding every skill's tools. */
 async function assembleSkills(
   args: Args,
-  opts: { fake: boolean; model: string; weave?: Substrate },
+  opts: { fake: boolean; model: string; weave?: Substrate; newId?: () => string },
 ): Promise<{ skills: Skill[]; registry: ToolRegistry; errors: Array<{ file: string; error: string }> }> {
   const dir = str(args, "skills-dir", ".weave/skills");
   const { skills: loaded, errors } = await loadSkills(dir);
   const useClaude = !opts.fake && Boolean(process.env["ANTHROPIC_API_KEY"]);
   const fallback = useClaude ? await claudeSkill(opts.model) : echoSkill;
   const llmSkills: Skill[] = useClaude ? [await analyzeSkill(opts.model)] : [];
-  const skills: Skill[] = [probeSkill, summarySkill, ...llmSkills, ...loaded, fallback];
+  const skills: Skill[] = [
+    probeSkill,
+    summarySkill,
+    arxivDiscoverSkill,
+    arxivPaperSkill,
+    ...llmSkills,
+    ...loaded,
+    fallback,
+  ];
 
   const registry = new ToolRegistry();
   const seen = new Set<string>();
@@ -124,8 +136,9 @@ async function assembleSkills(
       }
     }
   }
-  // Substrate-bound reduced-context tool (ADR-0013) — registered at composition.
-  if (opts.weave) registry.register(networkStateTool(opts.weave));
+  // Substrate-bound tools (registered at composition; skills can't hold the substrate).
+  if (opts.weave) registry.register(networkStateTool(opts.weave)); // ADR-0013
+  if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // ADR-0008
   return { skills, registry, errors };
 }
 
@@ -151,6 +164,7 @@ async function cmdUp(args: Args): Promise<void> {
     fake,
     model: str(args, "model", "claude-sonnet-4-6"),
     weave,
+    newId: () => randomUUID(),
   });
   for (const e of errors) console.error(`weave: skill load error in ${e.file}: ${e.error}`);
   const router = new SkillRouterWorker(skills);
@@ -327,6 +341,79 @@ async function cmdWatch(args: Args): Promise<void> {
   await peer.start(ac.signal);
 }
 
+async function cmdLoop(args: Args): Promise<void> {
+  const skill = str(args, "skill", "");
+  if (!skill) {
+    console.error('weave loop: --skill <name> required, e.g. weave loop --skill arxiv --interval 6h "large language models"');
+    process.exitCode = 1;
+    return;
+  }
+  const weave = await openSubstrate(args);
+  const newId = () => randomUUID();
+  const agentId = str(args, "agent", `loop-${randomUUID().slice(0, 8)}`);
+  const goal = args._.join(" ").trim() || skill;
+  const interval = str(args, "interval", "30s");
+  const once = has(args, "once");
+
+  const { skills, registry, errors } = await assembleSkills(args, {
+    fake: has(args, "fake"),
+    model: str(args, "model", "claude-sonnet-4-6"),
+    weave,
+    newId,
+  });
+  for (const e of errors) console.error(`weave: skill load error in ${e.file}: ${e.error}`);
+
+  const peer = createPeer({
+    weave,
+    cfg: {
+      agentId,
+      grant: { tools: "*", maxEffect: "irreversible" },
+      leaseMs: num(args, "lease-ms", 60_000),
+      maxConcurrent: num(args, "concurrency", 4),
+      tickMs: num(args, "tick-ms", 2_000),
+    },
+    newWorker: () => new SkillRouterWorker(skills),
+    registry,
+    clock: systemClock,
+    newId,
+  });
+
+  const inputs: Record<string, unknown> = {};
+  if (has(args, "feed")) inputs["feedUrl"] = str(args, "feed", "");
+  if (has(args, "max")) inputs["max"] = num(args, "max", 10);
+  inputs["query"] = str(args, "query", goal);
+
+  const tick = async (): Promise<void> => {
+    const spec: { goal: string; skill: string; inputs?: Record<string, unknown> } = { goal, skill };
+    if (Object.keys(inputs).length > 0) spec.inputs = inputs;
+    await declareTask(weave, newId, agentId, `${skill}-${randomUUID().slice(0, 8)}`, spec);
+  };
+
+  console.log(`weave: loop "${skill}" every ${interval}${once ? " (once)" : ""} — ${goal}`);
+  weave.subscribe((await weave.head()) + 1, (e) => {
+    if (e.kind !== TaskKind.Completed && e.kind !== TaskKind.Failed) return;
+    const p = e.payload as { summary?: string; error?: string };
+    console.log(`    ${e.actor.padEnd(14)} ${p.summary ?? p.error ?? e.subject}`);
+  });
+
+  const ac = new AbortController();
+  const keepAlive = setInterval(() => {}, 1 << 30);
+  const loop = new LoopRunner(new SystemTimer(), tick, parseDuration(interval), once);
+  const shutdown = () => {
+    clearInterval(keepAlive);
+    loop.stop();
+    ac.abort();
+    void peer.stop().then(() => {
+      weave.close();
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  await loop.start();
+  await peer.start(ac.signal);
+}
+
 async function cmdSkills(args: Args): Promise<void> {
   const { skills, errors } = await assembleSkills(args, {
     fake: has(args, "fake"),
@@ -407,6 +494,9 @@ usage:
   weave watch <target...> [--interval 30s] [--expect 200] [--once]
                   [--compact-every N] [--db <path>] [--agent <id>] [--concurrency N]
                   loop: interrogate targets repeatedly (read-only http_probe); flags drift
+  weave loop --skill <name> [--interval 6h] [--once] [--feed URL] [--max N] [goal...]
+                  first-class loop: re-declare a task routed to <skill> each tick
+                  (e.g. weave loop --skill arxiv --interval 6h "large language models")
   weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
   weave summary   [--db <path>]   reduced network state: one line per target + rollup
   weave skills    [--skills-dir <dir>] [--fake]
@@ -427,6 +517,8 @@ async function main(): Promise<void> {
       return cmdUp(args);
     case "watch":
       return cmdWatch(args);
+    case "loop":
+      return cmdLoop(args);
     case "skills":
       return cmdSkills(args);
     case "compact":
