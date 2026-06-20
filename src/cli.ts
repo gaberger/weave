@@ -22,8 +22,10 @@ import { registerHttpProbe } from "./adapters/secondary/http-probe-tool.js";
 import { ProbeWorker } from "./adapters/secondary/probe-worker.js";
 import type { Skill } from "./ports/skill.js";
 import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
-import { probeSkill, echoSkill, claudeSkill } from "./adapters/secondary/builtin-skills.js";
+import { probeSkill, summarySkill, echoSkill, claudeSkill } from "./adapters/secondary/builtin-skills.js";
 import { loadSkills } from "./adapters/secondary/skill-loader.js";
+import { networkStateTool } from "./adapters/secondary/network-state-tool.js";
+import { reduceContext } from "./domain/context.js";
 
 const DEFAULT_DB = ".weave/weave.db";
 
@@ -103,13 +105,13 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
  *  is present and not --fake, else echo), plus a ToolRegistry holding every skill's tools. */
 async function assembleSkills(
   args: Args,
-  opts: { fake: boolean; model: string },
+  opts: { fake: boolean; model: string; weave?: Substrate },
 ): Promise<{ skills: Skill[]; registry: ToolRegistry; errors: Array<{ file: string; error: string }> }> {
   const dir = str(args, "skills-dir", ".weave/skills");
   const { skills: loaded, errors } = await loadSkills(dir);
   const fallback =
     !opts.fake && process.env["ANTHROPIC_API_KEY"] ? await claudeSkill(opts.model) : echoSkill;
-  const skills: Skill[] = [probeSkill, ...loaded, fallback];
+  const skills: Skill[] = [probeSkill, summarySkill, ...loaded, fallback];
 
   const registry = new ToolRegistry();
   const seen = new Set<string>();
@@ -121,6 +123,8 @@ async function assembleSkills(
       }
     }
   }
+  // Substrate-bound reduced-context tool (ADR-0013) — registered at composition.
+  if (opts.weave) registry.register(networkStateTool(opts.weave));
   return { skills, registry, errors };
 }
 
@@ -145,6 +149,7 @@ async function cmdUp(args: Args): Promise<void> {
   const { skills, registry, errors } = await assembleSkills(args, {
     fake,
     model: str(args, "model", "claude-sonnet-4-6"),
+    weave,
   });
   for (const e of errors) console.error(`weave: skill load error in ${e.file}: ${e.error}`);
   const router = new SkillRouterWorker(skills);
@@ -172,9 +177,24 @@ async function cmdUp(args: Args): Promise<void> {
   // keep a test process alive), and start()'s promise alone doesn't keep Node running. This
   // ref'd timer makes `up` a real daemon until SIGINT.
   const keepAlive = setInterval(() => {}, 1 << 30);
+
+  // Optional auto-compaction so a long-running peer self-bounds (ADR-0013 §4). Safe: only
+  // settled subjects are folded/pruned; in-flight ones are retained.
+  const compactSecs = has(args, "compact-secs") ? Math.max(5, num(args, "compact-secs", 60)) : 0;
+  let compactTimer: ReturnType<typeof setInterval> | undefined;
+  if (compactSecs > 0) {
+    compactTimer = setInterval(() => {
+      void compactWeave(weave, () => randomUUID(), agentId).then((r) => {
+        if (r.pruned > 0) console.log(`weave: auto-compacted (folded ${r.settled}, pruned ${r.pruned})`);
+      });
+    }, compactSecs * 1000);
+    if (typeof compactTimer.unref === "function") compactTimer.unref();
+  }
+
   const shutdown = () => {
     console.log("\nweave: shutting down…");
     clearInterval(keepAlive);
+    if (compactTimer) clearInterval(compactTimer);
     ac.abort();
     void peer.stop().then(() => {
       weave.close();
@@ -332,6 +352,18 @@ async function cmdCompact(args: Args): Promise<void> {
   weave.close();
 }
 
+async function cmdSummary(args: Args): Promise<void> {
+  const weave = await openSubstrate(args);
+  const events: SealedEvent[] = [];
+  for await (const e of weave.read(0)) events.push(e);
+  const r = reduceContext(events);
+  console.log(
+    `network: ${r.totals.healthy}/${r.totals.targets} healthy, ${r.totals.unhealthy} unhealthy, ${r.totals.unreachable} unreachable, ${r.totals.violations} violations`,
+  );
+  for (const t of r.targets) console.log(`  ${t.tag.padEnd(16)} ${String(t.status).padStart(3)}  ${t.target}`);
+  weave.close();
+}
+
 async function cmdStatus(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events = await readAll(weave);
@@ -370,11 +402,12 @@ function usage(): void {
 
 usage:
   weave up        [--db <path>] [--agent <id>] [--model <m>] [--fake]
-                  [--concurrency N] [--lease-ms N] [--tick-ms N]
+                  [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
   weave watch <target...> [--interval 30s] [--expect 200] [--once]
                   [--compact-every N] [--db <path>] [--agent <id>] [--concurrency N]
                   loop: interrogate targets repeatedly (read-only http_probe); flags drift
   weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
+  weave summary   [--db <path>]   reduced network state: one line per target + rollup
   weave skills    [--skills-dir <dir>] [--fake]
                   list loaded skills (built-in + plugins from .weave/skills/)
   weave task <goal...>   [--db <path>] [--id <taskId>] [--skill <name>]
@@ -397,6 +430,8 @@ async function main(): Promise<void> {
       return cmdSkills(args);
     case "compact":
       return cmdCompact(args);
+    case "summary":
+      return cmdSummary(args);
     case "task":
       return cmdTask(args);
     case "status":

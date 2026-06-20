@@ -141,8 +141,25 @@ weave: compacted — folded 5 settled subject(s), retained 1 target finding(s); 
 ```
 
 Projections (`status`, claim resolution) are snapshot-aware, so reads stay correct and cheap
-after compaction. This is the first layer of context reduction; feeding a reduced snapshot
-view to an LLM analysis skill (the hex L1/L2/L3 analogue) is the next.
+after compaction.
+
+**Reduced context (layer 2, ADR-0013).** `reduceContext` folds the log to one current entry
+per target — what a skill or LLM should see instead of raw history (the hex L1/L2/L3 analogue):
+
+```bash
+weave summary                     # human view of the reduced state
+weave up --compact-secs 300       # long-running peer self-bounds (auto-compaction)
+```
+
+```
+network: 1/2 healthy, 0 unhealthy, 1 unreachable, 0 violations
+  OK            200  https://api.example.com/health
+  UNREACHABLE     0  10.0.0.1
+```
+
+A read-effect `network_state` tool exposes this to skills, so the built-in `summary` skill —
+and the `claude` agent — reason over the reduced view, not megabytes of events. It reads the
+same before and after compaction.
 
 ## Running a real Claude worker
 
