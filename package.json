@@ -7,10 +7,15 @@
   "engines": {
     "node": ">=18.17"
   },
+  "bin": {
+    "weave": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:bin": "bun build src/cli.ts --compile --outfile weave",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test $(find src -name '*.test.ts')"
+    "test": "node --import tsx --test $(find src -name '*.test.ts')",
+    "weave": "node --import tsx src/cli.ts"
   },
   "comments": {
     "dependencies": "claude-agent-sdk + zod are used ONLY by src/adapters/secondary/claude-sdk.ts (the real Worker backend); the domain/ports/usecases and all other adapters have no LLM dependency. better-sqlite3 backs SqliteSubstrate."

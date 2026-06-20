@@ -23,6 +23,25 @@ How far you scale is an **adapter choice**, not a rewrite. That is the core bet,
 3. **Spec & ADR first.** Decisions are recorded before code (inherited from hex).
 4. **Hexagonal core.** `domain → ports → usecases → adapters`; adapters never import adapters.
 
+## CLI
+
+A hex/pi-style command line (ADR-0010). During dev, run via Node:
+
+```bash
+npm run weave -- task "summarize the README"   # declare work (shared SQLite at .weave/weave.db)
+npm run weave -- up --fake                      # start a peer; --fake = no API key needed
+npm run weave -- status                         # task states: free / held / done
+npm run weave -- log --follow                   # tail the event log
+```
+
+`up` defaults to the Claude worker (needs `ANTHROPIC_API_KEY`); `--fake` runs an offline
+no-LLM worker so the loop is demoable. `up` and `task` coordinate across separate terminals
+via the file-backed SQLite substrate.
+
+**Single binary (Bun):** `bun build src/cli.ts --compile --outfile weave` → `./weave up`.
+*Not yet verified in CI* (Bun-compile of the native `better-sqlite3` / SDK deps is a
+documented follow-up; see ADR-0010 — a `bun:sqlite` substrate is the native-free path).
+
 ## Running a real Claude worker
 
 The coordination core is LLM-free and fully tested with fakes. To run actual Claude
