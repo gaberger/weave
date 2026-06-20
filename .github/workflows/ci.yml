@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  node:
+    name: typecheck · tests · hex doctor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Tests (node) — includes the strict architecture gate
+        run: npm test
+      - name: weave doctor (hex architecture, strict)
+        run: node --import tsx src/cli.ts doctor
+
+  bun:
+    name: bun tests · single-binary build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci # node_modules needed for `bun build` to bundle deps
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Tests (bun) — bun:sqlite substrate
+        run: npm run test:bun
+      - name: Build single binary
+        run: npm run build:bin
+      - name: Binary smoke — runs standalone, composition modules bundled
+        run: ./weave skills --fake
