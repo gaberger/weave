@@ -7,7 +7,7 @@ import type { Clock } from "../domain/clock.js";
 import type { Grant } from "../domain/grant.js";
 import type { AgentId, TaskId } from "../domain/ids.js";
 import type { SealedEvent } from "../domain/event.js";
-import { currentHolder } from "../domain/claim.js";
+import { currentHolder, isSettled } from "../domain/claim.js";
 import {
   TaskKind,
   type TaskSpec,
@@ -133,7 +133,12 @@ export class PeerLoop {
           if (this.stopping) break;
           if (this.active.size >= this.cfg.maxConcurrent) break;
           if (this.active.has(taskId) || this.done.has(taskId)) continue;
-          const holder = currentHolder(await this.snapshot(), taskId, this.deps.clock.now());
+          // Decide from the authoritative log, not the subscribe stream — a substrate may
+          // deliver subscriptions lazily (e.g. SqliteSubstrate polls), so the in-memory
+          // `done` set can lag. `isSettled` prevents re-running a completed task.
+          const snap = await this.snapshot();
+          if (isSettled(snap, taskId)) continue; // terminal — never re-run
+          const holder = currentHolder(snap, taskId, this.deps.clock.now());
           if (holder !== null) continue; // someone holds it
           await this.tryClaim(taskId, spec);
         }
@@ -154,10 +159,14 @@ export class PeerLoop {
       payload: { leaseMs: this.cfg.leaseMs },
     });
 
-    const holder = currentHolder(await this.snapshot(), taskId, this.deps.clock.now());
+    const snap = await this.snapshot();
+    const holder = currentHolder(snap, taskId, this.deps.clock.now());
     const won =
-      holder !== null && holder.agentId === this.cfg.agentId && holder.claimSeq === claim.seq;
-    if (!won) return; // lost the race; our claim event is inert
+      !isSettled(snap, taskId) &&
+      holder !== null &&
+      holder.agentId === this.cfg.agentId &&
+      holder.claimSeq === claim.seq;
+    if (!won) return; // lost the race or already settled; our claim event is inert
 
     const lease = this.deps.newLease(taskId, claim.seq);
     const abort = new AbortController();

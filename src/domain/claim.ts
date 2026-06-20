@@ -70,3 +70,18 @@ export function currentHolder(
   if (holder !== null && holder.leaseUntil < now) return null;
   return holder;
 }
+
+/**
+ * Whether `subject` has reached a terminal outcome (`task.completed`/`task.failed`) and
+ * must never be re-run. Distinct from `currentHolder() === null`, which also covers
+ * never-claimed and *reclaimable* (released/expired) tasks. Computed from the log so it
+ * is correct regardless of how/when a substrate delivers subscriptions (ADR-0002 §3.1).
+ */
+export function isSettled(events: readonly SealedEvent[], subject: string): boolean {
+  for (const e of events) {
+    if (e.subject === subject && (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed)) {
+      return true;
+    }
+  }
+  return false;
+}
