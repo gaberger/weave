@@ -220,6 +220,21 @@ peer.start(new AbortController().signal);
 Needs `ANTHROPIC_API_KEY`. The live smoke test (`claude-sdk.live.test.ts`) exercises this
 end-to-end and is skipped automatically when the key is absent.
 
+## Architecture enforcement
+
+The hex boundaries are a **build gate**, not a hope (ADR-0015):
+
+```bash
+weave doctor            # fails if any layer imports outward, or a relative import lacks .js
+weave doctor --strict   # also flags adapter→adapter (the textbook rule weave relaxes)
+```
+
+`checkArchitecture` (pure, in `domain/`) enforces the dependency cone: `domain → ports →
+usecases → adapters`, only the composition root (`composition-root.ts`, `cli.ts`) wires
+adapters, and inner layers never import outward. It runs in `npm test`, so a violation fails
+CI. weave deliberately permits adapter→adapter (skills/tools compose sub-adapters, ADR-0012);
+`--strict` makes that deviation visible and measurable.
+
 ## Layout
 
 ```

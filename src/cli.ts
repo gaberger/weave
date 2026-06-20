@@ -30,6 +30,8 @@ import { arxivDiscoverSkill, arxivPaperSkill } from "./adapters/secondary/arxiv-
 import { reduceContext } from "./domain/context.js";
 import { LoopRunner } from "./usecases/loop.js";
 import { SystemTimer } from "./adapters/secondary/system-timer.js";
+import { checkArchitecture } from "./domain/architecture.js";
+import { scanSourceFiles } from "./adapters/secondary/source-scan.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { notifyTool } from "./adapters/secondary/notify-tool.js";
 
@@ -467,6 +469,19 @@ async function cmdCompact(args: Args): Promise<void> {
   weave.close();
 }
 
+function cmdDoctor(args: Args): void {
+  const dir = str(args, "src", "src");
+  const files = scanSourceFiles(dir);
+  const violations = checkArchitecture(files, { strict: has(args, "strict") });
+  if (violations.length === 0) {
+    console.log(`weave doctor: hex architecture OK — ${files.length} files${has(args, "strict") ? " (strict)" : ""}`);
+    return;
+  }
+  console.error(`weave doctor: ${violations.length} violation(s)${has(args, "strict") ? " (strict)" : ""}:`);
+  for (const v of violations) console.error(`  ${v.file} -> ${v.importPath}: ${v.reason}`);
+  process.exitCode = 1;
+}
+
 async function cmdNotify(args: Args): Promise<void> {
   const text = args._.join(" ").trim();
   if (!text) {
@@ -556,6 +571,7 @@ usage:
   weave task <goal...>   [--db <path>] [--id <taskId>] [--skill <name>]
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
+  weave doctor    [--strict] [--src <dir>]   check hex architecture boundaries
   weave help
 
 default db: ${DEFAULT_DB}   (Claude worker needs ANTHROPIC_API_KEY; use --fake to demo offline)`);
@@ -579,6 +595,8 @@ async function main(): Promise<void> {
       return cmdSummary(args);
     case "notify":
       return cmdNotify(args);
+    case "doctor":
+      return cmdDoctor(args);
     case "task":
       return cmdTask(args);
     case "status":
