@@ -393,6 +393,25 @@ async function cmdNotify(args: Args): Promise<void> {
   console.log(`weave: notified ${sent}/${channels.length} channel(s): ${channels.map((c) => c.name).join(", ")}`);
 }
 
+async function cmdReport(args: Args): Promise<void> {
+  const weave = await openSubstrate(args);
+  const events = await readAll(weave);
+  const full = has(args, "full");
+  let shown = 0;
+  for (const e of events) {
+    if (e.kind !== TaskKind.Completed && e.kind !== TaskKind.Failed) continue;
+    const p = e.payload as { summary?: string; error?: string };
+    const text = (p.summary ?? p.error ?? "").trim();
+    if (!text) continue;
+    shown += 1;
+    const mark = e.kind === TaskKind.Failed ? "✗" : "✓";
+    console.log(`\n${mark} ${e.subject} (${e.actor})`);
+    console.log(full || text.length <= 800 ? text : `${text.slice(0, 800)}\n  …(${text.length} chars; --full for all)`);
+  }
+  if (shown === 0) console.log("weave: no results yet");
+  weave.close();
+}
+
 async function cmdStatus(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events = await readAll(weave);
@@ -439,6 +458,7 @@ usage:
   weave skills    [--skills-dir <dir>] [--fake]   list code + declarative skills
   weave notify <text...> [--to slack,telegram,email] [--title T]
   weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
+  weave report    [--db <path>] [--full]   print completed task results (the actual output)
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
@@ -466,6 +486,8 @@ async function main(): Promise<void> {
       return cmdDoctor(args);
     case "task":
       return cmdTask(args);
+    case "report":
+      return cmdReport(args);
     case "status":
       return cmdStatus(args);
     case "log":
