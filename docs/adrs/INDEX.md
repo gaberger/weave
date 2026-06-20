@@ -4,6 +4,7 @@ Append-only log of architectural decisions for `weave`. Newest at top.
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
+| [0005](ADR-0005-peer-loop-usecase.md) | The peer loop (agent runtime use-case) | Proposed | 2026-06-19 |
 | [0004](ADR-0004-toolhost-capability-model.md) | ToolHost capability & effect model | Proposed | 2026-06-19 |
 | [0003](ADR-0003-worker-port-and-claude-sdk-adapter.md) | Worker port & Claude Agent SDK adapter | Proposed | 2026-06-19 |
 | [0002](ADR-0002-substrate-port-and-claim-protocol.md) | Substrate port & claim/lease protocol | Proposed | 2026-06-19 |
