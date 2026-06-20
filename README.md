@@ -142,10 +142,29 @@ weave compact                # one-shot fold + prune
 weave up --compact-secs 300  # long-running peer self-bounds
 ```
 
-## Running a real Claude worker
+## LLM backends (API key optional)
+
+Agent skills run on whichever backend the CLI detects:
+
+| backend | when | auth |
+|---|---|---|
+| **Claude SDK** | `ANTHROPIC_API_KEY` is set | API key |
+| **`claude -p` CLI** | no key, but `claude` is on PATH | your Claude Code login — **no key** |
+| **echo** | `--fake`, or neither available | none (offline) |
+
+So you can run real agents on a Claude Code subscription with no API key:
+
+```bash
+weave loop --skill researcher "mixture of experts language models" --once   # uses claude -p
+```
+
+`up`/`skills` print the chosen backend (`[llm: claude-cli]`). The `claude -p` worker uses
+Claude Code's own (read-only) tools; the SDK worker uses weave's gated ToolHost.
+
+## Running a real Claude worker (SDK)
 
 The coordination core is LLM-free and fully tested with fakes. To run actual Claude
-workers, wire the SDK-backed factory into a peer (the only place the SDK is touched):
+workers via the SDK, wire the SDK-backed factory into a peer (the only place the SDK is touched):
 
 ```ts
 import { createPeer } from "weave/composition-root.js";
