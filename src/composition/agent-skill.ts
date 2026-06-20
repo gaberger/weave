@@ -70,16 +70,16 @@ export function parseSkillDef(text: string): AgentSkillDef | null {
   };
 }
 
-/** Load declarative agent skills (*.md / *.json) from a dir, each wired to a Claude worker
- *  whose system prompt is the def's prompt. Missing dir → none. Needs an API key at run. */
-export async function loadAgentSkills(dir: string, model?: string): Promise<Skill[]> {
+/** Load declarative agent skills (*.md / *.json) from a dir. Each def's prompt becomes the
+ *  system prompt of an LLM Worker built by `make` — so the backend (Claude SDK or `claude -p`
+ *  CLI) is the composition's choice, not baked in here. Missing dir → none. */
+export function loadAgentSkills(dir: string, make: (systemPrompt: string) => Worker): Skill[] {
   let files: string[];
   try {
     files = readdirSync(dir);
   } catch {
     return [];
   }
-  const { createClaudeWorkerFactory } = await import("./claude-sdk.js");
   const out: Skill[] = [];
   for (const f of files) {
     const ext = extname(f);
@@ -96,8 +96,7 @@ export async function loadAgentSkills(dir: string, model?: string): Promise<Skil
       def = parseSkillDef(text);
     }
     if (!def || !def.name || !def.prompt) continue;
-    const worker = createClaudeWorkerFactory({ ...(model ? { model } : {}), systemPrompt: def.prompt })();
-    out.push(makeAgentSkill(def, worker));
+    out.push(makeAgentSkill(def, make(def.prompt)));
   }
   return out;
 }

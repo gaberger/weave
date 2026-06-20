@@ -8,8 +8,10 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import type { Substrate } from "./ports/substrate.js";
+import type { Worker } from "./ports/worker.js";
 import type { SealedEvent } from "./domain/event.js";
 import { systemClock } from "./domain/clock.js";
 import { TaskKind, type DeclaredPayload } from "./domain/task.js";
@@ -28,6 +30,7 @@ import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
+import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { echoSkill, claudeSkill } from "./composition/builtin-skills.js";
 import { loadAgentSkills } from "./composition/agent-skill.js";
 import { notifyTool } from "./composition/notify-tool.js";
@@ -39,6 +42,9 @@ interface Args {
   readonly flags: Map<string, string | boolean>;
 }
 
+/** Flags that never take a value (so they don't greedily consume the next positional arg). */
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help"]);
+
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
   const flags = new Map<string, string | boolean>();
@@ -47,7 +53,7 @@ function parseArgs(argv: string[]): Args {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) {
         flags.set(key, next);
         i++;
       } else {
@@ -120,21 +126,47 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
   return new mod.SqliteSubstrate(opts);
 }
 
+function claudeCliAvailable(): boolean {
+  try {
+    return spawnSync("claude", ["--version"], { timeout: 5000, stdio: "ignore" }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Choose the LLM Worker backend (ADR-0003): Claude SDK if ANTHROPIC_API_KEY is set, else the
+ *  `claude -p` CLI (Claude Code login, no key), else none. `--fake` forces none. */
+async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) => Worker } | null> {
+  if (has(args, "fake")) return null;
+  const model = str(args, "model", "claude-sonnet-4-6");
+  if (process.env["ANTHROPIC_API_KEY"]) {
+    const { createClaudeWorkerFactory } = await import("./composition/claude-sdk.js");
+    return { kind: "claude-sdk", make: (sp) => createClaudeWorkerFactory({ model, ...(sp ? { systemPrompt: sp } : {}) })() };
+  }
+  if (claudeCliAvailable()) {
+    return {
+      kind: "claude-cli",
+      make: (sp) => new ClaudeCliWorker({ model, ...(sp ? { systemPrompt: sp } : {}), allowedTools: ["WebFetch", "WebSearch", "Read"] }),
+    };
+  }
+  return null;
+}
+
 /**
  * Assemble the skill set + tool registry (ADR-0012/0016) — all generic:
  *  - code-skill plugins (.js/.ts) + declarative agent-skill plugins (.md/.json) from the dir
- *  - fallback: claude (general agent, if a key is set) else echo (offline)
+ *  - fallback: claude (general agent, via SDK or `claude -p` CLI) else echo (offline)
  *  - generic tools: http_fetch, spawn_task, notify. No domain logic in the harness.
  */
 async function assembleSkills(
   args: Args,
   opts: { fake: boolean; model: string; weave?: Substrate; newId?: () => string },
-): Promise<{ skills: Skill[]; registry: ToolRegistry; errors: Array<{ file: string; error: string }> }> {
+): Promise<{ skills: Skill[]; registry: ToolRegistry; backend: string; errors: Array<{ file: string; error: string }> }> {
   const dir = str(args, "skills-dir", ".weave/skills");
   const { skills: codeSkills, errors } = await loadSkills(dir);
-  const useClaude = !opts.fake && Boolean(process.env["ANTHROPIC_API_KEY"]);
-  const agentSkills = useClaude ? await loadAgentSkills(dir, opts.model) : [];
-  const fallback = useClaude ? await claudeSkill(opts.model) : echoSkill;
+  const llm = await pickLlm(args);
+  const agentSkills = llm ? loadAgentSkills(dir, llm.make) : [];
+  const fallback = llm ? claudeSkill(llm.make) : echoSkill;
   const skills: Skill[] = [...codeSkills, ...agentSkills, fallback];
 
   const registry = new ToolRegistry();
@@ -142,7 +174,7 @@ async function assembleSkills(
   registry.register(httpFetchTool); // generic HTTP capability
   if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // fan-out
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
-  return { skills, registry, errors };
+  return { skills, registry, backend: llm?.kind ?? "none", errors };
 }
 
 const fmt = (e: SealedEvent): string =>
@@ -159,7 +191,7 @@ async function readAll(weave: Substrate): Promise<SealedEvent[]> {
 async function cmdUp(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
-  const { skills, registry, errors } = await assembleSkills(args, {
+  const { skills, registry, backend, errors } = await assembleSkills(args, {
     fake: has(args, "fake"),
     model: str(args, "model", "claude-sonnet-4-6"),
     weave,
@@ -183,7 +215,7 @@ async function cmdUp(args: Args): Promise<void> {
     newId: () => randomUUID(),
   });
 
-  console.log(`weave: peer "${agentId}" up on ${str(args, "db", DEFAULT_DB)} — skills: ${skills.map((s) => s.name).join(", ")}`);
+  console.log(`weave: peer "${agentId}" up on ${str(args, "db", DEFAULT_DB)} [llm: ${backend}] — skills: ${skills.map((s) => s.name).join(", ")}`);
   weave.subscribe(0, (e) => console.log(fmt(e)));
 
   const ac = new AbortController();
@@ -301,12 +333,12 @@ async function cmdLoop(args: Args): Promise<void> {
 }
 
 async function cmdSkills(args: Args): Promise<void> {
-  const { skills, errors } = await assembleSkills(args, {
+  const { skills, backend, errors } = await assembleSkills(args, {
     fake: has(args, "fake"),
     model: str(args, "model", "claude-sonnet-4-6"),
   });
   for (const e of errors) console.error(`  ! ${e.file}: ${e.error}`);
-  console.log(`weave skills (${skills.length}) — from .weave/skills/ + built-in:`);
+  console.log(`weave skills (${skills.length}) [llm: ${backend}] — from .weave/skills/ + built-in:`);
   for (const s of skills) {
     const tools = (s.tools ?? []).map((t) => t.name).join(", ");
     console.log(`  ${s.name.padEnd(14)} ${s.description}${tools ? `  [tools: ${tools}]` : ""}`);

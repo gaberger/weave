@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { LeaseGuard } from "../ports/lease.js";
-import type { WorkerContext } from "../ports/worker.js";
+import type { Worker, WorkerContext } from "../ports/worker.js";
 import { FakeClock } from "../domain/clock.js";
 import { InProcessSubstrate } from "../adapters/secondary/in-process-substrate.js";
 import { ToolRegistry } from "../adapters/secondary/in-memory-tool-host.js";
@@ -26,8 +26,9 @@ test("every example .md plugin parses into a valid agent-skill def", () => {
   }
 });
 
-test("loadAgentSkills wires the example plugins (researcher + monitor)", async () => {
-  const skills = await loadAgentSkills(PLUGINS);
+test("loadAgentSkills wires the example plugins (researcher + monitor)", () => {
+  const stub: Worker = { run: async () => ({ status: "completed", summary: "" }) };
+  const skills = loadAgentSkills(PLUGINS, () => stub);
   const names = skills.map((s) => s.name).sort();
   assert.deepEqual(names, ["monitor", "researcher"]);
   const researcher = skills.find((s) => s.name === "researcher");
@@ -48,7 +49,9 @@ test(
       .register(httpFetchTool)
       .register(spawnTaskTool(weave, () => `id-${Math.random()}`))
       .register(notifyTool([]));
-    const researcher = (await loadAgentSkills(PLUGINS)).find((s) => s.name === "researcher");
+    const { createClaudeWorkerFactory } = await import("./claude-sdk.js");
+    const make = (sp?: string) => createClaudeWorkerFactory(sp !== undefined ? { systemPrompt: sp } : {})();
+    const researcher = loadAgentSkills(PLUGINS, make).find((s) => s.name === "researcher");
     assert.ok(researcher);
 
     const ctx: WorkerContext = {
