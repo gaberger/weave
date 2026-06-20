@@ -1,5 +1,6 @@
 import type { SealedEvent } from "./event.js";
 import { compareHlc } from "./hlc.js";
+import { settledSubjects } from "./snapshot.js";
 import { TaskKind, type LeasePayload } from "./task.js";
 
 /** Global order between two events: HLC when both carry it (multi-writer; ADR-0009),
@@ -35,6 +36,10 @@ export function currentHolder(
   subject: string,
   now: number,
 ): Holder | null {
+  // A subject folded into a snapshot as settled is terminal even if its raw terminal
+  // event was pruned (ADR-0007 §2).
+  if (settledSubjects(events).has(subject)) return null;
+
   const ev = events
     .filter((e) => e.subject === subject)
     .sort(compareOrder);
@@ -87,10 +92,5 @@ export function currentHolder(
  * is correct regardless of how/when a substrate delivers subscriptions (ADR-0002 §3.1).
  */
 export function isSettled(events: readonly SealedEvent[], subject: string): boolean {
-  for (const e of events) {
-    if (e.subject === subject && (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed)) {
-      return true;
-    }
-  }
-  return false;
+  return settledSubjects(events).has(subject); // includes snapshot-folded subjects (ADR-0007)
 }

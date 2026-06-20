@@ -28,3 +28,13 @@ export interface Substrate {
   /** seq of the latest event, or 0 if empty. */
   head(): Promise<Offset>;
 }
+
+/** Substrates that can shrink their log (ADR-0007). Compaction prunes folded events:
+ *  those with seq <= beforeSeq whose subject is not in keepSubjects. */
+export interface PrunableSubstrate extends Substrate {
+  prune(beforeSeq: Offset, keepSubjects: ReadonlySet<string>): Promise<number>;
+}
+
+export function isPrunable(s: Substrate): s is PrunableSubstrate {
+  return typeof (s as Partial<PrunableSubstrate>).prune === "function";
+}

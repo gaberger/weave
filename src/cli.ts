@@ -14,6 +14,8 @@ import { systemClock } from "./domain/clock.js";
 import { TaskKind, type DeclaredPayload } from "./domain/task.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
+import { compactWeave } from "./usecases/compaction.js";
+import { diffFinding, type ProbeFinding } from "./domain/interrogation.js";
 import { createPeer } from "./composition-root.js";
 import { ToolRegistry } from "./adapters/secondary/in-memory-tool-host.js";
 import { registerHttpProbe } from "./adapters/secondary/http-probe-tool.js";
@@ -266,16 +268,41 @@ async function cmdWatch(args: Args): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
+  const lastByTarget = new Map<string, ProbeFinding>();
   let remaining = once ? targets.length : Number.POSITIVE_INFINITY;
   weave.subscribe((await weave.head()) + 1, (e) => {
-    if (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed) {
-      console.log(fmtFinding(e));
-      if (--remaining <= 0) shutdown();
+    if (e.kind !== TaskKind.Completed && e.kind !== TaskKind.Failed) return;
+    console.log(fmtFinding(e));
+    if (e.kind === TaskKind.Completed) {
+      const arts = (e.payload as { artifacts?: Array<{ kind: string; ref: string }> }).artifacts ?? [];
+      for (const a of arts) {
+        if (a.kind !== "probe") continue;
+        try {
+          const f = JSON.parse(a.ref) as ProbeFinding;
+          const d = diffFinding(lastByTarget.get(f.target), f);
+          lastByTarget.set(f.target, f);
+          if (d.changed && d.from !== undefined) console.log(`    ⚠ DRIFT ${d.target}: ${d.note}`);
+        } catch {
+          /* ignore malformed artifact */
+        }
+      }
     }
+    if (--remaining <= 0) shutdown();
   });
 
-  if (!once) ticker = setInterval(() => void sweep(), intervalMs);
-  await sweep();
+  let sweeps = 0;
+  const compactEvery = has(args, "compact-every") ? Math.max(1, num(args, "compact-every", 10)) : 0;
+  const doSweep = async (): Promise<void> => {
+    await sweep();
+    sweeps += 1;
+    if (compactEvery > 0 && sweeps % compactEvery === 0) {
+      const r = await compactWeave(weave, () => randomUUID(), agentId);
+      console.log(`    · compacted: folded ${r.settled}, pruned ${r.pruned} events`);
+    }
+  };
+
+  if (!once) ticker = setInterval(() => void doSweep(), intervalMs);
+  await (once ? sweep() : doSweep());
   await peer.start(ac.signal);
 }
 
@@ -290,6 +317,19 @@ async function cmdSkills(args: Args): Promise<void> {
     const tools = (s.tools ?? []).map((t) => t.name).join(", ");
     console.log(`  ${s.name.padEnd(12)} ${s.description}${tools ? `  [tools: ${tools}]` : ""}`);
   }
+}
+
+async function cmdCompact(args: Args): Promise<void> {
+  const weave = await openSubstrate(args);
+  let before = 0;
+  for await (const _ of weave.read(0)) before += 1;
+  const r = await compactWeave(weave, () => randomUUID(), "compactor");
+  let after = 0;
+  for await (const _ of weave.read(0)) after += 1;
+  console.log(
+    `weave: compacted — folded ${r.settled} settled subject(s), retained ${r.targets} target finding(s); log ${before} → ${after} events (pruned ${r.pruned}).`,
+  );
+  weave.close();
 }
 
 async function cmdStatus(args: Args): Promise<void> {
@@ -332,8 +372,9 @@ usage:
   weave up        [--db <path>] [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N]
   weave watch <target...> [--interval 30s] [--expect 200] [--once]
-                  [--db <path>] [--agent <id>] [--concurrency N]
-                  loop: interrogate targets repeatedly (read-only http_probe)
+                  [--compact-every N] [--db <path>] [--agent <id>] [--concurrency N]
+                  loop: interrogate targets repeatedly (read-only http_probe); flags drift
+  weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
   weave skills    [--skills-dir <dir>] [--fake]
                   list loaded skills (built-in + plugins from .weave/skills/)
   weave task <goal...>   [--db <path>] [--id <taskId>] [--skill <name>]
@@ -354,6 +395,8 @@ async function main(): Promise<void> {
       return cmdWatch(args);
     case "skills":
       return cmdSkills(args);
+    case "compact":
+      return cmdCompact(args);
     case "task":
       return cmdTask(args);
     case "status":

@@ -122,6 +122,27 @@ weave watch https://api.example.com/health 10.0.0.1 --interval 30s --expect 200
   single sweep. Tags: `OK` / `UNHEALTHY(<code>)` / `VIOLATION` / `UNREACHABLE`.
 - Today's interrogation tool is `http_probe` (covers the Forward Networks REST API and most
   controller/NOS endpoints). SSH/SNMP/ping are future tool adapters behind the same shape.
+- **Drift** is flagged inline when a target's status changes between runs
+  (`⚠ DRIFT <target>: OK → UNREACHABLE`).
+
+## Memory & compaction
+
+A loop appends events forever, so the log is compactable (ADR-0007). Compaction folds
+**settled** tasks into a single `weave.snapshot` event (condensation-as-an-event — durable,
+replayable) and prunes the raw events, keeping one finding per target:
+
+```bash
+weave compact                     # one-shot: fold + prune
+weave watch <targets...> --compact-every 20   # auto-compact every 20 sweeps
+```
+
+```
+weave: compacted — folded 5 settled subject(s), retained 1 target finding(s); log 20 → 1 events
+```
+
+Projections (`status`, claim resolution) are snapshot-aware, so reads stay correct and cheap
+after compaction. This is the first layer of context reduction; feeding a reduced snapshot
+view to an LLM analysis skill (the hex L1/L2/L3 analogue) is the next.
 
 ## Running a real Claude worker
 

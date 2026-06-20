@@ -122,6 +122,16 @@ export class BunSqliteSubstrate implements Substrate {
     return m ?? 0;
   }
 
+  /** ADR-0007: delete folded events (seq <= beforeSeq, subject not retained). */
+  async prune(beforeSeq: Offset, keepSubjects: ReadonlySet<string>): Promise<number> {
+    const keep = [...keepSubjects];
+    const placeholders = keep.length > 0 ? keep.map(() => "?").join(",") : "''";
+    const info = this.db
+      .query(`DELETE FROM events WHERE seq <= ? AND subject NOT IN (${placeholders})`)
+      .run(beforeSeq, ...keep);
+    return info.changes;
+  }
+
   close(): void {
     if (this.timer) {
       clearInterval(this.timer);

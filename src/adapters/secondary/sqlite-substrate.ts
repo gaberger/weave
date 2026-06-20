@@ -138,6 +138,16 @@ export class SqliteSubstrate implements Substrate {
     return m ?? 0;
   }
 
+  /** ADR-0007: delete folded events (seq <= beforeSeq, subject not retained). */
+  async prune(beforeSeq: Offset, keepSubjects: ReadonlySet<string>): Promise<number> {
+    const keep = [...keepSubjects];
+    const placeholders = keep.length > 0 ? keep.map(() => "?").join(",") : "''";
+    const info = this.db
+      .prepare(`DELETE FROM events WHERE seq <= ? AND subject NOT IN (${placeholders})`)
+      .run(beforeSeq, ...keep);
+    return info.changes;
+  }
+
   /** Release the DB handle. Not part of the Substrate port; for lifecycle/cleanup. */
   close(): void {
     if (this.timer) {

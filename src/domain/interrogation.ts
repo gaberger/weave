@@ -32,6 +32,29 @@ export function evaluateProbe(result: ProbeResult, expectStatus?: number): Probe
   return expectStatus !== undefined ? { ...base, expectStatus } : base;
 }
 
+/** Drift between a target's previous finding and its current one (ADR-0007 §3). */
+export interface Drift {
+  readonly target: string;
+  readonly changed: boolean;
+  readonly from?: number;
+  readonly to: number;
+  readonly note: string;
+}
+
+export function diffFinding(prev: ProbeFinding | undefined, curr: ProbeFinding): Drift {
+  if (prev === undefined) {
+    return { target: curr.target, changed: true, to: curr.status, note: `new (${findingTag(curr)})` };
+  }
+  const changed = prev.status !== curr.status || prev.ok !== curr.ok;
+  return {
+    target: curr.target,
+    changed,
+    from: prev.status,
+    to: curr.status,
+    note: changed ? `${findingTag(prev)} → ${findingTag(curr)}` : "stable",
+  };
+}
+
 /** Short human tag for a finding. */
 export function findingTag(f: ProbeFinding): string {
   if (f.status === 0) return "UNREACHABLE"; // could not connect

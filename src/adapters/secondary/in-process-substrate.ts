@@ -48,4 +48,15 @@ export class InProcessSubstrate implements Substrate {
   async head(): Promise<Offset> {
     return this.seq;
   }
+
+  /** ADR-0007: drop folded events (seq <= beforeSeq, subject not retained). */
+  async prune(beforeSeq: Offset, keepSubjects: ReadonlySet<string>): Promise<number> {
+    const before = this.log.length;
+    const kept = this.log.filter((e) => e.seq > beforeSeq || keepSubjects.has(e.subject));
+    this.log.length = 0;
+    this.log.push(...kept);
+    this.byId.clear();
+    for (const e of kept) this.byId.set(e.id, e);
+    return before - kept.length;
+  }
 }
