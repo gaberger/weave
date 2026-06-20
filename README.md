@@ -23,6 +23,30 @@ How far you scale is an **adapter choice**, not a rewrite. That is the core bet,
 3. **Spec & ADR first.** Decisions are recorded before code (inherited from hex).
 4. **Hexagonal core.** `domain → ports → usecases → adapters`; adapters never import adapters.
 
+## Running a real Claude worker
+
+The coordination core is LLM-free and fully tested with fakes. To run actual Claude
+workers, wire the SDK-backed factory into a peer (the only place the SDK is touched):
+
+```ts
+import { createPeer } from "weave/composition-root.js";
+import { createClaudeWorkerFactory } from "weave/adapters/secondary/claude-sdk.js";
+import { InProcessSubstrate } from "weave/adapters/secondary/in-process-substrate.js";
+import { systemClock } from "weave/domain/clock.js";
+
+const weave = new InProcessSubstrate(systemClock);
+const peer = createPeer({
+  weave,
+  cfg: { agentId: "peer-1", grant: { tools: "*", maxEffect: "irreversible" },
+         leaseMs: 30_000, maxConcurrent: 2, tickMs: 5_000 },
+  newWorker: createClaudeWorkerFactory({ model: "claude-sonnet-4-6" }),
+});
+peer.start(new AbortController().signal);
+```
+
+Needs `ANTHROPIC_API_KEY`. The live smoke test (`claude-sdk.live.test.ts`) exercises this
+end-to-end and is skipped automatically when the key is absent.
+
 ## Layout
 
 ```

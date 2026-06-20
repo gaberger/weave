@@ -13,7 +13,7 @@
     "test": "node --import tsx --test $(find src -name '*.test.ts')"
   },
   "comments": {
-    "dependencies": "@anthropic-ai/claude-agent-sdk is added in the ADR-0003 Worker-adapter phase; the current code (domain/ports/in-process substrate/fake worker) needs no runtime deps."
+    "dependencies": "claude-agent-sdk + zod are used ONLY by src/adapters/secondary/claude-sdk.ts (the real Worker backend); the domain/ports/usecases and all other adapters have no LLM dependency. better-sqlite3 backs SqliteSubstrate."
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
@@ -22,6 +22,8 @@
     "typescript": "^5.5.0"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1"
+    "@anthropic-ai/claude-agent-sdk": "^0.3.183",
+    "better-sqlite3": "^12.11.1",
+    "zod": "^4.4.3"
   }
 }
