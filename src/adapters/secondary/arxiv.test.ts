@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import type { ToolHost, ToolCall } from "../../ports/tool-host.js";
 import type { LeaseGuard } from "../../ports/lease.js";
 import type { WorkerContext } from "../../ports/worker.js";
-import { parseArxivAtom } from "../../domain/arxiv.js";
+import { parseArxivAtom, arxivFeedUrl } from "../../domain/arxiv.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
 import { httpFetchTool } from "./http-fetch-tool.js";
 import { arxivDiscoverSkill } from "../../composition/arxiv-skills.js";
@@ -38,6 +38,12 @@ test("parseArxivAtom: extracts papers, ids, titles, authors", () => {
   assert.deepEqual(papers[0]?.authors, ["Alice A", "Bob B"]);
   assert.match(papers[0]?.summary ?? "", /scaling & behaviour/);
   assert.equal(papers[1]?.id, "2406.00002v1");
+});
+
+test("arxivFeedUrl uses https (the http endpoint returns empty bodies)", () => {
+  const url = arxivFeedUrl("large language models", 5);
+  assert.match(url, /^https:\/\/export\.arxiv\.org\/api\/query\?/);
+  assert.match(url, /max_results=5/);
 });
 
 test("http_fetch: returns body + status from a real local server", async () => {

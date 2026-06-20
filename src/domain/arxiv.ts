@@ -53,5 +53,5 @@ export function parseArxivAtom(xml: string): Paper[] {
 /** Build the arXiv API query URL for a free-text query. */
 export function arxivFeedUrl(query: string, max: number): string {
   const q = encodeURIComponent(`all:${query}`);
-  return `http://export.arxiv.org/api/query?search_query=${q}&sortBy=submittedDate&sortOrder=descending&max_results=${max}`;
+  return `https://export.arxiv.org/api/query?search_query=${q}&sortBy=submittedDate&sortOrder=descending&max_results=${max}`;
 }
