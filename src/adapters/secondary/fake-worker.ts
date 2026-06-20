@@ -4,6 +4,9 @@ import type { Worker, TaskAssignment, WorkerContext, WorkerResult } from "../../
 export interface FakeScript {
   /** Progress notes emitted before completing. */
   readonly progress?: readonly string[];
+  /** If set, the worker awaits this before the lease check — lets a test hold a worker
+   *  mid-task (e.g. to expire its lease and prove another peer reclaims). */
+  readonly hold?: Promise<unknown>;
   /** Simulate an irreversible step: check the lease before returning `result`. If the
    *  lease is gone, the worker aborts with `lease-lost` instead. */
   readonly checkLeaseBeforeResult?: boolean;
@@ -23,6 +26,8 @@ export class FakeWorker implements Worker {
       }
       ctx.onProgress(note);
     }
+
+    if (this.script.hold) await this.script.hold;
 
     if (this.script.checkLeaseBeforeResult && !(await ctx.lease.held())) {
       return {

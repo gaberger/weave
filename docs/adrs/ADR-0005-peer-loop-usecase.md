@@ -47,8 +47,15 @@ tests — the independent-oracle discipline from the hex lessons.
 
 The loop `subscribe`s to the weave from the current head and maintains an in-memory
 **projection of open tasks** by folding events (ADR-0002 §3.1: a task is open if its
-latest claim is terminal or its lease expired). It does **not** poll. On seeing an open
-task it is permitted to handle, it attempts a claim — subject to `maxConcurrent`.
+latest claim is terminal or its lease expired). On seeing an open task it is permitted to
+handle, it attempts a claim — subject to `maxConcurrent`.
+
+**Refinement (added during implementation):** lease *expiry* is time-based and emits **no
+event**, so a purely event-reactive peer would never notice work freed by a crashed
+holder. The loop therefore also runs a **periodic sweep** on the heartbeat tick
+(`cfg.tickMs`) that re-evaluates open tasks against the current clock. So discovery is
+event-driven for `task.declared`/`task.released` (immediate) **plus** a timer sweep for
+expiries. This is the one place the loop "polls", and only at heartbeat cadence.
 
 ### 3. Claim → run → publish (the core cycle)
 
