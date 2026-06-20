@@ -16,6 +16,9 @@ import { TaskKind, type DeclaredPayload } from "./domain/task.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
 import { createPeer } from "./composition-root.js";
+import { ToolRegistry } from "./adapters/secondary/in-memory-tool-host.js";
+import { registerHttpProbe } from "./adapters/secondary/http-probe-tool.js";
+import { ProbeWorker } from "./adapters/secondary/probe-worker.js";
 
 const DEFAULT_DB = ".weave/weave.db";
 
@@ -54,6 +57,22 @@ const num = (args: Args, key: string, dflt: number): number => {
   return typeof v === "string" ? Number(v) : dflt;
 };
 const has = (args: Args, key: string): boolean => args.flags.has(key);
+
+function parseDuration(s: string): number {
+  const m = /^(\d+)(ms|s|m|h)?$/.exec(s.trim());
+  if (!m) return 30_000;
+  const n = Number(m[1]);
+  switch (m[2] ?? "s") {
+    case "ms":
+      return n;
+    case "m":
+      return n * 60_000;
+    case "h":
+      return n * 3_600_000;
+    default:
+      return n * 1_000;
+  }
+}
 
 type ClosableSubstrate = Substrate & { close(): void };
 
@@ -155,6 +174,85 @@ async function cmdTask(args: Args): Promise<void> {
   weave.close();
 }
 
+async function cmdWatch(args: Args): Promise<void> {
+  const targets = args._;
+  if (targets.length === 0) {
+    console.error("weave watch: provide target(s), e.g. weave watch https://example.com/health --interval 30s --expect 200");
+    process.exitCode = 1;
+    return;
+  }
+  const weave = await openSubstrate(args);
+  const agentId = str(args, "agent", `watcher-${randomUUID().slice(0, 8)}`);
+  const interval = str(args, "interval", "30s");
+  const intervalMs = parseDuration(interval);
+  const expect = has(args, "expect") ? num(args, "expect", 200) : undefined;
+  const once = has(args, "once");
+
+  const registry = registerHttpProbe(new ToolRegistry());
+  const peer = createPeer({
+    weave,
+    cfg: {
+      agentId,
+      grant: { tools: ["http_probe"], maxEffect: "read" }, // read-only interrogation
+      leaseMs: num(args, "lease-ms", 30_000),
+      maxConcurrent: num(args, "concurrency", 4),
+      tickMs: num(args, "tick-ms", 2_000),
+    },
+    newWorker: () => new ProbeWorker(),
+    registry,
+    clock: systemClock,
+    newId: () => randomUUID(),
+  });
+
+  const fmtFinding = (e: SealedEvent): string => {
+    const p = e.payload as { summary?: string; error?: string };
+    const mark = e.kind === TaskKind.Failed ? "ERR " : "    ";
+    return `${mark}${e.actor.padEnd(14)} ${p.summary ?? p.error ?? e.subject}`;
+  };
+
+  const sweep = async (): Promise<void> => {
+    for (const t of targets) {
+      const inputs: Record<string, unknown> = { target: t };
+      if (expect !== undefined) inputs.expectStatus = expect;
+      await declareTask(weave, () => randomUUID(), agentId, `probe-${randomUUID().slice(0, 8)}`, {
+        goal: `probe ${t}`,
+        inputs,
+      });
+    }
+  };
+
+  console.log(
+    `weave: watching ${targets.length} target(s) every ${interval}${expect !== undefined ? ` expecting ${expect}` : ""}${once ? " (once)" : ""} as "${agentId}"`,
+  );
+
+  const ac = new AbortController();
+  const keepAlive = setInterval(() => {}, 1 << 30);
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  const shutdown = () => {
+    clearInterval(keepAlive);
+    if (ticker) clearInterval(ticker);
+    ac.abort();
+    void peer.stop().then(() => {
+      weave.close();
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  let remaining = once ? targets.length : Number.POSITIVE_INFINITY;
+  weave.subscribe((await weave.head()) + 1, (e) => {
+    if (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed) {
+      console.log(fmtFinding(e));
+      if (--remaining <= 0) shutdown();
+    }
+  });
+
+  if (!once) ticker = setInterval(() => void sweep(), intervalMs);
+  await sweep();
+  await peer.start(ac.signal);
+}
+
 async function cmdStatus(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events = await readAll(weave);
@@ -194,6 +292,9 @@ function usage(): void {
 usage:
   weave up        [--db <path>] [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N]
+  weave watch <target...> [--interval 30s] [--expect 200] [--once]
+                  [--db <path>] [--agent <id>] [--concurrency N]
+                  loop: interrogate targets repeatedly (read-only http_probe)
   weave task <goal...>   [--db <path>] [--id <taskId>]
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
@@ -208,6 +309,8 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "up":
       return cmdUp(args);
+    case "watch":
+      return cmdWatch(args);
     case "task":
       return cmdTask(args);
     case "status":

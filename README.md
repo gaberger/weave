@@ -73,6 +73,28 @@ Bun it uses the built-in `bun:sqlite` substrate (zero native addons); under Node
 npm run build:bin && ./weave task "ship it" && ./weave up --fake
 ```
 
+## Interrogate networks on a loop
+
+A peer swarm that repeatedly probes network targets and records findings to the durable log
+(ADR-0011). Read-only, so it's safe to fan out:
+
+```bash
+weave watch https://api.example.com/health 10.0.0.1 --interval 30s --expect 200
+```
+
+```
+    netwatch  https://api.example.com/health OK 200 14ms
+    netwatch  10.0.0.1 UNREACHABLE 0 2ms
+    ...every 30s...
+```
+
+- Each tick re-declares one interrogation task per target; peers claim them exactly once,
+  so adding more `weave watch`/`up` peers spreads the load. Findings persist across restarts.
+- `--expect <status>` turns a probe into an assertion (flags `VIOLATION`); `--once` runs a
+  single sweep. Tags: `OK` / `UNHEALTHY(<code>)` / `VIOLATION` / `UNREACHABLE`.
+- Today's interrogation tool is `http_probe` (covers the Forward Networks REST API and most
+  controller/NOS endpoints). SSH/SNMP/ping are future tool adapters behind the same shape.
+
 ## Running a real Claude worker
 
 The coordination core is LLM-free and fully tested with fakes. To run actual Claude

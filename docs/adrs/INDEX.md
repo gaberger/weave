@@ -4,6 +4,8 @@ Append-only log of architectural decisions for `weave`. Newest at top.
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
+| [0011](ADR-0011-network-interrogation-loop.md) | Recurring network interrogation | Proposed | 2026-06-20 |
+| [0010](ADR-0010-bun-compile-and-cli.md) | Bun compile target + the weave CLI | Proposed | 2026-06-19 |
 | [0009](ADR-0009-networked-substrate.md) | NetworkedSubstrate — replicated log with HLC ordering | Proposed | 2026-06-19 |
 | [0005](ADR-0005-peer-loop-usecase.md) | The peer loop (agent runtime use-case) | Proposed | 2026-06-19 |
 | [0004](ADR-0004-toolhost-capability-model.md) | ToolHost capability & effect model | Proposed | 2026-06-19 |
