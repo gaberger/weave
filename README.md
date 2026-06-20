@@ -73,6 +73,34 @@ Bun it uses the built-in `bun:sqlite` substrate (zero native addons); under Node
 npm run build:bin && ./weave task "ship it" && ./weave up --fake
 ```
 
+## Skills (plugins) — how weave knows what to do
+
+A peer doesn't hardcode behaviour: it loads **skills** and routes each task to the one that
+matches (ADR-0012). A skill declares what it handles and how; built-ins ship in-tree and
+**plugins drop into `.weave/skills/`** with no core change.
+
+```bash
+weave skills                      # list loaded skills (built-in + plugins)
+weave task --skill shout "shout hello"   # route explicitly...
+weave task "probe https://x/health"      # ...or let predicates route it (→ probe skill)
+```
+
+A plugin is a module that default-exports a skill (see [`examples/skills/shout.mjs`](examples/skills/shout.mjs)):
+
+```js
+export default {
+  name: "shout",
+  description: "Echo the goal in UPPERCASE",
+  match: (task) => task.spec.goal.startsWith("shout "),
+  async run(task) { return { status: "completed", summary: task.spec.goal.toUpperCase() }; },
+  // optional: tools: [ { name, description, effect, execute } ]  ← contributed to the ToolHost
+};
+```
+
+Routing: explicit `--skill` → first skill whose `match()` is true → otherwise `failed`
+(weave says, honestly, it has no skill for that). Built-ins: `probe` (interrogation),
+`claude` (general agent, when `ANTHROPIC_API_KEY` is set), `echo` (offline fallback).
+
 ## Interrogate networks on a loop
 
 A peer swarm that repeatedly probes network targets and records findings to the durable log

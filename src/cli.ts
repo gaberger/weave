@@ -9,7 +9,6 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { Substrate } from "./ports/substrate.js";
-import type { Worker } from "./ports/worker.js";
 import type { SealedEvent } from "./domain/event.js";
 import { systemClock } from "./domain/clock.js";
 import { TaskKind, type DeclaredPayload } from "./domain/task.js";
@@ -19,6 +18,10 @@ import { createPeer } from "./composition-root.js";
 import { ToolRegistry } from "./adapters/secondary/in-memory-tool-host.js";
 import { registerHttpProbe } from "./adapters/secondary/http-probe-tool.js";
 import { ProbeWorker } from "./adapters/secondary/probe-worker.js";
+import type { Skill } from "./ports/skill.js";
+import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
+import { probeSkill, echoSkill, claudeSkill } from "./adapters/secondary/builtin-skills.js";
+import { loadSkills } from "./adapters/secondary/skill-loader.js";
 
 const DEFAULT_DB = ".weave/weave.db";
 
@@ -94,6 +97,31 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
   return new mod.SqliteSubstrate(opts);
 }
 
+/** Assemble the skill set (ADR-0012): probe → external plugins → fallback (claude if a key
+ *  is present and not --fake, else echo), plus a ToolRegistry holding every skill's tools. */
+async function assembleSkills(
+  args: Args,
+  opts: { fake: boolean; model: string },
+): Promise<{ skills: Skill[]; registry: ToolRegistry; errors: Array<{ file: string; error: string }> }> {
+  const dir = str(args, "skills-dir", ".weave/skills");
+  const { skills: loaded, errors } = await loadSkills(dir);
+  const fallback =
+    !opts.fake && process.env["ANTHROPIC_API_KEY"] ? await claudeSkill(opts.model) : echoSkill;
+  const skills: Skill[] = [probeSkill, ...loaded, fallback];
+
+  const registry = new ToolRegistry();
+  const seen = new Set<string>();
+  for (const s of skills) {
+    for (const t of s.tools ?? []) {
+      if (!seen.has(t.name)) {
+        seen.add(t.name);
+        registry.register(t);
+      }
+    }
+  }
+  return { skills, registry, errors };
+}
+
 const fmt = (e: SealedEvent): string =>
   `#${String(e.seq).padStart(4)} ${e.kind.padEnd(15)} ${e.actor.padEnd(12)} ${e.subject}`;
 
@@ -110,19 +138,14 @@ async function cmdUp(args: Args): Promise<void> {
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
   const fake = has(args, "fake");
 
-  const fakeWorker = (): Worker => ({
-    async run(a) {
-      return { status: "completed", summary: `(fake) handled: ${a.spec.goal}` };
-    },
+  // weave "knows what to do" via skills (ADR-0012): a router dispatches each task to the
+  // matching skill (built-in + plugins from .weave/skills/).
+  const { skills, registry, errors } = await assembleSkills(args, {
+    fake,
+    model: str(args, "model", "claude-sonnet-4-6"),
   });
-  let newWorker: () => Worker;
-  if (fake) {
-    newWorker = fakeWorker;
-  } else {
-    // Load the SDK only when a real Claude worker is requested.
-    const { createClaudeWorkerFactory } = await import("./adapters/secondary/claude-sdk.js");
-    newWorker = createClaudeWorkerFactory({ model: str(args, "model", "claude-sonnet-4-6") });
-  }
+  for (const e of errors) console.error(`weave: skill load error in ${e.file}: ${e.error}`);
+  const router = new SkillRouterWorker(skills);
 
   const peer = createPeer({
     weave,
@@ -133,12 +156,13 @@ async function cmdUp(args: Args): Promise<void> {
       maxConcurrent: num(args, "concurrency", 2),
       tickMs: num(args, "tick-ms", 3_000),
     },
-    newWorker,
+    newWorker: () => router,
+    registry,
     clock: systemClock,
     newId: () => randomUUID(),
   });
 
-  console.log(`weave: peer "${agentId}" up on ${str(args, "db", DEFAULT_DB)}${fake ? " (fake worker)" : ""}`);
+  console.log(`weave: peer "${agentId}" up on ${str(args, "db", DEFAULT_DB)} — skills: ${skills.map((s) => s.name).join(", ")}`);
   weave.subscribe(0, (e) => console.log(fmt(e)));
 
   const ac = new AbortController();
@@ -169,8 +193,10 @@ async function cmdTask(args: Args): Promise<void> {
   }
   const weave = await openSubstrate(args);
   const taskId = str(args, "id", `task-${randomUUID().slice(0, 8)}`);
-  await declareTask(weave, () => randomUUID(), "cli", taskId, { goal });
-  console.log(`weave: declared ${taskId} — ${goal}`);
+  const spec: { goal: string; skill?: string } = { goal };
+  if (has(args, "skill")) spec.skill = str(args, "skill", "");
+  await declareTask(weave, () => randomUUID(), "cli", taskId, spec);
+  console.log(`weave: declared ${taskId}${spec.skill ? ` [skill:${spec.skill}]` : ""} — ${goal}`);
   weave.close();
 }
 
@@ -253,6 +279,19 @@ async function cmdWatch(args: Args): Promise<void> {
   await peer.start(ac.signal);
 }
 
+async function cmdSkills(args: Args): Promise<void> {
+  const { skills, errors } = await assembleSkills(args, {
+    fake: has(args, "fake"),
+    model: str(args, "model", "claude-sonnet-4-6"),
+  });
+  for (const e of errors) console.error(`  ! ${e.file}: ${e.error}`);
+  console.log(`weave skills (${skills.length}) — from .weave/skills/ + built-in:`);
+  for (const s of skills) {
+    const tools = (s.tools ?? []).map((t) => t.name).join(", ");
+    console.log(`  ${s.name.padEnd(12)} ${s.description}${tools ? `  [tools: ${tools}]` : ""}`);
+  }
+}
+
 async function cmdStatus(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events = await readAll(weave);
@@ -295,7 +334,9 @@ usage:
   weave watch <target...> [--interval 30s] [--expect 200] [--once]
                   [--db <path>] [--agent <id>] [--concurrency N]
                   loop: interrogate targets repeatedly (read-only http_probe)
-  weave task <goal...>   [--db <path>] [--id <taskId>]
+  weave skills    [--skills-dir <dir>] [--fake]
+                  list loaded skills (built-in + plugins from .weave/skills/)
+  weave task <goal...>   [--db <path>] [--id <taskId>] [--skill <name>]
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
   weave help
@@ -311,6 +352,8 @@ async function main(): Promise<void> {
       return cmdUp(args);
     case "watch":
       return cmdWatch(args);
+    case "skills":
+      return cmdSkills(args);
     case "task":
       return cmdTask(args);
     case "status":

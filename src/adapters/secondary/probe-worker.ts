@@ -12,7 +12,9 @@ export class ProbeWorker implements Worker {
     if (ctx.signal.aborted) return { status: "aborted", summary: "cancelled", reason: "cancelled" };
 
     const inputs = (assignment.spec.inputs ?? {}) as Partial<ProbeTarget>;
-    const target = inputs.target ?? assignment.spec.goal;
+    // Explicit input wins; else take the goal, dropping a leading "probe " so
+    // `weave task "probe https://x"` and the probe skill route to the right target.
+    const target = inputs.target ?? assignment.spec.goal.replace(/^probe\s+/i, "");
 
     let result: ProbeResult;
     try {

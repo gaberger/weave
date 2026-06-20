@@ -3,6 +3,8 @@
 export interface TaskSpec {
   /** What the worker should accomplish. */
   readonly goal: string;
+  /** Optional explicit routing to a named skill (ADR-0012); else skills match by predicate. */
+  readonly skill?: string;
   readonly inputs?: Readonly<Record<string, unknown>>;
 }
 

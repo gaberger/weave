@@ -1,17 +1,10 @@
-import type { ToolHost, ToolDescriptor, ToolCall, ToolResult } from "../../ports/tool-host.js";
+import type { ToolHost, ToolDescriptor, ToolCall, ToolResult, ToolDefinition } from "../../ports/tool-host.js";
 import { NotPermittedError } from "../../ports/tool-host.js";
 import type { Grant } from "../../domain/grant.js";
-import { normalizeEffect, withinCeiling, type Effect } from "../../domain/effect.js";
+import { normalizeEffect, withinCeiling } from "../../domain/effect.js";
 
-/** A tool the registry can dispatch: its descriptor plus an executor. */
-export interface RegisteredTool {
-  readonly name: string;
-  readonly description: string;
-  /** Missing effect normalizes to "irreversible" (ADR-0004 §1, fail closed). */
-  readonly effect?: Effect;
-  readonly inputSchema?: Readonly<Record<string, unknown>>;
-  execute(args: Readonly<Record<string, unknown>>): Promise<ToolResult>;
-}
+/** @deprecated use ToolDefinition from ports/tool-host.js (kept as an alias). */
+export type RegisteredTool = ToolDefinition;
 
 /** Global tool registry. `hostFor(grant)` yields a per-worker ToolHost filtered by the
  *  grant's allowlist and maxEffect ceiling (ADR-0004 §2/§3). */

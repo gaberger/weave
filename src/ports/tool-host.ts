@@ -20,6 +20,16 @@ export interface ToolResult {
   readonly output: unknown;
 }
 
+/** A registerable tool: a descriptor plus its executor. Skills contribute these
+ *  (ADR-0012). Missing `effect` normalizes to "irreversible" (fail closed, ADR-0004). */
+export interface ToolDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly effect?: Effect;
+  readonly inputSchema?: Readonly<Record<string, unknown>>;
+  execute(args: Readonly<Record<string, unknown>>): Promise<ToolResult>;
+}
+
 export class NotPermittedError extends Error {
   constructor(public readonly tool: string) {
     super(`tool not permitted: ${tool}`);

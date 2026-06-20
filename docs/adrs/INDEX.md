@@ -4,6 +4,7 @@ Append-only log of architectural decisions for `weave`. Newest at top.
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
+| [0012](ADR-0012-skill-plugin-system.md) | Skills — the plugin/extension system | Proposed | 2026-06-20 |
 | [0011](ADR-0011-network-interrogation-loop.md) | Recurring network interrogation | Proposed | 2026-06-20 |
 | [0010](ADR-0010-bun-compile-and-cli.md) | Bun compile target + the weave CLI | Proposed | 2026-06-19 |
 | [0009](ADR-0009-networked-substrate.md) | NetworkedSubstrate — replicated log with HLC ordering | Proposed | 2026-06-19 |
