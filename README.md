@@ -73,128 +73,72 @@ Bun it uses the built-in `bun:sqlite` substrate (zero native addons); under Node
 npm run build:bin && ./weave task "ship it" && ./weave up --fake
 ```
 
-## Looping research agents
+## Skills — how you add use-cases (ADR-0012 / ADR-0016)
 
-A first-class loop (ADR-0008) re-declares a task routed to any skill each tick. The built-in
-**arXiv research agent** discovers recent papers and fans out a detail task per paper:
+**weave is domain-agnostic.** What it *does* is skills, dropped into `.weave/skills/` — no
+core changes. A peer routes each task to the matching skill. Two kinds:
+
+**Declarative agent skill** (`.md` / `.json`) — a use-case as a *prompt + tool grant*; the LLM
+reasons over the granted tools. This is the "loosely-defined business logic" path. Example
+([`examples/plugins/researcher.md`](examples/plugins/researcher.md)):
+
+```md
+---
+name: researcher
+description: Research recent arXiv papers on a topic
+match: research, arxiv, papers
+tools: http_fetch, spawn_task, notify
+---
+You are a research agent. Fetch the arXiv API feed for the topic with http_fetch, identify
+recent papers, fetch each paper's page, and write a concise digest. Notify if configured.
+```
+
+**Code skill** (`.js` / `.ts`) — when you want determinism; default-export a `Skill`
+(`{ name, description, match, run, tools? }`).
 
 ```bash
-weave loop --skill arxiv --interval 6h "large language models"
+weave skills                              # list code + declarative skills
+weave task --skill researcher "LLM agents"   # route explicitly
+weave task "research recent LLM papers"      # or let match keywords route it
 ```
 
-```
-researcher  arXiv "llm": 3 papers, 3 detail task(s) declared
-researcher  Sparse Attention for Million-Token LLMs — A. Researcher, B. Scientist
-researcher  Agentic Tool Use Benchmarks — C. Engineer
-```
+Generic tools the harness ships for skills to use: `http_fetch` (GET a URL), `spawn_task`
+(fan out a follow-up task — used for "discover → detail per item", deduped by subject),
+`notify` (channels). Per-skill `tools` allowlists restrict what each skill can touch.
 
-The `arxiv` skill `http_fetch`es the feed and `spawn_task`s an `arxiv-paper` detail task per
-paper (subject `arxiv:<id>`). Because the subject is the paper id, weave's claim-once dedup
-means each paper is processed **once ever** — re-runs only pick up *new* papers. `weave loop`
-works with any skill; `--feed`/`--max` configure the arXiv source (point it at a local fixture
-to test offline).
+## Loops
 
-## Skills (plugins) — how weave knows what to do
-
-A peer doesn't hardcode behaviour: it loads **skills** and routes each task to the one that
-matches (ADR-0012). A skill declares what it handles and how; built-ins ship in-tree and
-**plugins drop into `.weave/skills/`** with no core change.
+A first-class loop (ADR-0008) re-declares a task routed to **any** skill each tick:
 
 ```bash
-weave skills                      # list loaded skills (built-in + plugins)
-weave task --skill shout "shout hello"   # route explicitly...
-weave task "probe https://x/health"      # ...or let predicates route it (→ probe skill)
+weave loop --skill researcher --interval 6h "large language models"
+weave loop --skill monitor --interval 30s --notify slack "https://api.example.com 10.0.0.1"
 ```
 
-A plugin is a module that default-exports a skill (see [`examples/skills/shout.mjs`](examples/skills/shout.mjs)):
+`--notify` alerts on completed results; `--once` runs a single pass. The researcher/monitor
+are example *plugins* (`examples/plugins/`), not harness code.
 
-```js
-export default {
-  name: "shout",
-  description: "Echo the goal in UPPERCASE",
-  match: (task) => task.spec.goal.startsWith("shout "),
-  async run(task) { return { status: "completed", summary: task.spec.goal.toUpperCase() }; },
-  // optional: tools: [ { name, description, effect, execute } ]  ← contributed to the ToolHost
-};
-```
-
-Routing: explicit `--skill` → first skill whose `match()` is true → otherwise `failed`
-(weave says, honestly, it has no skill for that). Built-ins: `probe` (interrogation),
-`claude` (general agent, when `ANTHROPIC_API_KEY` is set), `echo` (offline fallback).
-
-## Interrogate networks on a loop
-
-A peer swarm that repeatedly probes network targets and records findings to the durable log
-(ADR-0011). Read-only, so it's safe to fan out:
+## Notifications (channels, ADR-0014)
 
 ```bash
-weave watch https://api.example.com/health 10.0.0.1 --interval 30s --expect 200
-```
-
-```
-    netwatch  https://api.example.com/health OK 200 14ms
-    netwatch  10.0.0.1 UNREACHABLE 0 2ms
-    ...every 30s...
-```
-
-- Each tick re-declares one interrogation task per target; peers claim them exactly once,
-  so adding more `weave watch`/`up` peers spreads the load. Findings persist across restarts.
-- `--expect <status>` turns a probe into an assertion (flags `VIOLATION`); `--once` runs a
-  single sweep. Tags: `OK` / `UNHEALTHY(<code>)` / `VIOLATION` / `UNREACHABLE`.
-- Today's interrogation tool is `http_probe` (covers the Forward Networks REST API and most
-  controller/NOS endpoints). SSH/SNMP/ping are future tool adapters behind the same shape.
-- **Drift** is flagged inline when a target's status changes between runs
-  (`⚠ DRIFT <target>: OK → UNREACHABLE`).
-
-## Notifications (channels)
-
-Communicate out over email / Slack / Telegram (ADR-0014):
-
-```bash
-weave notify "10.0.0.1 is UNREACHABLE" --title "weave alert" --to slack
-weave watch <targets...> --notify slack      # alert automatically on drift
+weave notify "deploy finished" --title "weave" --to slack
 ```
 
 Each transport is a `Channel` adapter behind a port; configure via flags or env
-(`--slack-webhook`, `--telegram-token`+`--telegram-chat`, `EMAIL_*`). Sending is the
-`notify` tool, whose effect is **irreversible** — so it's lease-gated (no duplicate alerts
-after a worker loses its lease), and skills can call it too.
+(`--slack-webhook`, `--telegram-token`+`--telegram-chat`, `EMAIL_*`). The `notify` tool's
+effect is **irreversible** — lease-gated (no duplicate alerts after a worker loses its lease).
 
-## Memory & compaction
+## Memory & compaction (ADR-0007)
 
-A loop appends events forever, so the log is compactable (ADR-0007). Compaction folds
-**settled** tasks into a single `weave.snapshot` event (condensation-as-an-event — durable,
-replayable) and prunes the raw events, keeping one finding per target:
-
-```bash
-weave compact                     # one-shot: fold + prune
-weave watch <targets...> --compact-every 20   # auto-compact every 20 sweeps
-```
-
-```
-weave: compacted — folded 5 settled subject(s), retained 1 target finding(s); log 20 → 1 events
-```
-
-Projections (`status`, claim resolution) are snapshot-aware, so reads stay correct and cheap
-after compaction.
-
-**Reduced context (layer 2, ADR-0013).** `reduceContext` folds the log to one current entry
-per target — what a skill or LLM should see instead of raw history (the hex L1/L2/L3 analogue):
+A long-running loop appends forever, so the log compacts: settled tasks fold into one
+`weave.snapshot` event (condensation-as-an-event — durable, replayable) and their raw events
+are pruned. Projections (`status`, claim resolution) are snapshot-aware, so reads stay correct
+and cheap.
 
 ```bash
-weave summary                     # human view of the reduced state
-weave up --compact-secs 300       # long-running peer self-bounds (auto-compaction)
+weave compact                # one-shot fold + prune
+weave up --compact-secs 300  # long-running peer self-bounds
 ```
-
-```
-network: 1/2 healthy, 0 unhealthy, 1 unreachable, 0 violations
-  OK            200  https://api.example.com/health
-  UNREACHABLE     0  10.0.0.1
-```
-
-A read-effect `network_state` tool exposes this to skills, so the built-in `summary` skill —
-and the `claude` agent — reason over the reduced view, not megabytes of events. It reads the
-same before and after compaction.
 
 ## Running a real Claude worker
 

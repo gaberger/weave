@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * The `weave` CLI (ADR-0010). A primary adapter + composition entry: it parses argv and
- * wires concrete adapters into the use-cases. Runtime-agnostic ESM/TS — runs under
- * `node --import tsx src/cli.ts` today and compiles via `bun build --compile` to a binary.
+ * The `weave` CLI — a generic agent harness. It wires concrete adapters into the use-cases
+ * and is deliberately DOMAIN-AGNOSTIC: it ships coordination + generic tools + a skill system.
+ * Domain use-cases (a researcher, a monitor) are skills/plugins, not harness code (ADR-0016).
+ * Runs under `node --import tsx src/cli.ts` and compiles via `bun build --compile`.
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
@@ -15,24 +16,20 @@ import { TaskKind, type DeclaredPayload } from "./domain/task.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
 import { compactWeave } from "./usecases/compaction.js";
-import { diffFinding, type ProbeFinding } from "./domain/interrogation.js";
-import { createPeer } from "./composition-root.js";
-import { ToolRegistry } from "./adapters/secondary/in-memory-tool-host.js";
-import { httpProbeTool } from "./adapters/secondary/http-probe-tool.js";
-import { ProbeWorker } from "./adapters/secondary/probe-worker.js";
-import type { Skill } from "./ports/skill.js";
-import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
-import { probeSkill, summarySkill, echoSkill, claudeSkill, analyzeSkill } from "./composition/builtin-skills.js";
-import { loadSkills } from "./adapters/secondary/skill-loader.js";
-import { networkStateTool } from "./adapters/secondary/network-state-tool.js";
-import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
-import { arxivDiscoverSkill, arxivPaperSkill } from "./composition/arxiv-skills.js";
-import { reduceContext } from "./domain/context.js";
 import { LoopRunner } from "./usecases/loop.js";
-import { SystemTimer } from "./adapters/secondary/system-timer.js";
 import { checkArchitecture } from "./domain/architecture.js";
+import { createPeer } from "./composition-root.js";
+import type { Skill } from "./ports/skill.js";
+import { ToolRegistry } from "./adapters/secondary/in-memory-tool-host.js";
+import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
+import { SystemTimer } from "./adapters/secondary/system-timer.js";
 import { scanSourceFiles } from "./adapters/secondary/source-scan.js";
+import { loadSkills } from "./adapters/secondary/skill-loader.js";
+import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
+import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
+import { echoSkill, claudeSkill } from "./composition/builtin-skills.js";
+import { loadAgentSkills } from "./composition/agent-skill.js";
 import { notifyTool } from "./composition/notify-tool.js";
 
 const DEFAULT_DB = ".weave/weave.db";
@@ -109,9 +106,7 @@ function parseDuration(s: string): number {
 
 type ClosableSubstrate = Substrate & { close(): void };
 
-/** Pick the substrate by runtime so the Bun binary stays native-addon-free (ADR-0010 §4):
- *  Bun → bun:sqlite, Node → better-sqlite3. Dynamic import keeps the unused one out of the
- *  active runtime (and `--external better-sqlite3` keeps it out of the Bun bundle). */
+/** Pick the substrate by runtime so the Bun binary stays native-addon-free (ADR-0010 §4). */
 async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
   const file = str(args, "db", DEFAULT_DB);
   mkdirSync(dirname(file), { recursive: true });
@@ -120,48 +115,33 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
     const { BunSqliteSubstrate } = await import("./adapters/secondary/bun-sqlite-substrate.js");
     return new BunSqliteSubstrate(opts);
   }
-  // Non-literal specifier so Bun's bundler does NOT pull the native better-sqlite3 path into
-  // the compiled binary (this branch only runs under Node). Types come from the type-only import.
-  const seg = "sqlite-substrate";
+  const seg = "sqlite-substrate"; // non-literal so Bun's bundler skips the native path
   const mod = (await import(`./adapters/secondary/${seg}.js`)) as typeof import("./adapters/secondary/sqlite-substrate.js");
   return new mod.SqliteSubstrate(opts);
 }
 
-/** Assemble the skill set (ADR-0012): probe → external plugins → fallback (claude if a key
- *  is present and not --fake, else echo), plus a ToolRegistry holding every skill's tools. */
+/**
+ * Assemble the skill set + tool registry (ADR-0012/0016) — all generic:
+ *  - code-skill plugins (.js/.ts) + declarative agent-skill plugins (.md/.json) from the dir
+ *  - fallback: claude (general agent, if a key is set) else echo (offline)
+ *  - generic tools: http_fetch, spawn_task, notify. No domain logic in the harness.
+ */
 async function assembleSkills(
   args: Args,
   opts: { fake: boolean; model: string; weave?: Substrate; newId?: () => string },
 ): Promise<{ skills: Skill[]; registry: ToolRegistry; errors: Array<{ file: string; error: string }> }> {
   const dir = str(args, "skills-dir", ".weave/skills");
-  const { skills: loaded, errors } = await loadSkills(dir);
+  const { skills: codeSkills, errors } = await loadSkills(dir);
   const useClaude = !opts.fake && Boolean(process.env["ANTHROPIC_API_KEY"]);
+  const agentSkills = useClaude ? await loadAgentSkills(dir, opts.model) : [];
   const fallback = useClaude ? await claudeSkill(opts.model) : echoSkill;
-  const llmSkills: Skill[] = useClaude ? [await analyzeSkill(opts.model)] : [];
-  const skills: Skill[] = [
-    probeSkill,
-    summarySkill,
-    arxivDiscoverSkill,
-    arxivPaperSkill,
-    ...llmSkills,
-    ...loaded,
-    fallback,
-  ];
+  const skills: Skill[] = [...codeSkills, ...agentSkills, fallback];
 
   const registry = new ToolRegistry();
-  const seen = new Set<string>();
-  for (const s of skills) {
-    for (const t of s.tools ?? []) {
-      if (!seen.has(t.name)) {
-        seen.add(t.name);
-        registry.register(t);
-      }
-    }
-  }
-  // Substrate-bound tools (registered at composition; skills can't hold the substrate).
-  if (opts.weave) registry.register(networkStateTool(opts.weave)); // ADR-0013
-  if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // ADR-0008
-  registry.register(notifyTool(channelsFrom(channelConfig(args)))); // ADR-0014 (no-op if unconfigured)
+  for (const s of skills) for (const t of s.tools ?? []) registry.register(t);
+  registry.register(httpFetchTool); // generic HTTP capability
+  if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // fan-out
+  registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
   return { skills, registry, errors };
 }
 
@@ -179,12 +159,8 @@ async function readAll(weave: Substrate): Promise<SealedEvent[]> {
 async function cmdUp(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
-  const fake = has(args, "fake");
-
-  // weave "knows what to do" via skills (ADR-0012): a router dispatches each task to the
-  // matching skill (built-in + plugins from .weave/skills/).
   const { skills, registry, errors } = await assembleSkills(args, {
-    fake,
+    fake: has(args, "fake"),
     model: str(args, "model", "claude-sonnet-4-6"),
     weave,
     newId: () => randomUUID(),
@@ -211,13 +187,7 @@ async function cmdUp(args: Args): Promise<void> {
   weave.subscribe(0, (e) => console.log(fmt(e)));
 
   const ac = new AbortController();
-  // Hold the event loop open: the peer's poll/heartbeat timers are unref'd (so they never
-  // keep a test process alive), and start()'s promise alone doesn't keep Node running. This
-  // ref'd timer makes `up` a real daemon until SIGINT.
   const keepAlive = setInterval(() => {}, 1 << 30);
-
-  // Optional auto-compaction so a long-running peer self-bounds (ADR-0013 §4). Safe: only
-  // settled subjects are folded/pruned; in-flight ones are retained.
   const compactSecs = has(args, "compact-secs") ? Math.max(5, num(args, "compact-secs", 60)) : 0;
   let compactTimer: ReturnType<typeof setInterval> | undefined;
   if (compactSecs > 0) {
@@ -247,7 +217,7 @@ async function cmdUp(args: Args): Promise<void> {
 async function cmdTask(args: Args): Promise<void> {
   const goal = args._.join(" ").trim();
   if (!goal) {
-    console.error('weave task: provide a goal, e.g. weave task "summarize the README"');
+    console.error('weave task: provide a goal, e.g. weave task "research recent LLM papers"');
     process.exitCode = 1;
     return;
   }
@@ -260,120 +230,10 @@ async function cmdTask(args: Args): Promise<void> {
   weave.close();
 }
 
-async function cmdWatch(args: Args): Promise<void> {
-  const targets = args._;
-  if (targets.length === 0) {
-    console.error("weave watch: provide target(s), e.g. weave watch https://example.com/health --interval 30s --expect 200");
-    process.exitCode = 1;
-    return;
-  }
-  const weave = await openSubstrate(args);
-  const agentId = str(args, "agent", `watcher-${randomUUID().slice(0, 8)}`);
-  const interval = str(args, "interval", "30s");
-  const intervalMs = parseDuration(interval);
-  const expect = has(args, "expect") ? num(args, "expect", 200) : undefined;
-  const once = has(args, "once");
-
-  const registry = new ToolRegistry().register(httpProbeTool);
-  const peer = createPeer({
-    weave,
-    cfg: {
-      agentId,
-      grant: { tools: ["http_probe"], maxEffect: "read" }, // read-only interrogation
-      leaseMs: num(args, "lease-ms", 30_000),
-      maxConcurrent: num(args, "concurrency", 4),
-      tickMs: num(args, "tick-ms", 2_000),
-    },
-    newWorker: () => new ProbeWorker(),
-    registry,
-    clock: systemClock,
-    newId: () => randomUUID(),
-  });
-
-  const fmtFinding = (e: SealedEvent): string => {
-    const p = e.payload as { summary?: string; error?: string };
-    const mark = e.kind === TaskKind.Failed ? "ERR " : "    ";
-    return `${mark}${e.actor.padEnd(14)} ${p.summary ?? p.error ?? e.subject}`;
-  };
-
-  const sweep = async (): Promise<void> => {
-    for (const t of targets) {
-      const inputs: Record<string, unknown> = { target: t };
-      if (expect !== undefined) inputs.expectStatus = expect;
-      await declareTask(weave, () => randomUUID(), agentId, `probe-${randomUUID().slice(0, 8)}`, {
-        goal: `probe ${t}`,
-        inputs,
-      });
-    }
-  };
-
-  console.log(
-    `weave: watching ${targets.length} target(s) every ${interval}${expect !== undefined ? ` expecting ${expect}` : ""}${once ? " (once)" : ""} as "${agentId}"`,
-  );
-
-  const ac = new AbortController();
-  const keepAlive = setInterval(() => {}, 1 << 30);
-  let ticker: ReturnType<typeof setInterval> | undefined;
-  const shutdown = () => {
-    clearInterval(keepAlive);
-    if (ticker) clearInterval(ticker);
-    ac.abort();
-    void peer.stop().then(() => {
-      weave.close();
-      process.exit(0);
-    });
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  const notifyChannels = has(args, "notify") ? channelsFrom(channelConfig(args)) : [];
-  const lastByTarget = new Map<string, ProbeFinding>();
-  let remaining = once ? targets.length : Number.POSITIVE_INFINITY;
-  weave.subscribe((await weave.head()) + 1, (e) => {
-    if (e.kind !== TaskKind.Completed && e.kind !== TaskKind.Failed) return;
-    console.log(fmtFinding(e));
-    if (e.kind === TaskKind.Completed) {
-      const arts = (e.payload as { artifacts?: Array<{ kind: string; ref: string }> }).artifacts ?? [];
-      for (const a of arts) {
-        if (a.kind !== "probe") continue;
-        try {
-          const f = JSON.parse(a.ref) as ProbeFinding;
-          const d = diffFinding(lastByTarget.get(f.target), f);
-          lastByTarget.set(f.target, f);
-          if (d.changed && d.from !== undefined) {
-            console.log(`    ⚠ DRIFT ${d.target}: ${d.note}`);
-            if (notifyChannels.length > 0) {
-              void notifyAll(notifyChannels, { title: "weave drift", text: `${d.target}: ${d.note}`, level: "warn" });
-            }
-          }
-        } catch {
-          /* ignore malformed artifact */
-        }
-      }
-    }
-    if (--remaining <= 0) shutdown();
-  });
-
-  let sweeps = 0;
-  const compactEvery = has(args, "compact-every") ? Math.max(1, num(args, "compact-every", 10)) : 0;
-  const doSweep = async (): Promise<void> => {
-    await sweep();
-    sweeps += 1;
-    if (compactEvery > 0 && sweeps % compactEvery === 0) {
-      const r = await compactWeave(weave, () => randomUUID(), agentId);
-      console.log(`    · compacted: folded ${r.settled}, pruned ${r.pruned} events`);
-    }
-  };
-
-  if (!once) ticker = setInterval(() => void doSweep(), intervalMs);
-  await (once ? sweep() : doSweep());
-  await peer.start(ac.signal);
-}
-
 async function cmdLoop(args: Args): Promise<void> {
   const skill = str(args, "skill", "");
   if (!skill) {
-    console.error('weave loop: --skill <name> required, e.g. weave loop --skill arxiv --interval 6h "large language models"');
+    console.error('weave loop: --skill <name> required, e.g. weave loop --skill researcher --interval 6h "LLMs"');
     process.exitCode = 1;
     return;
   }
@@ -407,22 +267,19 @@ async function cmdLoop(args: Args): Promise<void> {
     newId,
   });
 
-  const inputs: Record<string, unknown> = {};
-  if (has(args, "feed")) inputs["feedUrl"] = str(args, "feed", "");
-  if (has(args, "max")) inputs["max"] = num(args, "max", 10);
-  inputs["query"] = str(args, "query", goal);
-
   const tick = async (): Promise<void> => {
-    const spec: { goal: string; skill: string; inputs?: Record<string, unknown> } = { goal, skill };
-    if (Object.keys(inputs).length > 0) spec.inputs = inputs;
-    await declareTask(weave, newId, agentId, `${skill}-${randomUUID().slice(0, 8)}`, spec);
+    await declareTask(weave, newId, agentId, `${skill}-${randomUUID().slice(0, 8)}`, { goal, skill });
   };
 
   console.log(`weave: loop "${skill}" every ${interval}${once ? " (once)" : ""} — ${goal}`);
+  const notifyChannels = has(args, "notify") ? channelsFrom(channelConfig(args)) : [];
   weave.subscribe((await weave.head()) + 1, (e) => {
     if (e.kind !== TaskKind.Completed && e.kind !== TaskKind.Failed) return;
-    const p = e.payload as { summary?: string; error?: string };
+    const p = e.payload as { summary?: string; error?: string; artifacts?: unknown[] };
     console.log(`    ${e.actor.padEnd(14)} ${p.summary ?? p.error ?? e.subject}`);
+    if (notifyChannels.length > 0 && e.kind === TaskKind.Completed && (p.artifacts?.length ?? 0) > 0) {
+      void notifyAll(notifyChannels, { text: p.summary ?? e.subject });
+    }
   });
 
   const ac = new AbortController();
@@ -452,7 +309,7 @@ async function cmdSkills(args: Args): Promise<void> {
   console.log(`weave skills (${skills.length}) — from .weave/skills/ + built-in:`);
   for (const s of skills) {
     const tools = (s.tools ?? []).map((t) => t.name).join(", ");
-    console.log(`  ${s.name.padEnd(12)} ${s.description}${tools ? `  [tools: ${tools}]` : ""}`);
+    console.log(`  ${s.name.padEnd(14)} ${s.description}${tools ? `  [tools: ${tools}]` : ""}`);
   }
 }
 
@@ -463,15 +320,13 @@ async function cmdCompact(args: Args): Promise<void> {
   const r = await compactWeave(weave, () => randomUUID(), "compactor");
   let after = 0;
   for await (const _ of weave.read(0)) after += 1;
-  console.log(
-    `weave: compacted — folded ${r.settled} settled subject(s), retained ${r.targets} target finding(s); log ${before} → ${after} events (pruned ${r.pruned}).`,
-  );
+  console.log(`weave: compacted — folded ${r.settled} settled subject(s); log ${before} → ${after} events (pruned ${r.pruned}).`);
   weave.close();
 }
 
 function cmdDoctor(args: Args): void {
   const dir = str(args, "src", "src");
-  const strict = !has(args, "lenient"); // strict by default — weave is fully hex-compliant
+  const strict = !has(args, "lenient");
   const files = scanSourceFiles(dir);
   const violations = checkArchitecture(files, { strict });
   const mode = strict ? "strict" : "lenient";
@@ -487,7 +342,7 @@ function cmdDoctor(args: Args): void {
 async function cmdNotify(args: Args): Promise<void> {
   const text = args._.join(" ").trim();
   if (!text) {
-    console.error('weave notify: provide a message, e.g. weave notify "target down" --to slack');
+    console.error('weave notify: provide a message, e.g. weave notify "deploy done" --to slack');
     process.exitCode = 1;
     return;
   }
@@ -504,18 +359,6 @@ async function cmdNotify(args: Args): Promise<void> {
   const n = { text, ...(has(args, "title") ? { title: str(args, "title", "") } : {}) };
   const sent = await notifyAll(channels, n);
   console.log(`weave: notified ${sent}/${channels.length} channel(s): ${channels.map((c) => c.name).join(", ")}`);
-}
-
-async function cmdSummary(args: Args): Promise<void> {
-  const weave = await openSubstrate(args);
-  const events: SealedEvent[] = [];
-  for await (const e of weave.read(0)) events.push(e);
-  const r = reduceContext(events);
-  console.log(
-    `network: ${r.totals.healthy}/${r.totals.targets} healthy, ${r.totals.unhealthy} unhealthy, ${r.totals.unreachable} unreachable, ${r.totals.violations} violations`,
-  );
-  for (const t of r.targets) console.log(`  ${t.tag.padEnd(16)} ${String(t.status).padStart(3)}  ${t.target}`);
-  weave.close();
 }
 
 async function cmdStatus(args: Args): Promise<void> {
@@ -545,38 +388,32 @@ async function cmdLog(args: Args): Promise<void> {
       weave.close();
       process.exit(0);
     });
-    await new Promise(() => {}); // run until SIGINT
+    await new Promise(() => {});
   } else {
     weave.close();
   }
 }
 
 function usage(): void {
-  console.log(`weave — cooperative-network agent CLI
+  console.log(`weave — a domain-agnostic cooperative agent harness
 
 usage:
   weave up        [--db <path>] [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
-  weave watch <target...> [--interval 30s] [--expect 200] [--once]
-                  [--compact-every N] [--db <path>] [--agent <id>] [--concurrency N]
-                  loop: interrogate targets repeatedly (read-only http_probe); flags drift
-  weave loop --skill <name> [--interval 6h] [--once] [--feed URL] [--max N] [goal...]
-                  first-class loop: re-declare a task routed to <skill> each tick
-                  (e.g. weave loop --skill arxiv --interval 6h "large language models")
-  weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
-  weave summary   [--db <path>]   reduced network state: one line per target + rollup
+                  start a peer: claim tasks + route them to skills
+  weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>]
+  weave loop --skill <name> [--interval 6h] [--once] [--notify ch] [goal...]
+                  re-declare a task routed to <skill> each tick (a skill = a use-case)
+  weave skills    [--skills-dir <dir>] [--fake]   list code + declarative skills
   weave notify <text...> [--to slack,telegram,email] [--title T]
-                  send to configured channels (--slack-webhook / --telegram-token
-                  + --telegram-chat / EMAIL_* env). watch --notify alerts on drift.
-  weave skills    [--skills-dir <dir>] [--fake]
-                  list loaded skills (built-in + plugins from .weave/skills/)
-  weave task <goal...>   [--db <path>] [--id <taskId>] [--skill <name>]
+  weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
-  weave doctor    [--lenient] [--src <dir>]  check hex architecture boundaries (strict by default)
+  weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
   weave help
 
-default db: ${DEFAULT_DB}   (Claude worker needs ANTHROPIC_API_KEY; use --fake to demo offline)`);
+Domain use-cases are SKILLS, not harness code: drop a .ts (code skill) or .md (declarative
+agent skill: prompt + tools) into .weave/skills/. default db: ${DEFAULT_DB}`);
 }
 
 async function main(): Promise<void> {
@@ -585,16 +422,12 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "up":
       return cmdUp(args);
-    case "watch":
-      return cmdWatch(args);
     case "loop":
       return cmdLoop(args);
     case "skills":
       return cmdSkills(args);
     case "compact":
       return cmdCompact(args);
-    case "summary":
-      return cmdSummary(args);
     case "notify":
       return cmdNotify(args);
     case "doctor":

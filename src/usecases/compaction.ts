@@ -5,7 +5,6 @@ import { compact, SNAPSHOT_KIND } from "../domain/snapshot.js";
 
 export interface CompactionResult {
   readonly settled: number; // settled subjects folded
-  readonly targets: number; // findings retained (one per target)
   readonly pruned: number; // events deleted (0 if substrate can't prune)
   readonly upTo: number;
 }
@@ -35,7 +34,6 @@ export async function compactWeave(
 
   return {
     settled: payload.settled.length,
-    targets: Object.keys(payload.findings).length,
     pruned,
     upTo: payload.upTo,
   };
