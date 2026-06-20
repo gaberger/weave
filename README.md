@@ -146,6 +146,20 @@ weave watch https://api.example.com/health 10.0.0.1 --interval 30s --expect 200
 - **Drift** is flagged inline when a target's status changes between runs
   (`⚠ DRIFT <target>: OK → UNREACHABLE`).
 
+## Notifications (channels)
+
+Communicate out over email / Slack / Telegram (ADR-0014):
+
+```bash
+weave notify "10.0.0.1 is UNREACHABLE" --title "weave alert" --to slack
+weave watch <targets...> --notify slack      # alert automatically on drift
+```
+
+Each transport is a `Channel` adapter behind a port; configure via flags or env
+(`--slack-webhook`, `--telegram-token`+`--telegram-chat`, `EMAIL_*`). Sending is the
+`notify` tool, whose effect is **irreversible** — so it's lease-gated (no duplicate alerts
+after a worker loses its lease), and skills can call it too.
+
 ## Memory & compaction
 
 A loop appends events forever, so the log is compactable (ADR-0007). Compaction folds

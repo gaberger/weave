@@ -30,6 +30,8 @@ import { arxivDiscoverSkill, arxivPaperSkill } from "./adapters/secondary/arxiv-
 import { reduceContext } from "./domain/context.js";
 import { LoopRunner } from "./usecases/loop.js";
 import { SystemTimer } from "./adapters/secondary/system-timer.js";
+import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
+import { notifyTool } from "./adapters/secondary/notify-tool.js";
 
 const DEFAULT_DB = ".weave/weave.db";
 
@@ -68,6 +70,24 @@ const num = (args: Args, key: string, dflt: number): number => {
   return typeof v === "string" ? Number(v) : dflt;
 };
 const has = (args: Args, key: string): boolean => args.flags.has(key);
+
+/** Channel config from flags or env (ADR-0014). Only set keys that have a value. */
+function channelConfig(args: Args): ChannelConfig {
+  const cfg: ChannelConfig = {};
+  const env = (k: string) => process.env[k] ?? "";
+  const slack = str(args, "slack-webhook", env("SLACK_WEBHOOK_URL"));
+  if (slack) cfg.slackWebhook = slack;
+  const tgToken = str(args, "telegram-token", env("TELEGRAM_BOT_TOKEN"));
+  const tgChat = str(args, "telegram-chat", env("TELEGRAM_CHAT_ID"));
+  if (tgToken) cfg.telegramToken = tgToken;
+  if (tgChat) cfg.telegramChat = tgChat;
+  if (env("EMAIL_API_URL")) cfg.emailApiUrl = env("EMAIL_API_URL");
+  if (env("EMAIL_API_KEY")) cfg.emailApiKey = env("EMAIL_API_KEY");
+  if (env("EMAIL_FROM")) cfg.emailFrom = env("EMAIL_FROM");
+  const emailTo = str(args, "email-to", env("EMAIL_TO"));
+  if (emailTo) cfg.emailTo = emailTo;
+  return cfg;
+}
 
 function parseDuration(s: string): number {
   const m = /^(\d+)(ms|s|m|h)?$/.exec(s.trim());
@@ -139,6 +159,7 @@ async function assembleSkills(
   // Substrate-bound tools (registered at composition; skills can't hold the substrate).
   if (opts.weave) registry.register(networkStateTool(opts.weave)); // ADR-0013
   if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // ADR-0008
+  registry.register(notifyTool(channelsFrom(channelConfig(args)))); // ADR-0014 (no-op if unconfigured)
   return { skills, registry, errors };
 }
 
@@ -303,6 +324,7 @@ async function cmdWatch(args: Args): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
+  const notifyChannels = has(args, "notify") ? channelsFrom(channelConfig(args)) : [];
   const lastByTarget = new Map<string, ProbeFinding>();
   let remaining = once ? targets.length : Number.POSITIVE_INFINITY;
   weave.subscribe((await weave.head()) + 1, (e) => {
@@ -316,7 +338,12 @@ async function cmdWatch(args: Args): Promise<void> {
           const f = JSON.parse(a.ref) as ProbeFinding;
           const d = diffFinding(lastByTarget.get(f.target), f);
           lastByTarget.set(f.target, f);
-          if (d.changed && d.from !== undefined) console.log(`    ⚠ DRIFT ${d.target}: ${d.note}`);
+          if (d.changed && d.from !== undefined) {
+            console.log(`    ⚠ DRIFT ${d.target}: ${d.note}`);
+            if (notifyChannels.length > 0) {
+              void notifyAll(notifyChannels, { title: "weave drift", text: `${d.target}: ${d.note}`, level: "warn" });
+            }
+          }
         } catch {
           /* ignore malformed artifact */
         }
@@ -440,6 +467,28 @@ async function cmdCompact(args: Args): Promise<void> {
   weave.close();
 }
 
+async function cmdNotify(args: Args): Promise<void> {
+  const text = args._.join(" ").trim();
+  if (!text) {
+    console.error('weave notify: provide a message, e.g. weave notify "target down" --to slack');
+    process.exitCode = 1;
+    return;
+  }
+  let channels = channelsFrom(channelConfig(args));
+  if (has(args, "to")) {
+    const want = new Set(str(args, "to", "").split(",").map((s) => s.trim()));
+    channels = channels.filter((c) => want.has(c.name));
+  }
+  if (channels.length === 0) {
+    console.error("weave notify: no channels configured (--slack-webhook / --telegram-token+--telegram-chat / EMAIL_* env)");
+    process.exitCode = 1;
+    return;
+  }
+  const n = { text, ...(has(args, "title") ? { title: str(args, "title", "") } : {}) };
+  const sent = await notifyAll(channels, n);
+  console.log(`weave: notified ${sent}/${channels.length} channel(s): ${channels.map((c) => c.name).join(", ")}`);
+}
+
 async function cmdSummary(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events: SealedEvent[] = [];
@@ -499,6 +548,9 @@ usage:
                   (e.g. weave loop --skill arxiv --interval 6h "large language models")
   weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
   weave summary   [--db <path>]   reduced network state: one line per target + rollup
+  weave notify <text...> [--to slack,telegram,email] [--title T]
+                  send to configured channels (--slack-webhook / --telegram-token
+                  + --telegram-chat / EMAIL_* env). watch --notify alerts on drift.
   weave skills    [--skills-dir <dir>] [--fake]
                   list loaded skills (built-in + plugins from .weave/skills/)
   weave task <goal...>   [--db <path>] [--id <taskId>] [--skill <name>]
@@ -525,6 +577,8 @@ async function main(): Promise<void> {
       return cmdCompact(args);
     case "summary":
       return cmdSummary(args);
+    case "notify":
+      return cmdNotify(args);
     case "task":
       return cmdTask(args);
     case "status":
