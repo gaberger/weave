@@ -113,20 +113,54 @@ New ports/adapters/external deps get an ADR. Behavioral specs precede code.
 
 ## Prior art
 
-Patterns drawn from the broader harness landscape (Claude Agent SDK, swarm-style
-frameworks such as AutoGen / CrewAI / LangGraph / OpenHands, and hex itself):
+A survey of current harnesses (primary sources) **independently converges on the bet in
+decision (1): decouple coordination from execution through an immutable, replayable
+event/state substrate.** That is reassuring — it is the dominant pattern, not a
+contrarian one. Concrete sources and what we take from each:
 
-- **Blackboard coordination** (classic multi-agent AI) — agents react to shared state
-  rather than being orchestrated; the basis of decision (1).
-- **Optimistic claim/lease over a log** — task acquisition without a dispatcher.
-- **Tool/permission host as a boundary** — explicit, auditable capability grants per worker.
+- **OpenHands** (formerly OpenDevin) — append-only **EventStream** as the *one*
+  coordination bus; every event is a typed `Action` (intent) or `Observation` (result);
+  all components talk via pub-sub over it and never call each other directly; one JSON
+  file per event → deterministic replay/resume. This is almost exactly our `Substrate`,
+  and validates events-as-the-only-contract. We also adopt its **security split**
+  (analyzer *scores* risk; a separate gate *enforces*; the runtime independently
+  *refuses* unconfirmed actions) — see ADR-0004.
+- **Pi** (Mario Zechner's coding agent) — **file-based blackboard** for full
+  observability; a typed event bus with **blocking interception** (`on(event) →
+  {block, reason}`) — the governance hook our gate needs; **provider-agnostic,
+  JSON-serializable context** as the unit of cross-agent handoff.
+- **OpenClaw** (TS agent gateway, ex-Clawdbot/Moltbot) — **pluggable runtime backends
+  with fail-closed selection** (ACP): a peer advertises which runtime it speaks and
+  negotiation is explicit — direct support for ADR-0003's Worker-as-plugin-seam;
+  **transport-only channel plugins** (a clean hexagonal seam); **shared-vs-per-agent
+  state split** in one store.
+- **LangGraph / MetaGPT / AutoGen / CrewAI** — CRDT-like **channels with reducers** for
+  concurrent merge (LangGraph), **subscribe-by-interest** rather than addressing
+  (MetaGPT `_watch`, AutoGen topics) which kills O(N²) peer wiring, and
+  **handoff-as-tool-call** (OpenAI Swarm / LangGraph `Command`) so delegation rides the
+  existing tool loop with no new control primitive.
+- **Claude Agent SDK** — the `PreToolUse → deny/allow/ask → canUseTool → PostToolUse`
+  permission eval order is the exact mechanism ADR-0003 §2 wires the lease gate into.
 
-> A background research pass on specific harnesses ("Pi", "OpenClaw"/OpenHands, and the
-> cooperative-agent landscape) is in flight; concrete borrowed mechanisms will be folded
-> into this section or split into follow-up ADRs as they firm up.
+**Reality check from the survey:** *no* surveyed framework ships a literally
+peer-to-peer transport — even AutoGen's "distributed" runtime is hub-and-spoke gRPC. The
+coordination *abstractions* transfer cleanly, but the gossip/CRDT/libp2p transport for a
+true `NetworkedSubstrate` (ADR-0002 §4) is **ours to build** and remains the project's
+hardest, least-precedented piece. This sharpens, but does not change, decision (1).
+
+Refinements this surfaces (captured as follow-ups, not changes to this decision):
+**subscribe-by-interest** on the `Substrate` port; a possible separate **`Memory` port**
+(namespaced, TTL'd, CRDT-mergeable, artifact-by-reference) distinct from the event log;
+**handoff-as-tool-call** as the peer-delegation idiom.
 
 ## Follow-ups
 
-- **ADR-0002** — `Substrate` port contract + claim/lease protocol (the consistency design).
-- **ADR-0003** — `Worker` port + Claude Agent SDK adapter (model, tools, lifecycle).
-- **ADR-0004** — `ToolHost` capability/permission model.
+- **ADR-0002** — `Substrate` port contract + claim/lease protocol (the consistency design). ✅ drafted
+- **ADR-0003** — `Worker` port + Claude Agent SDK adapter (model, tools, lifecycle). ✅ drafted
+- **ADR-0004** — `ToolHost` capability/permission model. ✅ drafted
+- **ADR-0005** (anticipated) — the peer/agent loop use-case (claim → run Worker → publish).
+- **ADR-0006** (anticipated) — `Substrate` **subscribe-by-interest** (topic/`cause_by`
+  filtering) so peers wire by interest, not addressing.
+- **ADR-0007** (anticipated) — a separate **`Memory` port** (namespaced, TTL'd,
+  CRDT-mergeable, artifact-by-reference) vs. folding all state into the event log.
+- **ADR-0008** (anticipated) — **handoff-as-tool-call** as the peer-delegation idiom.
