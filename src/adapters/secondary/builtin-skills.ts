@@ -1,4 +1,5 @@
 import type { Skill } from "../../ports/skill.js";
+import type { Worker } from "../../ports/worker.js";
 import type { ReducedContext } from "../../domain/context.js";
 import { httpProbeTool } from "./http-probe-tool.js";
 import { ProbeWorker } from "./probe-worker.js";
@@ -42,6 +43,32 @@ export const echoSkill: Skill = {
   match: () => true,
   run: async (t) => ({ status: "completed", summary: `echo: ${t.spec.goal}` }),
 };
+
+/** Narrate network health from the REDUCED context via an LLM (ADR-0013 follow-up): pulls
+ *  `network_state` and asks the worker to write a report — the model sees the compact snapshot,
+ *  never raw events. `makeAnalyzeSkill` takes any Worker (testable); `analyzeSkill` wires Claude. */
+export function makeAnalyzeSkill(worker: Worker): Skill {
+  return {
+    name: "analyze",
+    description: "Narrate network health from the reduced state via an LLM.",
+    match: (t) => t.spec.goal.startsWith("analyze") || t.spec.goal.startsWith("report"),
+    run: async (t, ctx) => {
+      const res = await ctx.tools.invoke({ name: "network_state", args: {} });
+      const reduced = res.output as ReducedContext;
+      const prompt =
+        "You are a network operations assistant. Given the current reduced network state " +
+        "(one entry per target), write a SHORT health report: overall status first, then call out " +
+        "any unreachable/unhealthy/violation targets by name. Do not invent data.\n\nState:\n" +
+        JSON.stringify(reduced, null, 2);
+      return worker.run({ taskId: t.taskId, spec: { goal: prompt } }, ctx);
+    },
+  };
+}
+
+export async function analyzeSkill(model?: string): Promise<Skill> {
+  const { createClaudeWorkerFactory } = await import("./claude-sdk.js");
+  return makeAnalyzeSkill(createClaudeWorkerFactory(model !== undefined ? { model } : {})());
+}
 
 /** General skill backed by a Claude agent (loads the SDK lazily). Catch-all fallback when
  *  ANTHROPIC_API_KEY is set. */

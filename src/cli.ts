@@ -22,7 +22,7 @@ import { registerHttpProbe } from "./adapters/secondary/http-probe-tool.js";
 import { ProbeWorker } from "./adapters/secondary/probe-worker.js";
 import type { Skill } from "./ports/skill.js";
 import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
-import { probeSkill, summarySkill, echoSkill, claudeSkill } from "./adapters/secondary/builtin-skills.js";
+import { probeSkill, summarySkill, echoSkill, claudeSkill, analyzeSkill } from "./adapters/secondary/builtin-skills.js";
 import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { networkStateTool } from "./adapters/secondary/network-state-tool.js";
 import { reduceContext } from "./domain/context.js";
@@ -109,9 +109,10 @@ async function assembleSkills(
 ): Promise<{ skills: Skill[]; registry: ToolRegistry; errors: Array<{ file: string; error: string }> }> {
   const dir = str(args, "skills-dir", ".weave/skills");
   const { skills: loaded, errors } = await loadSkills(dir);
-  const fallback =
-    !opts.fake && process.env["ANTHROPIC_API_KEY"] ? await claudeSkill(opts.model) : echoSkill;
-  const skills: Skill[] = [probeSkill, summarySkill, ...loaded, fallback];
+  const useClaude = !opts.fake && Boolean(process.env["ANTHROPIC_API_KEY"]);
+  const fallback = useClaude ? await claudeSkill(opts.model) : echoSkill;
+  const llmSkills: Skill[] = useClaude ? [await analyzeSkill(opts.model)] : [];
+  const skills: Skill[] = [probeSkill, summarySkill, ...llmSkills, ...loaded, fallback];
 
   const registry = new ToolRegistry();
   const seen = new Set<string>();
