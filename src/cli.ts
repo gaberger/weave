@@ -123,8 +123,13 @@ async function cmdUp(args: Args): Promise<void> {
   weave.subscribe(0, (e) => console.log(fmt(e)));
 
   const ac = new AbortController();
+  // Hold the event loop open: the peer's poll/heartbeat timers are unref'd (so they never
+  // keep a test process alive), and start()'s promise alone doesn't keep Node running. This
+  // ref'd timer makes `up` a real daemon until SIGINT.
+  const keepAlive = setInterval(() => {}, 1 << 30);
   const shutdown = () => {
     console.log("\nweave: shutting down…");
+    clearInterval(keepAlive);
     ac.abort();
     void peer.stop().then(() => {
       weave.close();

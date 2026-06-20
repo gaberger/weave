@@ -39,8 +39,15 @@ export class BunSqliteSubstrate implements Substrate {
 
   constructor(opts: BunSqliteSubstrateOptions) {
     this.db = new Database(opts.filename);
-    this.db.exec("PRAGMA journal_mode = WAL");
+    // busy_timeout before any write so contended operations wait rather than failing.
     this.db.exec("PRAGMA busy_timeout = 5000");
+    // WAL is persistent in the file header; tolerate a lost cold-start switch race between
+    // peers (the loser just sees the winner's WAL). Other lock waits use busy_timeout.
+    try {
+      this.db.exec("PRAGMA journal_mode = WAL");
+    } catch (e) {
+      if (!/lock|busy/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    }
     this.db.exec(
       `CREATE TABLE IF NOT EXISTS events (
         seq      INTEGER PRIMARY KEY AUTOINCREMENT,

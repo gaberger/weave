@@ -49,8 +49,17 @@ export class SqliteSubstrate implements Substrate {
 
   constructor(opts: SqliteSubstrateOptions) {
     this.db = new Database(opts.filename);
-    this.db.pragma("journal_mode = WAL");
+    // busy_timeout before any write so contended operations wait rather than failing.
     this.db.pragma("busy_timeout = 5000");
+    // WAL mode is persistent in the file header — once any connection sets it, all use it.
+    // On a fresh DB two peers can race the one-time switch; the loser just sees the winner's
+    // WAL, so ignore a lost-race lock here (multi-peer cold-start). Other lock waits are
+    // covered by busy_timeout.
+    try {
+      this.db.pragma("journal_mode = WAL");
+    } catch (e) {
+      if (!/lock|busy/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    }
     this.db.exec(
       `CREATE TABLE IF NOT EXISTS events (
         seq      INTEGER PRIMARY KEY AUTOINCREMENT,

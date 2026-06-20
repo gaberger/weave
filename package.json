@@ -16,6 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test $(find src -name '*.test.ts')",
     "test:bun": "bun test ./src/adapters/secondary/bun-sqlite-substrate.bun-test.ts",
+    "demo": "bash scripts/demo.sh",
     "weave": "node --import tsx src/cli.ts"
   },
   "comments": {

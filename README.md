@@ -23,6 +23,32 @@ How far you scale is an **adapter choice**, not a rewrite. That is the core bet,
 3. **Spec & ADR first.** Decisions are recorded before code (inherited from hex).
 4. **Hexagonal core.** `domain → ports → usecases → adapters`; adapters never import adapters.
 
+## Demo
+
+One command — a cooperative swarm of two peers sharing one substrate, tasks claimed
+exactly once and split between them (offline, no API key):
+
+```bash
+npm run build:bin   # optional: compile ./weave (else the demo uses node+tsx)
+npm run demo
+```
+
+```
+── status ───────────────────────────────────
+task-a026c4c1    [done] summarize the readme
+task-c41e978b    [done] write unit tests
+...
+── work split (completions per peer) ────────
+   peer-a: 4
+   peer-b: 2
+── exactly-once check ───────────────────────
+   6 completions for 6 tasks
+```
+
+The event log shows the protocol: when both peers race to claim a task, exactly one wins
+(lowest `seq`); the other's claim stays inert. The **federated** story (partition → heal →
+deterministic convergence) is proven in `npm test` — see the NetworkedSubstrate spec.
+
 ## CLI
 
 A hex/pi-style command line (ADR-0010). During dev, run via Node:
