@@ -14,8 +14,6 @@ import type { SealedEvent } from "./domain/event.js";
 import { systemClock } from "./domain/clock.js";
 import { TaskKind, type DeclaredPayload } from "./domain/task.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
-import { SqliteSubstrate } from "./adapters/secondary/sqlite-substrate.js";
-import { createClaudeWorkerFactory } from "./adapters/secondary/claude-sdk.js";
 import { declareTask } from "./usecases/declare.js";
 import { createPeer } from "./composition-root.js";
 
@@ -57,10 +55,24 @@ const num = (args: Args, key: string, dflt: number): number => {
 };
 const has = (args: Args, key: string): boolean => args.flags.has(key);
 
-function openSubstrate(args: Args): SqliteSubstrate {
+type ClosableSubstrate = Substrate & { close(): void };
+
+/** Pick the substrate by runtime so the Bun binary stays native-addon-free (ADR-0010 §4):
+ *  Bun → bun:sqlite, Node → better-sqlite3. Dynamic import keeps the unused one out of the
+ *  active runtime (and `--external better-sqlite3` keeps it out of the Bun bundle). */
+async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
   const file = str(args, "db", DEFAULT_DB);
   mkdirSync(dirname(file), { recursive: true });
-  return new SqliteSubstrate({ filename: file, clock: systemClock });
+  const opts = { filename: file, clock: systemClock };
+  if (typeof Bun !== "undefined") {
+    const { BunSqliteSubstrate } = await import("./adapters/secondary/bun-sqlite-substrate.js");
+    return new BunSqliteSubstrate(opts);
+  }
+  // Non-literal specifier so Bun's bundler does NOT pull the native better-sqlite3 path into
+  // the compiled binary (this branch only runs under Node). Types come from the type-only import.
+  const seg = "sqlite-substrate";
+  const mod = (await import(`./adapters/secondary/${seg}.js`)) as typeof import("./adapters/secondary/sqlite-substrate.js");
+  return new mod.SqliteSubstrate(opts);
 }
 
 const fmt = (e: SealedEvent): string =>
@@ -75,7 +87,7 @@ async function readAll(weave: Substrate): Promise<SealedEvent[]> {
 // --- commands --------------------------------------------------------------
 
 async function cmdUp(args: Args): Promise<void> {
-  const weave = openSubstrate(args);
+  const weave = await openSubstrate(args);
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
   const fake = has(args, "fake");
 
@@ -84,7 +96,14 @@ async function cmdUp(args: Args): Promise<void> {
       return { status: "completed", summary: `(fake) handled: ${a.spec.goal}` };
     },
   });
-  const newWorker = fake ? fakeWorker : createClaudeWorkerFactory({ model: str(args, "model", "claude-sonnet-4-6") });
+  let newWorker: () => Worker;
+  if (fake) {
+    newWorker = fakeWorker;
+  } else {
+    // Load the SDK only when a real Claude worker is requested.
+    const { createClaudeWorkerFactory } = await import("./adapters/secondary/claude-sdk.js");
+    newWorker = createClaudeWorkerFactory({ model: str(args, "model", "claude-sonnet-4-6") });
+  }
 
   const peer = createPeer({
     weave,
@@ -124,7 +143,7 @@ async function cmdTask(args: Args): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const weave = openSubstrate(args);
+  const weave = await openSubstrate(args);
   const taskId = str(args, "id", `task-${randomUUID().slice(0, 8)}`);
   await declareTask(weave, () => randomUUID(), "cli", taskId, { goal });
   console.log(`weave: declared ${taskId} — ${goal}`);
@@ -132,7 +151,7 @@ async function cmdTask(args: Args): Promise<void> {
 }
 
 async function cmdStatus(args: Args): Promise<void> {
-  const weave = openSubstrate(args);
+  const weave = await openSubstrate(args);
   const events = await readAll(weave);
   const now = systemClock.now();
   const subjects = new Map<string, string>();
@@ -149,7 +168,7 @@ async function cmdStatus(args: Args): Promise<void> {
 }
 
 async function cmdLog(args: Args): Promise<void> {
-  const weave = openSubstrate(args);
+  const weave = await openSubstrate(args);
   for (const e of await readAll(weave)) console.log(fmt(e));
   if (has(args, "follow")) {
     const head = await weave.head();

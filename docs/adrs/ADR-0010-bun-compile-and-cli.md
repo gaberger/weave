@@ -51,8 +51,10 @@ Substrate/worker are chosen behind their ports, so this is configuration, not ne
 needs; both can complicate `--compile`. Because substrate selection is a `Substrate`-port
 choice (ADR-0001/0009), the mitigation is an **adapter swap, not a rewrite**:
 
-- Add a **`bun:sqlite` substrate** (Bun's built-in SQLite, zero native addon) as a
-  follow-up; the CLI picks it when running under Bun. Same `Substrate` contract.
+- A **`bun:sqlite` substrate** (Bun's built-in SQLite, zero native addon) is the native-free
+  path; the CLI selects it at runtime when `typeof Bun !== "undefined"`, else the
+  better-sqlite3 `SqliteSubstrate` under Node. Same `Substrate` contract. **Implemented &
+  verified** (`BunSqliteSubstrate`).
 - For the SDK, the compiled binary may need the SDK present at runtime (or marked
   `--external`); documented until verified. The Claude worker is one adapter behind the
   `Worker` port, so a binary can ship with only `InProcess`/`--fake` if needed.
@@ -64,14 +66,19 @@ choice (ADR-0001/0009), the mitigation is an **adapter swap, not a rewrite**:
 - The CLI reuses the entire tested core unchanged — it's just another primary adapter.
 - Runtime differences (Node vs Bun, better-sqlite3 vs bun:sqlite) stay adapter choices.
 
+**Verified (2026-06-19):** Bun 1.3.14 installed; `bun build --compile` produces a ~92 MB
+self-contained ELF `weave` binary that runs standalone (no Node, no Bun, no node_modules)
+through the full `task → up --fake → status → log` lifecycle, using `bun:sqlite` with zero
+native addon. The native-free design avoided the better-sqlite3 single-binary trap: the
+Node-only substrate import is non-analyzable so Bun's bundler never pulls it in.
+
 **Negative / risks**
-- **Unverified in this environment:** Bun is not installed here, so `--compile` and the
-  resulting binary are **not yet validated**. The CLI is verified under `node --import tsx`;
-  the Bun binary step is a documented TODO, not a tested claim.
-- Native-addon-in-single-binary is the real unknown; the bun:sqlite follow-up exists
-  precisely to sidestep it.
-- Two runtimes (Node for tests, Bun for the binary) is mild divergence risk until tests
-  also move to Bun.
+- **Two runtimes** (Node for the main test suite, Bun for the binary + `BunSqliteSubstrate`)
+  is mild divergence risk. Mitigated: `test:bun` covers the bun:sqlite adapter; the rest of
+  the code is shared and runtime-agnostic. Full `bun test` migration remains optional.
+- **Claude SDK in the compiled binary** is bundled (works for `--fake`); a real-Claude
+  binary run is not yet smoke-tested under `--compile` (needs a key) — distinct from the
+  substrate, which is verified.
 
 ## Alternatives considered
 
@@ -84,7 +91,7 @@ choice (ADR-0001/0009), the mitigation is an **adapter swap, not a rewrite**:
 
 ## Follow-ups
 
-- Install Bun in CI; verify `bun build --compile` and smoke-test the binary; wire a
-  `build:bin` script (added now, unverified).
-- `bun:sqlite` substrate adapter for native-free compiled builds.
-- Decide whether to migrate tests to `bun test` (single runtime).
+- Wire Bun into CI (install + `build:bin` + run the binary smoke + `test:bun`).
+- Smoke-test a real-Claude binary run under `--compile` (needs `ANTHROPIC_API_KEY`).
+- Decide whether to migrate the whole suite to `bun test` (single runtime).
+- ✅ `build:bin` script + `bun:sqlite` substrate + runtime selection — done.

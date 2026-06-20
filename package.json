@@ -15,6 +15,7 @@
     "build:bin": "bun build src/cli.ts --compile --outfile weave",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test $(find src -name '*.test.ts')",
+    "test:bun": "bun test ./src/adapters/secondary/bun-sqlite-substrate.bun-test.ts",
     "weave": "node --import tsx src/cli.ts"
   },
   "comments": {
@@ -22,6 +23,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/bun": "^1.3.14",
     "@types/node": "^20.0.0",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0"

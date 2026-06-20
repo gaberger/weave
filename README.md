@@ -38,9 +38,14 @@ npm run weave -- log --follow                   # tail the event log
 no-LLM worker so the loop is demoable. `up` and `task` coordinate across separate terminals
 via the file-backed SQLite substrate.
 
-**Single binary (Bun):** `bun build src/cli.ts --compile --outfile weave` → `./weave up`.
-*Not yet verified in CI* (Bun-compile of the native `better-sqlite3` / SDK deps is a
-documented follow-up; see ADR-0010 — a `bun:sqlite` substrate is the native-free path).
+**Single binary (Bun):** `npm run build:bin` (`bun build src/cli.ts --compile`) produces a
+self-contained `./weave` executable — no Node, no node_modules. Verified end-to-end. Under
+Bun it uses the built-in `bun:sqlite` substrate (zero native addons); under Node it uses
+`better-sqlite3` — selected at runtime behind the `Substrate` port (ADR-0010).
+
+```bash
+npm run build:bin && ./weave task "ship it" && ./weave up --fake
+```
 
 ## Running a real Claude worker
 
