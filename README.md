@@ -93,8 +93,10 @@ You are a research agent. Fetch the arXiv API feed for the topic with http_fetch
 recent papers, fetch each paper's page, and write a concise digest. Notify if configured.
 ```
 
-**Code skill** (`.js` / `.ts`) — when you want determinism; default-export a `Skill`
-(`{ name, description, match, run, tools? }`).
+**Code skill** (`.js` / `.ts` / `.mjs`) — when you want determinism (no LLM, no key);
+default-export a `Skill` (`{ name, description, match, run, tools? }`). Example
+([`examples/plugins/http-check.mjs`](examples/plugins/http-check.mjs)): GETs each URL via the
+`http_fetch` tool and returns `completed`/`failed` based on status — full control, deterministic.
 
 ```bash
 weave skills                              # list code + declarative skills
