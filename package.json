@@ -1,0 +1,22 @@
+{
+  "name": "weave",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A cooperative-network agent framework — autonomous Claude workers coordinating as peers over a shared substrate.",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  }
+}
