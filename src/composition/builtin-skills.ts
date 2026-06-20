@@ -1,8 +1,8 @@
-import type { Skill } from "../../ports/skill.js";
-import type { Worker } from "../../ports/worker.js";
-import type { ReducedContext } from "../../domain/context.js";
-import { httpProbeTool } from "./http-probe-tool.js";
-import { ProbeWorker } from "./probe-worker.js";
+import type { Skill } from "../ports/skill.js";
+import type { Worker } from "../ports/worker.js";
+import type { ReducedContext } from "../domain/context.js";
+import { httpProbeTool } from "../adapters/secondary/http-probe-tool.js";
+import { ProbeWorker } from "../adapters/secondary/probe-worker.js";
 
 /** Interrogation skill (ADR-0011): matches tasks with a `target` input, an explicit
  *  `probe` skill, or a goal starting with "probe ". Brings the http_probe tool. */

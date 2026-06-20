@@ -1,6 +1,6 @@
-import type { Skill } from "../../ports/skill.js";
-import { httpFetchTool } from "./http-fetch-tool.js";
-import { parseArxivAtom, arxivFeedUrl } from "../../domain/arxiv.js";
+import type { Skill } from "../ports/skill.js";
+import { httpFetchTool } from "../adapters/secondary/http-fetch-tool.js";
+import { parseArxivAtom, arxivFeedUrl } from "../domain/arxiv.js";
 
 interface FetchOut {
   status: number;

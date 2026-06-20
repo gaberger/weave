@@ -1,6 +1,6 @@
-import type { ToolDefinition } from "../../ports/tool-host.js";
-import type { Channel, Notification } from "../../ports/channel.js";
-import { notifyAll } from "./channels.js";
+import type { ToolDefinition } from "../ports/tool-host.js";
+import type { Channel, Notification } from "../ports/channel.js";
+import { notifyAll } from "../adapters/secondary/channels.js";
 
 /** `notify` tool (ADR-0014 §3): send to all configured channels. Effect is IRREVERSIBLE —
  *  an external message can't be unsent — so it's lease-gated (no duplicate alerts after a

@@ -225,15 +225,15 @@ end-to-end and is skipped automatically when the key is absent.
 The hex boundaries are a **build gate**, not a hope (ADR-0015):
 
 ```bash
-weave doctor            # fails if any layer imports outward, or a relative import lacks .js
-weave doctor --strict   # also flags adapter→adapter (the textbook rule weave relaxes)
+weave doctor            # strict by default; fails on any boundary violation or missing .js
+weave doctor --lenient  # escape hatch (allows adapter→adapter)
 ```
 
 `checkArchitecture` (pure, in `domain/`) enforces the dependency cone: `domain → ports →
-usecases → adapters`, only the composition root (`composition-root.ts`, `cli.ts`) wires
-adapters, and inner layers never import outward. It runs in `npm test`, so a violation fails
-CI. weave deliberately permits adapter→adapter (skills/tools compose sub-adapters, ADR-0012);
-`--strict` makes that deviation visible and measurable.
+usecases → adapters`, inner layers never import outward, and **adapters import only ports +
+domain** (no adapter→adapter). The modules that *wire* adapters into skills/tool-bundles live
+in `composition/` (allowed to import adapters), alongside `composition-root.ts`/`cli.ts`. It
+runs in `npm test`, so a violation fails CI — weave is fully textbook-hex-compliant.
 
 ## Layout
 
@@ -243,5 +243,7 @@ docs/specs/       Behavioral specs (written before code)
 src/domain/       Pure types — agents, events, claims, the weave
 src/ports/        Interfaces — Substrate, Worker, ToolHost
 src/usecases/     Coordination logic — depends only on domain + ports
-src/adapters/     Substrate/worker implementations (in-process, SQLite, Claude SDK, …)
+src/adapters/     Leaf adapters — import only ports + domain (substrates, workers, tools, channels)
+src/composition/  Wires adapters into skills/tool-bundles (may import adapters)
+src/composition-root.ts, src/cli.ts   Entry roots — wire everything
 ```

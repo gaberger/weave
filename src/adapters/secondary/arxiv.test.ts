@@ -9,7 +9,7 @@ import type { WorkerContext } from "../../ports/worker.js";
 import { parseArxivAtom } from "../../domain/arxiv.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
 import { httpFetchTool } from "./http-fetch-tool.js";
-import { arxivDiscoverSkill } from "./arxiv-skills.js";
+import { arxivDiscoverSkill } from "../../composition/arxiv-skills.js";
 
 const FIXTURE = `<?xml version="1.0"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

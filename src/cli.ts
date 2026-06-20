@@ -18,22 +18,22 @@ import { compactWeave } from "./usecases/compaction.js";
 import { diffFinding, type ProbeFinding } from "./domain/interrogation.js";
 import { createPeer } from "./composition-root.js";
 import { ToolRegistry } from "./adapters/secondary/in-memory-tool-host.js";
-import { registerHttpProbe } from "./adapters/secondary/http-probe-tool.js";
+import { httpProbeTool } from "./adapters/secondary/http-probe-tool.js";
 import { ProbeWorker } from "./adapters/secondary/probe-worker.js";
 import type { Skill } from "./ports/skill.js";
 import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
-import { probeSkill, summarySkill, echoSkill, claudeSkill, analyzeSkill } from "./adapters/secondary/builtin-skills.js";
+import { probeSkill, summarySkill, echoSkill, claudeSkill, analyzeSkill } from "./composition/builtin-skills.js";
 import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { networkStateTool } from "./adapters/secondary/network-state-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
-import { arxivDiscoverSkill, arxivPaperSkill } from "./adapters/secondary/arxiv-skills.js";
+import { arxivDiscoverSkill, arxivPaperSkill } from "./composition/arxiv-skills.js";
 import { reduceContext } from "./domain/context.js";
 import { LoopRunner } from "./usecases/loop.js";
 import { SystemTimer } from "./adapters/secondary/system-timer.js";
 import { checkArchitecture } from "./domain/architecture.js";
 import { scanSourceFiles } from "./adapters/secondary/source-scan.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
-import { notifyTool } from "./adapters/secondary/notify-tool.js";
+import { notifyTool } from "./composition/notify-tool.js";
 
 const DEFAULT_DB = ".weave/weave.db";
 
@@ -274,7 +274,7 @@ async function cmdWatch(args: Args): Promise<void> {
   const expect = has(args, "expect") ? num(args, "expect", 200) : undefined;
   const once = has(args, "once");
 
-  const registry = registerHttpProbe(new ToolRegistry());
+  const registry = new ToolRegistry().register(httpProbeTool);
   const peer = createPeer({
     weave,
     cfg: {
@@ -471,13 +471,15 @@ async function cmdCompact(args: Args): Promise<void> {
 
 function cmdDoctor(args: Args): void {
   const dir = str(args, "src", "src");
+  const strict = !has(args, "lenient"); // strict by default — weave is fully hex-compliant
   const files = scanSourceFiles(dir);
-  const violations = checkArchitecture(files, { strict: has(args, "strict") });
+  const violations = checkArchitecture(files, { strict });
+  const mode = strict ? "strict" : "lenient";
   if (violations.length === 0) {
-    console.log(`weave doctor: hex architecture OK — ${files.length} files${has(args, "strict") ? " (strict)" : ""}`);
+    console.log(`weave doctor: hex architecture OK — ${files.length} files (${mode})`);
     return;
   }
-  console.error(`weave doctor: ${violations.length} violation(s)${has(args, "strict") ? " (strict)" : ""}:`);
+  console.error(`weave doctor: ${violations.length} violation(s) (${mode}):`);
   for (const v of violations) console.error(`  ${v.file} -> ${v.importPath}: ${v.reason}`);
   process.exitCode = 1;
 }
@@ -571,7 +573,7 @@ usage:
   weave task <goal...>   [--db <path>] [--id <taskId>] [--skill <name>]
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
-  weave doctor    [--strict] [--src <dir>]   check hex architecture boundaries
+  weave doctor    [--lenient] [--src <dir>]  check hex architecture boundaries (strict by default)
   weave help
 
 default db: ${DEFAULT_DB}   (Claude worker needs ANTHROPIC_API_KEY; use --fake to demo offline)`);

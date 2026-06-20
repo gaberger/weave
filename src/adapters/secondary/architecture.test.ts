@@ -35,9 +35,9 @@ test("checkArchitecture allows the legal cone (and adapter->adapter by default)"
   assert.deepEqual(v, []);
 });
 
-test("ENFORCED: the weave source tree has no hex boundary violations", () => {
+test("ENFORCED: the weave source tree has no hex boundary violations (STRICT)", () => {
   const files = scanSourceFiles("src");
-  const v = checkArchitecture(files);
+  const v = checkArchitecture(files, { strict: true }); // strict: no adapter→adapter either
   const report = v.map((x) => `  ${x.file} -> ${x.importPath}: ${x.reason}`).join("\n");
   assert.equal(v.length, 0, `hex architecture violations:\n${report}`);
   assert.ok(files.length > 20, "scanner should find the source files");

@@ -6,15 +6,15 @@
 import { query as sdkQuery, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
-import type { Worker } from "../../ports/worker.js";
-import type { ToolHost } from "../../ports/tool-host.js";
+import type { Worker } from "../ports/worker.js";
+import type { ToolHost } from "../ports/tool-host.js";
 import {
   ClaudeAgentSdkWorker,
   type ClaudeQuery,
   type ClaudeWorkerConfig,
   type SdkMessage,
   type ToolBridge,
-} from "./claude-agent-sdk-worker.js";
+} from "../adapters/secondary/claude-agent-sdk-worker.js";
 
 type SdkQueryParams = Parameters<typeof sdkQuery>[0];
 

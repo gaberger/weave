@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import type { ToolHost } from "../../ports/tool-host.js";
 import type { Worker, TaskAssignment, WorkerContext } from "../../ports/worker.js";
 import type { ReducedContext } from "../../domain/context.js";
-import { makeAnalyzeSkill } from "./builtin-skills.js";
+import { makeAnalyzeSkill } from "../../composition/builtin-skills.js";
 
 test("analyze skill: feeds the reduced context to the worker and returns its report", async () => {
   const reduced: ReducedContext = {

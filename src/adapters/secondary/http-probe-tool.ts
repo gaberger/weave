@@ -1,5 +1,4 @@
 import type { ToolDefinition } from "../../ports/tool-host.js";
-import type { ToolRegistry } from "./in-memory-tool-host.js";
 import type { ProbeResult } from "../../domain/interrogation.js";
 
 /** The `http_probe` interrogation tool (ADR-0011 §1): a read-effect HTTP request returning
@@ -36,8 +35,3 @@ export const httpProbeTool: ToolDefinition = {
     }
   },
 };
-
-/** Convenience: register `http_probe` on a registry. */
-export function registerHttpProbe(registry: ToolRegistry): ToolRegistry {
-  return registry.register(httpProbeTool);
-}

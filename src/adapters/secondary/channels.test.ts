@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { slackChannel, telegramChannel, emailChannel, channelsFrom, notifyAll, type HttpSend } from "./channels.js";
-import { notifyTool } from "./notify-tool.js";
+import { notifyTool } from "../../composition/notify-tool.js";
 
 interface Captured {
   url: string;

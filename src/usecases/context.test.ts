@@ -9,7 +9,7 @@ import { reduceContext, type ReducedContext } from "../domain/context.js";
 import type { ProbeFinding } from "../domain/interrogation.js";
 import { InProcessSubstrate } from "../adapters/secondary/in-process-substrate.js";
 import { networkStateTool } from "../adapters/secondary/network-state-tool.js";
-import { summarySkill } from "../adapters/secondary/builtin-skills.js";
+import { summarySkill } from "../composition/builtin-skills.js";
 
 const finding = (target: string, status: number): ProbeFinding => ({
   target,

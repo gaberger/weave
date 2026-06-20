@@ -8,7 +8,7 @@ import type { LeaseGuard } from "../../ports/lease.js";
 import type { WorkerContext } from "../../ports/worker.js";
 import type { ProbeResult } from "../../domain/interrogation.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
-import { registerHttpProbe } from "./http-probe-tool.js";
+import { httpProbeTool } from "./http-probe-tool.js";
 import { ProbeWorker } from "./probe-worker.js";
 
 const heldLease: LeaseGuard = { held: async () => true, assertHeld: async () => {}, renew: async () => {} };
@@ -74,7 +74,7 @@ test("http_probe: real round-trip against a local server", async () => {
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as AddressInfo).port;
-  const host = registerHttpProbe(new ToolRegistry()).hostFor({ tools: "*", maxEffect: "read" });
+  const host = new ToolRegistry().register(httpProbeTool).hostFor({ tools: "*", maxEffect: "read" });
   try {
     const ok = (await host.invoke({ name: "http_probe", args: { target: `http://127.0.0.1:${port}/health` } })).output as ProbeResult;
     assert.equal(ok.status, 200);

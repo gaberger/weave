@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import type { LeaseGuard } from "../../ports/lease.js";
 import type { WorkerContext } from "../../ports/worker.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
-import { createClaudeWorkerFactory } from "./claude-sdk.js";
+import { createClaudeWorkerFactory } from "../../composition/claude-sdk.js";
 
 /**
  * Live end-to-end smoke test against the real Claude Agent SDK. Skipped unless

@@ -26,6 +26,7 @@ const ALLOWED: Record<Layer, readonly Layer[]> = {
 export function layerOf(path: string): Layer {
   const p = path.replace(/\\/g, "/").replace(/\.(ts|js|mts|mjs)$/, "");
   if (p.endsWith("/composition-root") || p.endsWith("/cli") || p === "src/cli") return "composition";
+  if (p.includes("/composition/")) return "composition";
   if (p.includes("/domain/")) return "domain";
   if (p.includes("/ports/")) return "ports";
   if (p.includes("/usecases/")) return "usecases";
