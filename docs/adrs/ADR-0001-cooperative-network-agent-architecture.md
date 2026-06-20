@@ -164,3 +164,4 @@ Refinements this surfaces (captured as follow-ups, not changes to this decision)
 - **ADR-0007** (anticipated) — a separate **`Memory` port** (namespaced, TTL'd,
   CRDT-mergeable, artifact-by-reference) vs. folding all state into the event log.
 - **ADR-0008** (anticipated) — **handoff-as-tool-call** as the peer-delegation idiom.
+- **ADR-0009** — `NetworkedSubstrate` (HLC-ordered replicated log; the federated case). ✅ drafted

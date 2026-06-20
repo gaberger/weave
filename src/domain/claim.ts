@@ -1,5 +1,14 @@
 import type { SealedEvent } from "./event.js";
+import { compareHlc } from "./hlc.js";
 import { TaskKind, type LeasePayload } from "./task.js";
+
+/** Global order between two events: HLC when both carry it (multi-writer; ADR-0009),
+ *  else local `seq` (single-writer). Within one deployment events are uniform, so there
+ *  is no mixing in practice. */
+function compareOrder(a: SealedEvent, b: SealedEvent): number {
+  if (a.hlc !== undefined && b.hlc !== undefined) return compareHlc(a.hlc, b.hlc);
+  return a.seq - b.seq;
+}
 
 /** Who currently holds a subject's claim. */
 export interface Holder {
@@ -28,7 +37,7 @@ export function currentHolder(
 ): Holder | null {
   const ev = events
     .filter((e) => e.subject === subject)
-    .sort((a, b) => a.seq - b.seq);
+    .sort(compareOrder);
 
   let holder: Holder | null = null;
 
