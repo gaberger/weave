@@ -452,23 +452,29 @@ function logFileFor(args: Args): string {
 }
 
 /**
+ * Liveness of a pid via signal 0 (a probe that delivers nothing). "alive" = running and ours;
+ * "stale" = no such process (ESRCH), so a leftover pidfile is safe to reclaim; "foreign" = exists
+ * but owned by another user (EPERM), i.e. the pid was recycled and is NOT our peer.
+ */
+function pidLiveness(pid: number): "alive" | "stale" | "foreign" {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH" ? "stale" : "foreign";
+  }
+}
+
+/**
  * Decide what to do when a peer may already be running under `pidFile`.
  * Returns `true` to proceed with daemonizing, `false` to abort (caller exits).
- *
- * TODO(you): implement the stale-PID policy. See request below the function.
  */
 function shouldDaemonize(pidFile: string): boolean {
   if (!existsSync(pidFile)) return true;
   const raw = readFileSync(pidFile, "utf8").trim();
   const pid = Number(raw);
   if (!Number.isInteger(pid) || pid <= 0) return true; // garbage pidfile → reclaim
-  try {
-    process.kill(pid, 0); // signal 0: liveness probe, sends nothing
-    return false; // alive → refuse
-  } catch (e) {
-    // ESRCH → no such process (stale) → reclaim; EPERM → alive but not ours → refuse
-    return (e as NodeJS.ErrnoException).code === "ESRCH";
-  }
+  return pidLiveness(pid) === "stale"; // stale → reclaim; alive/foreign → refuse
 }
 
 /**
@@ -605,6 +611,53 @@ async function cmdDown(args: Args): Promise<void> {
   }
   console.error(`weave: pid ${pid} did not exit after SIGTERM; try: kill -9 ${pid}`);
   process.exitCode = 1;
+}
+
+/** Best-effort command line for a live pid (macOS/Linux `ps`); empty string if unavailable. Lets
+ *  `weave ps` show *what* each peer is running (up / pool / loop --skill …), not just its pid. */
+function pidCommand(pid: number): string {
+  try {
+    const r = spawnSync("ps", ["-p", String(pid), "-o", "command="], { timeout: 3000, encoding: "utf8" });
+    return r.status === 0 ? r.stdout.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * List daemonized weave peers/pools by scanning the pidfiles that live next to the db
+ * (`weave up` / `pool` / `loop --daemon` write `<dir>/<name>.pid` and remove it on graceful
+ * shutdown). Read-only: probes liveness with signal 0 and never opens the substrate or mutates a
+ * pidfile — `weave down` owns stale-pidfile cleanup, `ps` only reports it. A leftover file whose
+ * process is gone shows as "stale"; a recycled, non-ours pid shows as "foreign".
+ */
+function cmdPs(args: Args): void {
+  const dir = dirname(str(args, "db", DEFAULT_DB));
+  let pidFiles: string[];
+  try {
+    pidFiles = readdirSync(dir).filter((f) => f.endsWith(".pid")).sort();
+  } catch {
+    pidFiles = []; // no .weave dir yet → nothing running
+  }
+  if (pidFiles.length === 0) {
+    console.log(`weave: no peers running (no *.pid files in ${dir}/)`);
+    return;
+  }
+  const rows = pidFiles.map((f) => {
+    const raw = readFileSync(join(dir, f), "utf8").trim();
+    const pid = Number(raw);
+    if (!Number.isInteger(pid) || pid <= 0) return { f, pid: raw || "?", status: "invalid", cmd: "" };
+    const status = pidLiveness(pid);
+    return { f, pid: String(pid), status, cmd: status === "alive" ? pidCommand(pid) : "" };
+  });
+  const wF = Math.max(8, ...rows.map((r) => r.f.length));
+  const wP = Math.max(3, ...rows.map((r) => r.pid.length));
+  const alive = rows.filter((r) => r.status === "alive").length;
+  console.log(`weave: ${alive} running, ${rows.length - alive} stale/other — pidfiles in ${dir}/`);
+  console.log(`  ${"PIDFILE".padEnd(wF)}  ${"PID".padStart(wP)}  STATUS   COMMAND`);
+  for (const r of rows) {
+    console.log(`  ${r.f.padEnd(wF)}  ${r.pid.padStart(wP)}  ${r.status.padEnd(7)}  ${r.cmd}`);
+  }
 }
 
 /**
@@ -1462,6 +1515,7 @@ usage:
                   supervise N lightweight peer processes (default 4) that claim work from
                   the shared weave; restarts crashed workers; stop the pool with weave down
   weave down      [--db <path>] [--pid-file <path>]   stop a daemonized peer or pool (SIGTERM)
+  weave ps        [--db <path>]   list daemonized peers/pools (pidfiles next to --db) + liveness
   weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>] [--model m | --no-tier]
                   (by default the goal is classified to a model tier — ADR-0022 — Haiku/Sonnet/Opus;
                   --model pins one, --no-tier leaves the choice to the claiming peer's default)
@@ -1501,6 +1555,8 @@ async function main(): Promise<void> {
       return cmdUp(args);
     case "down":
       return cmdDown(args);
+    case "ps":
+      return cmdPs(args);
     case "pool":
       return cmdPool(args);
     case "loop":
