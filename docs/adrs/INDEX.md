@@ -4,7 +4,7 @@ Append-only log of architectural decisions for `weave`. Newest at top.
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
-| [0022](ADR-0022-model-tiering.md) | Per-task model tiering (Haiku/Sonnet/Opus by task) | Proposed | 2026-06-21 |
+| [0022](ADR-0022-model-tiering.md) | Per-task model tiering (Haiku/Sonnet/Opus by task) | Accepted | 2026-06-21 |
 | [0021](ADR-0021-hybrid-knowledge-search.md) | Hybrid knowledge search (BM25 + optional embeddings) + the recall tool | Accepted | 2026-06-21 |
 | [0020](ADR-0020-knowledge-bundle-and-graph.md) | Durable knowledge bundle (OKF) + knowledge graph | Accepted | 2026-06-21 |
 | [0019](ADR-0019-file-io-tools.md) | File-I/O tools (read_file / edit_file) — the missing self-maintenance primitive | Accepted | 2026-06-21 |

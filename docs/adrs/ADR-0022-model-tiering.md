@@ -1,6 +1,6 @@
 # ADR-0022: Per-task model tiering
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** models, routing, cost, latency, worker, tasks
