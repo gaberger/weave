@@ -1,5 +1,5 @@
 /**
- * Lexical search over the knowledge bundle (ADR-0018). Pure: BM25 ranking + a hybrid combiner that
+ * Lexical search over the knowledge bundle (ADR-0021). Pure: BM25 ranking + a hybrid combiner that
  * folds in optional semantic (vector) scores. No I/O and no embedding calls live here — the
  * composition layer reads concept files, optionally calls the Embedder port, and feeds the numbers
  * in. BM25 alone is fully offline and dependency-free; semantic re-rank is layered on when present.

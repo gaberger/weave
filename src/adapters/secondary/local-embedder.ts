@@ -2,7 +2,7 @@ import type { Embedder } from "../../ports/embedder.js";
 import { tokenize } from "../../domain/search.js";
 
 /**
- * A dependency-free "poor man's" Embedder (ADR-0018 §3): the hashing trick over word tokens plus
+ * A dependency-free "poor man's" Embedder (ADR-0021 §3): the hashing trick over word tokens plus
  * character trigrams, into a fixed-dim L2-normalised vector. Deterministic, offline, no model — so
  * the standalone binary gets a semantic-ish half for hybrid search with zero dependencies.
  *

@@ -4,6 +4,8 @@ Append-only log of architectural decisions for `weave`. Newest at top.
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
+| [0021](ADR-0021-hybrid-knowledge-search.md) | Hybrid knowledge search (BM25 + optional embeddings) + the recall tool | Accepted | 2026-06-21 |
+| [0020](ADR-0020-knowledge-bundle-and-graph.md) | Durable knowledge bundle (OKF) + knowledge graph | Accepted | 2026-06-21 |
 | [0019](ADR-0019-file-io-tools.md) | File-I/O tools (read_file / edit_file) — the missing self-maintenance primitive | Accepted | 2026-06-21 |
 | [0018](ADR-0018-container-sandbox.md) | Container sandbox — OS-level confinement behind the Worker port | Accepted | 2026-06-21 |
 | [0017](ADR-0017-self-authored-skills-and-sandbox.md) | Self-authored skills + the execution sandbox (the learning loop) | Accepted | 2026-06-21 |

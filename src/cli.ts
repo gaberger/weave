@@ -388,7 +388,7 @@ async function assembleSkills(
   registry.register(httpFetchTool); // generic HTTP capability
   if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // fan-out
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
-  // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0018 §4).
+  // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0021 §4).
   registry.register(recallTool(reportsDirFor(args), pickEmbedder(args)));
   if (has(args, "bash")) {
     // Opt-in shell access. Denylist always on; optional allowlist + timeout from flags.
@@ -911,7 +911,7 @@ function okfConceptFiles(reportsDir: string): string[] {
   return out;
 }
 
-// --- knowledge index: graph + search (ADR-0017/0018) ----------------------
+// --- knowledge index: graph + search (ADR-0020/0021) ----------------------
 
 const GRAPH_MARK = "<!-- weave:graph -->"; // sentinel: everything from here to EOF is generated
 
@@ -1141,7 +1141,7 @@ async function cmdSearch(args: Args): Promise<void> {
 }
 
 /** `recall`: a knowledge-search tool so skills/inference can retrieve prior reports before working
- *  (ADR-0018 §4). Reads the bundle, returns hybrid hits + graph neighbours as structured output. */
+ *  (ADR-0021 §4). Reads the bundle, returns hybrid hits + graph neighbours as structured output. */
 function recallTool(reportsDir: string, embedder: Embedder | null): ToolDefinition {
   return {
     name: "recall",

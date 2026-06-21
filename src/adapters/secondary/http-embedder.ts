@@ -6,7 +6,7 @@ import type { Embedder } from "../../ports/embedder.js";
  *   WEAVE_EMBED_KEY    required — API key (its presence is what enables semantic search)
  *   WEAVE_EMBED_URL    default https://api.openai.com/v1/embeddings
  *   WEAVE_EMBED_MODEL  default text-embedding-3-small
- * Returns null when no key is set, so callers fall back to BM25-only (ADR-0018 §3).
+ * Returns null when no key is set, so callers fall back to BM25-only (ADR-0021 §3).
  */
 export function httpEmbedderFromEnv(): Embedder | null {
   const key = process.env["WEAVE_EMBED_KEY"];

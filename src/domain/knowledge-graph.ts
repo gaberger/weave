@@ -1,5 +1,5 @@
 /**
- * Knowledge-graph model over the OKF report bundle (ADR-0017). Pure: builds nodes/edges from
+ * Knowledge-graph model over the OKF report bundle (ADR-0020). Pure: builds nodes/edges from
  * already-extracted per-report facts, and inverts them into forward/back neighbour sets. All I/O
  * (reading concept files, writing graph.json / graph.md, rewriting inline link sections) lives in
  * the composition layer (cli.ts) — this module never touches the filesystem.
