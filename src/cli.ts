@@ -7,7 +7,8 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, openSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync, spawn } from "node:child_process";
 
 import type { Substrate } from "./ports/substrate.js";
@@ -32,7 +33,7 @@ import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { echoSkill, claudeSkill } from "./composition/builtin-skills.js";
-import { loadAgentSkills } from "./composition/agent-skill.js";
+import { loadAgentSkills, loadClaudeSkills } from "./composition/agent-skill.js";
 import { notifyTool } from "./composition/notify-tool.js";
 
 const DEFAULT_DB = ".weave/weave.db";
@@ -43,7 +44,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills"]);
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -166,8 +167,22 @@ async function assembleSkills(
   const { skills: codeSkills, errors } = await loadSkills(dir);
   const llm = await pickLlm(args);
   const agentSkills = llm ? loadAgentSkills(dir, llm.make) : [];
+  // Optionally inherit Claude Code skills (<dir>/<name>/SKILL.md). An explicit
+  // --claude-skills-dir scans just that dir; otherwise project .claude/skills then
+  // ~/.claude/skills. Match keywords are derived from each description; dupes by name drop
+  // (project wins). Already-defined weave skill names also take precedence.
+  const claudeDirs = has(args, "claude-skills-dir")
+    ? [str(args, "claude-skills-dir", "")]
+    : [join(process.cwd(), ".claude", "skills"), join(homedir(), ".claude", "skills")];
+  const seen = new Set([...codeSkills, ...agentSkills].map((s) => s.name));
+  const claudeSkills: Skill[] = [];
+  if (llm && has(args, "claude-skills")) {
+    for (const d of claudeDirs)
+      for (const s of loadClaudeSkills(d, llm.make))
+        if (!seen.has(s.name)) (seen.add(s.name), claudeSkills.push(s));
+  }
   const fallback = llm ? claudeSkill(llm.make) : echoSkill;
-  const skills: Skill[] = [...codeSkills, ...agentSkills, fallback];
+  const skills: Skill[] = [...codeSkills, ...agentSkills, ...claudeSkills, fallback];
 
   const registry = new ToolRegistry();
   for (const s of skills) for (const t of s.tools ?? []) registry.register(t);
@@ -566,7 +581,8 @@ usage:
   weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>]
   weave loop --skill <name> [--interval 6h] [--once] [--notify ch] [goal...]
                   re-declare a task routed to <skill> each tick (a skill = a use-case)
-  weave skills    [--skills-dir <dir>] [--fake]   list code + declarative skills
+  weave skills    [--skills-dir <dir>] [--claude-skills [--claude-skills-dir <dir>]] [--fake]
+                  list code + declarative skills (--claude-skills inherits Claude SKILL.md)
   weave notify <text...> [--to slack,telegram,email] [--title T]
   weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
   weave report    [--db <path>] [--full]   print completed task results (the actual output)
