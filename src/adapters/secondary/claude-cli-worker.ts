@@ -29,8 +29,9 @@ export const realClaudeCliRunner: ClaudeCliRunner = (args, signal) =>
 export interface ClaudeCliConfig {
   readonly model?: string;
   readonly systemPrompt?: string;
-  /** Claude Code tools to auto-approve in print mode (default read-only). The CLI uses Claude
-   *  Code's OWN tools, not weave's ToolHost — so per ADR-0003 §6 keep this read-only. */
+  /** Claude Code tools to auto-approve in print mode. The CLI uses Claude Code's OWN tools, not
+   *  weave's ToolHost, so these bypass the effect-gate (ADR-0003 §6) — the caller decides the set.
+   *  The composition root (cli.ts) grants write tools by default and revokes them under --read-only. */
   readonly allowedTools?: readonly string[];
 }
 
@@ -38,8 +39,8 @@ export interface ClaudeCliConfig {
  * A Worker backed by the `claude -p` CLI (Claude Code in print mode). It uses the local
  * Claude Code login — **no ANTHROPIC_API_KEY needed** — and Claude Code's own tools. It's a
  * second backend behind the Worker port (ADR-0003): the SDK worker for programmatic/API-key
- * use, this for subscription/no-key use. It cannot intercept tool calls, so it is capped to
- * the read-only tools in `allowedTools`.
+ * use, this for subscription/no-key use. It cannot intercept tool calls, so its authority is
+ * fixed up-front by `allowedTools` (no per-call gate) rather than enforced per effect.
  */
 export class ClaudeCliWorker implements Worker {
   constructor(

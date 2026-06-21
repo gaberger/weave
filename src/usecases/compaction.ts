@@ -12,7 +12,9 @@ export interface CompactionResult {
 /**
  * Compact the weave (ADR-0007): fold settled subjects into a single `weave.snapshot` event
  * (condensation-as-an-event), then prune the folded events if the substrate supports it.
- * The snapshot is written BEFORE pruning, so settled status + latest findings survive.
+ * The snapshot is written BEFORE pruning, so settled *status* survives. NOTE: the snapshot keeps
+ * only subject IDs, not result text — durable results are mirrored to disk by persistReports()
+ * (cli.ts) before pruning can drop the completion events.
  */
 export async function compactWeave(
   weave: Substrate,
