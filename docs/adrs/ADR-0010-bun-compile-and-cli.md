@@ -1,6 +1,6 @@
 # ADR-0010: Bun as compile target + the `weave` CLI
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** tooling, cli, distribution, primary-adapter

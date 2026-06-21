@@ -1,6 +1,6 @@
 # ADR-0003: Worker port & Claude Agent SDK adapter
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** workers, claude, lifecycle, ports

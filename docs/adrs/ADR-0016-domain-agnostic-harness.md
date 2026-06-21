@@ -1,6 +1,6 @@
 # ADR-0016: weave is a domain-agnostic harness; use-cases are skills
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** architecture, harness, skills, foundational

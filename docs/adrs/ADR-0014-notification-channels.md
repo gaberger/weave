@@ -1,6 +1,6 @@
 # ADR-0014: Communication channels (email / Slack / Telegram)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** channels, notifications, ports, security

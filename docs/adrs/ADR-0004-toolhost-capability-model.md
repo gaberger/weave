@@ -1,6 +1,6 @@
 # ADR-0004: ToolHost capability & effect model
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** tools, permissions, security, ports

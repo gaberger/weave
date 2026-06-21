@@ -1,6 +1,6 @@
 # ADR-0013: ContextReducer — reduced context for skills/LLMs
 
-- **Status:** Proposed
+- **Status:** Superseded by 0016
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** context-reduction, skills, tools, llm

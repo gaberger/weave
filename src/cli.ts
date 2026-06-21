@@ -31,6 +31,8 @@ import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
 import { bashTool } from "./adapters/secondary/bash-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
+import { readFileTool, editFileTool } from "./adapters/secondary/fs-tools.js";
+import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { echoSkill, claudeSkill } from "./composition/builtin-skills.js";
@@ -373,6 +375,9 @@ async function assembleSkills(
       }),
     );
   }
+  registry.register(readFileTool(process.cwd())); // read repo files (e.g. ADR auditor)
+  registry.register(editFileTool(process.cwd())); // edit repo files — irreversible, grant-gated
+  registry.register(writeSkillTool(dir)); // self-authoring (ADR-0017) — irreversible, grant-gated
   return { skills, registry, backend: llm?.kind ?? "none", errors };
 }
 

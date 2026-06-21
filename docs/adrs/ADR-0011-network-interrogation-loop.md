@@ -1,6 +1,6 @@
 # ADR-0011: Recurring network interrogation
 
-- **Status:** Proposed
+- **Status:** Superseded by 0016
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** interrogation, tools, scheduler, usecase

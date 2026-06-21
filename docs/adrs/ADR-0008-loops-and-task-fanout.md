@@ -1,6 +1,6 @@
 # ADR-0008: First-class loops + task fan-out (handoff-as-tool-call)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** loop, scheduler, fan-out, handoff, skills, research-agent

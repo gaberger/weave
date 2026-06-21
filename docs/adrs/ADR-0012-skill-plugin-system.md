@@ -1,6 +1,6 @@
 # ADR-0012: Skills — the plugin/extension system
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** extensibility, plugins, routing, ports, foundational

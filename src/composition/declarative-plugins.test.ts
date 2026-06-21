@@ -26,11 +26,11 @@ test("every example .md plugin parses into a valid agent-skill def", () => {
   }
 });
 
-test("loadAgentSkills wires the example plugins (researcher + monitor)", () => {
+test("loadAgentSkills wires the example plugins (researcher + monitor + reflect)", () => {
   const stub: Worker = { run: async () => ({ status: "completed", summary: "" }) };
   const skills = loadAgentSkills(PLUGINS, () => stub);
   const names = skills.map((s) => s.name).sort();
-  assert.deepEqual(names, ["monitor", "researcher"]);
+  assert.deepEqual(names, ["adr-auditor", "monitor", "reflect", "researcher"]);
   const researcher = skills.find((s) => s.name === "researcher");
   assert.equal(researcher?.match({ taskId: "t", spec: { goal: "research LLMs" } }), true);
   assert.equal(researcher?.match({ taskId: "t", spec: { goal: "unrelated" } }), false);

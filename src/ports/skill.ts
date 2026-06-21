@@ -16,3 +16,12 @@ export interface Skill {
   match(task: TaskAssignment): boolean;
   run(task: TaskAssignment, ctx: WorkerContext): Promise<WorkerResult>;
 }
+
+/**
+ * The live set of skills a router dispatches over (ADR-0017). A port — not a bare array — so
+ * the set can change at runtime (a peer reloads after `write_skill` authors a new plugin)
+ * without the router knowing or caring. Composition injects a static or a reloadable impl.
+ */
+export interface SkillSet {
+  all(): readonly Skill[];
+}

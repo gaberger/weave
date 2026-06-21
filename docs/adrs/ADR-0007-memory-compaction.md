@@ -1,6 +1,6 @@
 # ADR-0007: Memory — log compaction via snapshot events
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** memory, compaction, context-reduction, scalability

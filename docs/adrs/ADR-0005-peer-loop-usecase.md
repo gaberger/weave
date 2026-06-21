@@ -1,6 +1,6 @@
 # ADR-0005: The peer loop (agent runtime use-case)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** usecases, runtime, coordination

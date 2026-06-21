@@ -1,6 +1,6 @@
 # ADR-0002: Substrate port & claim/lease protocol
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** coordination, consistency, ports, foundational

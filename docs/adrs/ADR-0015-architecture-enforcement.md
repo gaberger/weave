@@ -1,6 +1,6 @@
 # ADR-0015: Enforce hexagonal architecture
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** architecture, enforcement, ci, tooling

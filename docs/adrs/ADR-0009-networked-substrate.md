@@ -1,6 +1,6 @@
 # ADR-0009: NetworkedSubstrate — replicated log with HLC ordering
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** substrate, distributed, consistency, foundational
