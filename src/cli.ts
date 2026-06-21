@@ -29,6 +29,7 @@ import { SystemTimer } from "./adapters/secondary/system-timer.js";
 import { scanSourceFiles } from "./adapters/secondary/source-scan.js";
 import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
+import { bashTool } from "./adapters/secondary/bash-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
@@ -44,7 +45,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash"]);
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -189,6 +190,16 @@ async function assembleSkills(
   registry.register(httpFetchTool); // generic HTTP capability
   if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // fan-out
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
+  if (has(args, "bash")) {
+    // Opt-in shell access. Denylist always on; optional allowlist + timeout from flags.
+    const allow = str(args, "bash-allow", "").split(",").map((s) => s.trim()).filter(Boolean);
+    registry.register(
+      bashTool({
+        timeoutMs: num(args, "bash-timeout-ms", 30_000),
+        ...(allow.length ? { allow } : {}),
+      }),
+    );
+  }
   return { skills, registry, backend: llm?.kind ?? "none", errors };
 }
 
@@ -577,6 +588,8 @@ usage:
                   [--daemon] [--pid-file <path>] [--log-file <path>]
                   start a peer: claim tasks + route them to skills
                   (--daemon detaches to the background; logs + pid default next to --db)
+                  [--bash [--bash-allow prog1,prog2] [--bash-timeout-ms N]]
+                  (--bash grants shell access: denylist always on, blocks rm -rf/sudo/etc.)
   weave down      [--db <path>] [--pid-file <path>]   stop a daemonized peer (SIGTERM)
   weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>]
   weave loop --skill <name> [--interval 6h] [--once] [--notify ch] [goal...]
