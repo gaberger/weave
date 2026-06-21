@@ -30,6 +30,8 @@ export type TaskKindValue = (typeof TaskKind)[keyof typeof TaskKind];
 
 export interface DeclaredPayload {
   readonly spec: TaskSpec;
+  /** Parent task id, if this task was spawned by another (ADR-0008 §3 lineage). */
+  readonly parent?: string;
 }
 
 /** Carried by both `task.claimed` and `lease.renewed` so a renewal can re-derive the

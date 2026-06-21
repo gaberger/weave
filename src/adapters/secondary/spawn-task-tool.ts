@@ -12,7 +12,7 @@ export function spawnTaskTool(weave: Substrate, newId: () => string): ToolDefini
     description: "Declare a follow-up task on the weave: { subject, skill?, goal, inputs? }.",
     effect: "reversible",
     inputSchema: { subject: "string", skill: "string?", goal: "string", inputs: "object?" },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       const subject = String(args["subject"] ?? newId());
       const goal = String(args["goal"] ?? "");
       const spec: { goal: string; skill?: string; inputs?: Record<string, unknown> } = { goal };
@@ -20,7 +20,11 @@ export function spawnTaskTool(weave: Substrate, newId: () => string): ToolDefini
       if (args["inputs"] && typeof args["inputs"] === "object") {
         spec.inputs = args["inputs"] as Record<string, unknown>;
       }
-      await weave.append({ id: newId(), kind: TaskKind.Declared, actor: "spawn", subject, payload: { spec } });
+      // Record lineage: the spawning task (ctx.taskId) is this child's parent, and we set causedBy
+      // so the provenance is visible in the raw event too (ADR-0008 §3).
+      const parent = ctx?.taskId;
+      const payload = parent ? { spec, parent } : { spec };
+      await weave.append({ id: newId(), kind: TaskKind.Declared, actor: "spawn", subject, payload, ...(parent ? { causedBy: parent } : {}) });
       return { ok: true, output: { declared: subject } };
     },
   };

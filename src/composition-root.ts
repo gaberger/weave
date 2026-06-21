@@ -35,7 +35,7 @@ export function createPeer(opts: CreatePeerOptions): PeerLoop {
   const deps: PeerDeps = {
     weave: opts.weave,
     newWorker: opts.newWorker,
-    newToolHost: (grant) => registry.hostFor(grant),
+    newToolHost: (grant, taskId) => registry.hostFor(grant, taskId),
     newLease: (taskId, claimSeq) =>
       new WeaveLeaseGuard(
         opts.weave,

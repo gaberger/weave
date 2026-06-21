@@ -263,7 +263,7 @@ function writeBundleIndexes(reportsDir: string, records: Map<string, ReportRecor
  * is derived purely from the event, so writes are idempotent and multiple peers on one db are safe.
  */
 function persistReports(weave: Substrate, reportsDir: string, embedder: Embedder | null = null): void {
-  const specs = new Map<string, { goal: string; skill?: string }>();
+  const specs = new Map<string, { goal: string; skill?: string; parent?: string }>();
   const records = new Map<string, ReportRecord>();
   // Debounce the (whole-bundle) index rebuild so a backfill burst collapses into one pass.
   let indexTimer: ReturnType<typeof setTimeout> | undefined;
@@ -274,8 +274,8 @@ function persistReports(weave: Substrate, reportsDir: string, embedder: Embedder
   };
   weave.subscribe(0, (e) => {
     if (e.kind === TaskKind.Declared) {
-      const spec = (e.payload as DeclaredPayload).spec;
-      specs.set(e.subject, { goal: spec.goal, ...(spec.skill ? { skill: spec.skill } : {}) });
+      const d = e.payload as DeclaredPayload;
+      specs.set(e.subject, { goal: d.spec.goal, ...(d.spec.skill ? { skill: d.spec.skill } : {}), ...(d.parent ? { parent: d.parent } : {}) });
       return;
     }
     if (e.kind !== TaskKind.Completed && e.kind !== TaskKind.Failed) return;
@@ -305,6 +305,7 @@ function persistReports(weave: Substrate, reportsDir: string, embedder: Embedder
       `skill: ${skill}\n` +
       `status: ${status}\n` +
       `actor: ${e.actor}\n` +
+      (spec?.parent ? `parent: ${spec.parent}\n` : "") +
       `---\n\n`;
     try {
       mkdirSync(join(reportsDir, dirname(relPath)), { recursive: true });
