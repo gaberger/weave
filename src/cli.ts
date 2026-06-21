@@ -10,12 +10,13 @@ import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSy
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync, spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 
 import type { Substrate } from "./ports/substrate.js";
 import type { Worker } from "./ports/worker.js";
 import type { SealedEvent } from "./domain/event.js";
 import { systemClock } from "./domain/clock.js";
-import { TaskKind, type DeclaredPayload } from "./domain/task.js";
+import { TaskKind, type DeclaredPayload, type ProgressPayload } from "./domain/task.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
 import { compactWeave } from "./usecases/compaction.js";
@@ -38,6 +39,12 @@ import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { echoSkill, claudeSkill } from "./composition/builtin-skills.js";
 import { loadAgentSkills, loadClaudeSkills } from "./composition/agent-skill.js";
 import { notifyTool } from "./composition/notify-tool.js";
+import { buildGraph, neighbours, type GraphEdge, type KnowledgeGraph, type ReportInput } from "./domain/knowledge-graph.js";
+import { buildBm25, bm25Search, hybridRank, cosine, type Scored } from "./domain/search.js";
+import { httpEmbedderFromEnv } from "./adapters/secondary/http-embedder.js";
+import { localEmbedder } from "./adapters/secondary/local-embedder.js";
+import type { Embedder } from "./ports/embedder.js";
+import type { ToolDefinition } from "./ports/tool-host.js";
 
 const DEFAULT_DB = ".weave/weave.db";
 
@@ -47,7 +54,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "write", "read-only"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "write", "read-only", "no-embed", "no-context"]);
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -141,6 +148,13 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
  *  Laid out as an OKF v0.1 bundle: per-skill subdirs of concept files + index.md / log.md. */
 function reportsDirFor(args: Args): string {
   return join(dirname(str(args, "db", DEFAULT_DB)), "reports");
+}
+
+/** Embedder for hybrid search: a configured provider (WEAVE_EMBED_KEY) if present, else the offline
+ *  local hashing embedder, unless `--no-embed` forces BM25-only. */
+function pickEmbedder(args: Args): Embedder | null {
+  if (has(args, "no-embed")) return null;
+  return httpEmbedderFromEnv() ?? localEmbedder();
 }
 
 const SLUG_STOP = new Set(
@@ -248,9 +262,16 @@ function writeBundleIndexes(reportsDir: string, records: Map<string, ReportRecor
  * Subscribes from seq 0 so it backfills history on startup and captures live completions; every path
  * is derived purely from the event, so writes are idempotent and multiple peers on one db are safe.
  */
-function persistReports(weave: Substrate, reportsDir: string): void {
+function persistReports(weave: Substrate, reportsDir: string, embedder: Embedder | null = null): void {
   const specs = new Map<string, { goal: string; skill?: string }>();
   const records = new Map<string, ReportRecord>();
+  // Debounce the (whole-bundle) index rebuild so a backfill burst collapses into one pass.
+  let indexTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleIndex = (): void => {
+    if (indexTimer) clearTimeout(indexTimer);
+    indexTimer = setTimeout(() => void indexBundle(reportsDir, embedder).catch((err) => console.error(`weave: index failed — ${(err as Error).message}`)), 500);
+    indexTimer.unref?.();
+  };
   weave.subscribe(0, (e) => {
     if (e.kind === TaskKind.Declared) {
       const spec = (e.payload as DeclaredPayload).spec;
@@ -290,6 +311,7 @@ function persistReports(weave: Substrate, reportsDir: string): void {
       writeFileSync(join(reportsDir, relPath), frontmatter + body + "\n");
       records.set(e.subject, rec);
       writeBundleIndexes(reportsDir, records);
+      scheduleIndex(); // rebuild graph + search index (debounced)
     } catch (err) {
       console.error(`weave: could not persist report ${relPath}: ${(err as Error).message}`);
     }
@@ -365,6 +387,8 @@ async function assembleSkills(
   registry.register(httpFetchTool); // generic HTTP capability
   if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // fan-out
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
+  // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0018 §4).
+  registry.register(recallTool(reportsDirFor(args), pickEmbedder(args)));
   if (has(args, "bash")) {
     // Opt-in shell access. Denylist always on; optional allowlist + timeout from flags.
     const allow = str(args, "bash-allow", "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -466,7 +490,7 @@ function daemonize(args: Args): void {
 async function cmdUp(args: Args): Promise<void> {
   if (has(args, "daemon") && !IS_DAEMON_CHILD) return daemonize(args);
   const weave = await openSubstrate(args);
-  persistReports(weave, reportsDirFor(args)); // durably mirror settled results to disk
+  persistReports(weave, reportsDirFor(args), pickEmbedder(args)); // durable mirror + auto-index
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
   const { skills, registry, backend, errors } = await assembleSkills(args, {
     fake: has(args, "fake"),
@@ -688,7 +712,7 @@ async function cmdLoop(args: Args): Promise<void> {
   // daemon marker set and runs the normal loop, orphaned from the terminal (same as `weave up`).
   if (has(args, "daemon") && !IS_DAEMON_CHILD) return daemonize(args);
   const weave = await openSubstrate(args);
-  persistReports(weave, reportsDirFor(args)); // durably mirror settled results to disk
+  persistReports(weave, reportsDirFor(args), pickEmbedder(args)); // durable mirror + auto-index
   const newId = () => randomUUID();
   const agentId = str(args, "agent", `loop-${randomUUID().slice(0, 8)}`);
   const goal = args._.join(" ").trim() || skill;
@@ -886,6 +910,258 @@ function okfConceptFiles(reportsDir: string): string[] {
   return out;
 }
 
+// --- knowledge index: graph + search (ADR-0017/0018) ----------------------
+
+const GRAPH_MARK = "<!-- weave:graph -->"; // sentinel: everything from here to EOF is generated
+
+interface BundleDoc {
+  id: string; // task_id
+  relPath: string; // bundle-relative
+  file: string; // absolute path
+  skill: string;
+  status: string;
+  timestamp: string;
+  title: string;
+  tags: string[];
+  parent?: string;
+  body: string; // concept body without frontmatter or the generated graph block
+}
+
+/** Read one frontmatter scalar (our writer emits simple `key: value` / `key: "value"` lines). */
+function fmField(fm: string, key: string): string {
+  const m = new RegExp(`^${key}:\\s*(.+)$`, "m").exec(fm);
+  if (!m?.[1]) return "";
+  return m[1].trim().replace(/^"(.*)"$/, "$1").replace(/\\"/g, '"');
+}
+
+/** Parse every concept file in the bundle into a BundleDoc (frontmatter split from body). */
+function readBundle(reportsDir: string): BundleDoc[] {
+  const docs: BundleDoc[] = [];
+  for (const file of okfConceptFiles(reportsDir)) {
+    const raw = readFileSync(file, "utf8");
+    const fmMatch = /^---\n([\s\S]*?)\n---\n?/.exec(raw);
+    const fm = fmMatch?.[1] ?? "";
+    let body = fmMatch ? raw.slice(fmMatch[0].length) : raw;
+    const markIdx = body.indexOf(GRAPH_MARK); // strip previously generated link block
+    if (markIdx >= 0) body = body.slice(0, markIdx);
+    const id = fmField(fm, "task_id") || file;
+    const tags = (/^tags:\s*\[(.*)\]/m.exec(fm)?.[1] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+    const parent = fmField(fm, "parent");
+    docs.push({
+      id,
+      relPath: file.slice(reportsDir.length + 1),
+      file,
+      skill: fmField(fm, "skill") || "misc",
+      status: fmField(fm, "status") || "completed",
+      timestamp: fmField(fm, "timestamp"),
+      title: fmField(fm, "title") || id,
+      tags,
+      ...(parent ? { parent } : {}),
+      body: body.trim(),
+    });
+  }
+  return docs;
+}
+
+/** Extract outgoing references from a concept body: bundle links / weave://task ids → report ids,
+ *  external URLs → sources, local repo paths → artifacts. */
+function extractFacts(doc: BundleDoc, relToId: Map<string, string>): Pick<ReportInput, "links" | "sources" | "artifacts"> {
+  const links = new Set<string>();
+  for (const m of doc.body.matchAll(/weave:\/\/task\/([\w-]+)/g)) if (m[1] && m[1] !== doc.id) links.add(m[1]);
+  for (const m of doc.body.matchAll(/\]\((?:\/)?((?:[\w.-]+\/)*[\w.-]+\.md)\)/g)) {
+    const id = relToId.get(m[1] ?? "") ?? relToId.get((m[1] ?? "").replace(/^\//, ""));
+    if (id && id !== doc.id) links.add(id);
+  }
+  const sources = new Set<string>();
+  for (const m of doc.body.matchAll(/https?:\/\/[^\s)\]<>"]+/g)) sources.add(m[0].replace(/[.,]$/, ""));
+  const artifacts = new Set<string>();
+  for (const m of doc.body.matchAll(/(?:^|[\s(`])((?:nqe|src|docs|scripts)\/[\w./*-]+|\.weave\/[\w./-]+)/g)) if (m[1]) artifacts.add(m[1]);
+  return { links: [...links], sources: [...sources], artifacts: [...artifacts] };
+}
+
+/** Build the knowledge graph from the bundle on disk (pure facts → domain buildGraph). */
+function bundleGraph(reportsDir: string, docs: BundleDoc[]): KnowledgeGraph {
+  const relToId = new Map(docs.map((d) => [d.relPath, d.id]));
+  const inputs: ReportInput[] = docs.map((d) => ({
+    id: d.id,
+    relPath: d.relPath,
+    skill: d.skill,
+    status: d.status,
+    timestamp: d.timestamp,
+    title: d.title,
+    tags: d.tags,
+    ...(d.parent ? { parent: d.parent } : {}),
+    ...extractFacts(d, relToId),
+  }));
+  return buildGraph(inputs);
+}
+
+const SUBDIR = ".index"; // cache dir inside the bundle (vectors)
+
+/** Embed any docs whose content isn't cached, persist the cache, return id → vector for all docs. */
+async function embedDocs(reportsDir: string, docs: BundleDoc[], embedder: Embedder): Promise<Map<string, number[]>> {
+  const cacheFile = join(reportsDir, SUBDIR, "vectors.json");
+  let cache: { model: string; byText: Record<string, number[]> } = { model: embedder.model, byText: {} };
+  try {
+    const prev = JSON.parse(readFileSync(cacheFile, "utf8"));
+    if (prev.model === embedder.model) cache = prev;
+  } catch { /* no/!stale cache */ }
+  const textOf = (d: BundleDoc) => `${d.title}\n${d.body}`.slice(0, 8000);
+  const missing = docs.filter((d) => !cache.byText[textOf(d)]);
+  if (missing.length > 0) {
+    const vecs = await embedder.embed(missing.map(textOf));
+    missing.forEach((d, i) => { const v = vecs[i]; if (v) cache.byText[textOf(d)] = v; });
+    mkdirSync(join(reportsDir, SUBDIR), { recursive: true });
+    writeFileSync(cacheFile, JSON.stringify(cache));
+  }
+  const out = new Map<string, number[]>();
+  for (const d of docs) { const v = cache.byText[textOf(d)]; if (v) out.set(d.id, v); }
+  return out;
+}
+
+/** Rebuild the knowledge index: graph.json + graph.md + inline link sections, and warm the vector
+ *  cache when an embedder is configured. Pure-derived from the bundle, so it's idempotent. */
+async function indexBundle(reportsDir: string, embedder: Embedder | null): Promise<{ docs: number; edges: number }> {
+  const docs = readBundle(reportsDir);
+  const graph = bundleGraph(reportsDir, docs);
+  const byId = new Map(docs.map((d) => [d.id, d]));
+  const label = (id: string) => byId.get(id)?.title ?? id.replace(/^(source|artifact):/, "");
+  const linkTo = (id: string) => (byId.has(id) ? `/${byId.get(id)!.relPath}` : id.startsWith("source:") ? id.slice(7) : id.slice(9));
+
+  // graph.json — machine-queryable.
+  mkdirSync(reportsDir, { recursive: true });
+  writeFileSync(join(reportsDir, "graph.json"), JSON.stringify(graph, null, 2));
+
+  // graph.md — human overview: hubs (by total degree) and orphans.
+  const deg = new Map<string, number>();
+  for (const e of graph.edges) {
+    deg.set(e.from, (deg.get(e.from) ?? 0) + 1);
+    deg.set(e.to, (deg.get(e.to) ?? 0) + 1);
+  }
+  const reports = graph.nodes.filter((n) => n.type === "report");
+  const hubs = [...reports].sort((a, b) => (deg.get(b.id) ?? 0) - (deg.get(a.id) ?? 0)).slice(0, 10);
+  const orphans = reports.filter((n) => (deg.get(n.id) ?? 0) === 0);
+  const graphMd =
+    `# Knowledge Graph\n\n${reports.length} reports · ${graph.nodes.length} nodes · ${graph.edges.length} edges.\n\n` +
+    `## Hubs (most connected)\n\n` +
+    (hubs.map((n) => `- [${displayTitle(n.label)}](/${n.relPath}) — ${deg.get(n.id) ?? 0} links`).join("\n") || "- none") +
+    `\n\n## Orphans (no links)\n\n` +
+    (orphans.map((n) => `- [${displayTitle(n.label)}](/${n.relPath})`).join("\n") || "- none") +
+    "\n";
+  writeFileSync(join(reportsDir, "graph.md"), graphMd);
+
+  // Inline link sections (regenerated after the GRAPH_MARK sentinel). The "other end" of each edge
+  // is computed from the doc's own id. Forward links stay navigation-focused (reports + artifacts);
+  // external citations live in graph.json, and co-citation/tag overlaps surface under Related.
+  const fmtEdges = (selfId: string, edges: readonly GraphEdge[]) =>
+    edges.map((e) => { const other = e.from === selfId ? e.to : e.from; return `- [${displayTitle(label(other))}](${linkTo(other)}) _(${e.type})_`; }).join("\n");
+  for (const d of docs) {
+    const nb = neighbours(graph, d.id);
+    const fwd = nb.forward.filter((e) => e.type !== "cites"); // citations → graph.json, not inline
+    const sections: string[] = [];
+    if (fwd.length) sections.push(`## Forward links\n\n${fmtEdges(d.id, fwd)}`);
+    if (nb.back.length) sections.push(`## Backlinks\n\n${fmtEdges(d.id, nb.back)}`);
+    if (nb.related.length) sections.push(`## Related\n\n${fmtEdges(d.id, nb.related)}`);
+    const raw = readFileSync(d.file, "utf8");
+    const markIdx = raw.indexOf(GRAPH_MARK);
+    const base = (markIdx >= 0 ? raw.slice(0, markIdx) : raw).trimEnd();
+    const block = sections.length ? `\n\n${GRAPH_MARK}\n\n${sections.join("\n\n")}\n` : `\n`;
+    writeFileSync(d.file, base + block);
+  }
+
+  if (embedder) {
+    try { await embedDocs(reportsDir, docs, embedder); } catch (e) { console.error(`weave: embedding skipped — ${(e as Error).message}`); }
+  }
+  return { docs: docs.length, edges: graph.edges.length };
+}
+
+interface SearchHit extends Scored {
+  doc: BundleDoc;
+  related: string[]; // titles of graph neighbours (retrieval-augmented navigation)
+}
+
+/** Hybrid search the bundle: BM25 always, blended with cached/query embeddings when available. Each
+ *  hit is augmented with its graph neighbours so inference can follow the knowledge graph. */
+async function searchBundle(reportsDir: string, query: string, embedder: Embedder | null, limit: number): Promise<SearchHit[]> {
+  const docs = readBundle(reportsDir);
+  if (docs.length === 0) return [];
+  const lexical = bm25Search(buildBm25(docs.map((d) => ({ id: d.id, text: `${d.title}\n${d.body}` }))), query, Math.max(limit * 3, 20));
+  let semantic: Scored[] = [];
+  if (embedder) {
+    try {
+      const [qv] = await embedder.embed([query]);
+      if (qv) {
+        const vecs = await embedDocs(reportsDir, docs, embedder);
+        semantic = [...vecs.entries()].map(([id, v]) => ({ id, score: cosine(qv, v) }));
+      }
+    } catch (e) { console.error(`weave: semantic search skipped — ${(e as Error).message}`); }
+  }
+  const ranked = hybridRank(lexical, semantic, 0.5, limit);
+  const byId = new Map(docs.map((d) => [d.id, d]));
+  const graph = bundleGraph(reportsDir, docs);
+  return ranked.flatMap((s) => {
+    const doc = byId.get(s.id);
+    if (!doc) return [];
+    const nb = neighbours(graph, s.id);
+    const related = [...nb.forward, ...nb.back, ...nb.related]
+      .map((e) => byId.get(e.from === s.id ? e.to : e.from)?.title)
+      .filter((t): t is string => !!t);
+    return [{ ...s, doc, related: [...new Set(related)].slice(0, 5) }];
+  });
+}
+
+async function cmdIndex(args: Args): Promise<void> {
+  const dir = reportsDirFor(args);
+  const embedder = pickEmbedder(args);
+  const { docs, edges } = await indexBundle(dir, embedder);
+  console.log(`weave: indexed ${docs} report(s), ${edges} edge(s) → ${join(dir, "graph.json")}, graph.md, inline links${embedder ? ` (+ embeddings: ${embedder.model})` : ""}`);
+}
+
+async function cmdSearch(args: Args): Promise<void> {
+  const query = args._.join(" ").trim();
+  if (!query) {
+    console.error('weave search: provide a query, e.g. weave search "TI-LFA reconvergence"');
+    process.exitCode = 1;
+    return;
+  }
+  const limit = num(args, "limit", 8);
+  const embedder = pickEmbedder(args);
+  const hits = await searchBundle(reportsDirFor(args), query, embedder, limit);
+  if (hits.length === 0) {
+    console.log(`weave: no matches for "${query}"`);
+    return;
+  }
+  console.log(`weave: ${hits.length} match(es) for "${query}"${embedder ? " [hybrid]" : " [bm25]"}\n`);
+  for (const h of hits) {
+    console.log(`  ${h.score.toFixed(3)}  ${h.doc.title.length > 90 ? `${h.doc.title.slice(0, 89)}…` : h.doc.title}`);
+    console.log(`         /${h.doc.relPath}`);
+    if (h.related.length) console.log(`         ↪ related: ${h.related.map((t) => (t.length > 40 ? `${t.slice(0, 39)}…` : t)).join("; ")}`);
+  }
+}
+
+/** `recall`: a knowledge-search tool so skills/inference can retrieve prior reports before working
+ *  (ADR-0018 §4). Reads the bundle, returns hybrid hits + graph neighbours as structured output. */
+function recallTool(reportsDir: string, embedder: Embedder | null): ToolDefinition {
+  return {
+    name: "recall",
+    description: "Search accumulated knowledge (prior task reports) before researching: { query, limit? }.",
+    effect: "read",
+    inputSchema: { query: "string", limit: "number?" },
+    execute: async (args) => {
+      const query = String(args["query"] ?? "").trim();
+      if (!query) return { ok: false, output: { error: "query required" } };
+      const limit = typeof args["limit"] === "number" ? args["limit"] : 5;
+      const hits = await searchBundle(reportsDir, query, embedder, limit);
+      return {
+        ok: true,
+        output: {
+          hits: hits.map((h) => ({ taskId: h.doc.id, title: h.doc.title, path: `/${h.doc.relPath}`, score: Number(h.score.toFixed(4)), related: h.related, excerpt: h.doc.body.slice(0, 600) })),
+        },
+      };
+    },
+  };
+}
+
 async function cmdStatus(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events = await readAll(weave);
@@ -947,6 +1223,10 @@ usage:
   weave notify <text...> [--to slack,telegram,email] [--title T]
   weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
   weave report    [--db <path>] [--full]   print completed task results (the actual output)
+  weave index     [--db <path>] [--no-embed]   build the knowledge graph + search index over reports
+                  (graph.json/graph.md + inline forward/backlinks; warms embeddings if configured)
+  weave search    <query...> [--db <path>] [--limit N] [--no-embed]
+                  hybrid (BM25 + optional embeddings) search over accumulated knowledge
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
@@ -980,6 +1260,10 @@ async function main(): Promise<void> {
       return cmdTask(args);
     case "report":
       return cmdReport(args);
+    case "index":
+      return cmdIndex(args);
+    case "search":
+      return cmdSearch(args);
     case "status":
       return cmdStatus(args);
     case "log":

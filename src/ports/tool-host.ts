@@ -20,14 +20,22 @@ export interface ToolResult {
   readonly output: unknown;
 }
 
+/** Ambient context a ToolHost passes to a tool at execution time (ADR-0008 §3). Lets a tool
+ *  attribute its effects to the calling task — e.g. spawn_task records lineage via `taskId`. */
+export interface ToolContext {
+  /** The task on whose behalf the tool is being invoked, if the host is task-scoped. */
+  readonly taskId?: string;
+}
+
 /** A registerable tool: a descriptor plus its executor. Skills contribute these
- *  (ADR-0012). Missing `effect` normalizes to "irreversible" (fail closed, ADR-0004). */
+ *  (ADR-0012). Missing `effect` normalizes to "irreversible" (fail closed, ADR-0004).
+ *  `ctx` is optional — tools that don't need task attribution simply ignore it. */
 export interface ToolDefinition {
   readonly name: string;
   readonly description: string;
   readonly effect?: Effect;
   readonly inputSchema?: Readonly<Record<string, unknown>>;
-  execute(args: Readonly<Record<string, unknown>>): Promise<ToolResult>;
+  execute(args: Readonly<Record<string, unknown>>, ctx?: ToolContext): Promise<ToolResult>;
 }
 
 export class NotPermittedError extends Error {

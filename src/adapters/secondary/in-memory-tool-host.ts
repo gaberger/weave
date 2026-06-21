@@ -30,8 +30,9 @@ export class ToolRegistry {
     return allowlisted && withinCeiling(normalizeEffect(t.effect), grant.maxEffect);
   }
 
-  hostFor(grant: Grant): ToolHost {
+  hostFor(grant: Grant, taskId?: string): ToolHost {
     const registry = this;
+    const ctx = taskId ? { taskId } : undefined; // task attribution for tools (e.g. spawn_task lineage)
     return {
       available(): readonly ToolDescriptor[] {
         return [...registry.tools.values()]
@@ -41,7 +42,7 @@ export class ToolRegistry {
       async invoke(call: ToolCall): Promise<ToolResult> {
         const tool = registry.tools.get(call.name);
         if (!tool || !registry.permits(grant, tool)) throw new NotPermittedError(call.name);
-        return tool.execute(call.args);
+        return tool.execute(call.args, ctx);
       },
     };
   }
