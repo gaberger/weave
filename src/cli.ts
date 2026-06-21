@@ -1163,6 +1163,193 @@ function recallTool(reportsDir: string, embedder: Embedder | null): ToolDefiniti
   };
 }
 
+// --- chat: a conversational REPL over the weave (thin client; ADR-0002 §2) -----------------
+//
+// `weave chat` is a Siri-like front door: it reads a line, declares it as a task, and waits for a
+// running peer (a `weave up` daemon) to answer — mirroring the daemon's claim/progress events into a
+// live "thinking" line so the wait feels responsive rather than opaque. It does NO work itself
+// (thin client): if no peer is running, the turn times out with a hint to start one.
+
+interface ChatTurn {
+  readonly q: string;
+  readonly a: string;
+}
+
+/**
+ * Assemble the goal string for one chat turn. Routing matches on the goal (specific skills before
+ * the `claude` catch-all), so the current utterance LEADS — it's what the keyword matcher keys on —
+ * and prior turns follow as a clearly-delimited, truncated trailer the LLM reads for context.
+ *
+ * This is the heart of the "context carried" behaviour: how much history to include and how to frame
+ * it trades follow-up quality against prompt growth and mis-routing risk. The defaults keep the last
+ * few turns within a character budget; tune `maxTurns`/`maxChars` to taste.
+ */
+function buildChatGoal(utterance: string, history: readonly ChatTurn[], maxTurns = 4, maxChars = 1500): string {
+  if (history.length === 0) return utterance;
+  let ctx = "";
+  for (const turn of history.slice(-maxTurns)) {
+    const a = turn.a.length > 400 ? `${turn.a.slice(0, 397)}…` : turn.a;
+    const block = `Q: ${turn.q}\nA: ${a}\n\n`;
+    if (ctx.length + block.length > maxChars) break;
+    ctx += block;
+  }
+  if (!ctx) return utterance;
+  return `${utterance}\n\n--- Earlier in this conversation (context only; answer the request above) ---\n\n${ctx.trimEnd()}`;
+}
+
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/** Run one chat turn: declare the goal, mirror the answering peer's progress to a live status line,
+ *  and resolve with the settled summary. Thin client — a separate peer does the actual work. */
+function chatTurn(
+  weave: Substrate,
+  newId: () => string,
+  actor: string,
+  goal: string,
+  pinnedSkill: string | undefined,
+  timeoutMs: number,
+): Promise<{ answer: string; ok: boolean }> {
+  return new Promise((resolve) => {
+    const id = `chat-${randomUUID().slice(0, 8)}`;
+    const spec: { goal: string; skill?: string } = { goal };
+    if (pinnedSkill) spec.skill = pinnedSkill;
+
+    let detail = "thinking";
+    let claimed = false;
+    let frame = 0;
+    let done = false;
+    let subscription: { unsubscribe(): void } | undefined;
+
+    // Animate a "thinking" line only on a real terminal; piped/logged stdout gets no ANSI noise.
+    const tty = process.stdout.isTTY === true;
+    const draw = () => { if (tty) process.stdout.write(`\r  ${SPINNER[frame++ % SPINNER.length]} ${detail}…\x1b[K`); };
+    const spin = tty ? setInterval(draw, 120) : undefined;
+    draw();
+
+    const finish = (answer: string, ok: boolean): void => {
+      if (done) return;
+      done = true;
+      if (spin) clearInterval(spin);
+      clearTimeout(timer);
+      clearTimeout(hint);
+      subscription?.unsubscribe();
+      if (tty) process.stdout.write("\r\x1b[K"); // wipe the spinner line
+      resolve({ answer, ok });
+    };
+
+    const hint = setTimeout(() => {
+      if (!claimed && !done) detail = "waiting for a peer to pick this up (is `weave up` running?)";
+    }, 8000);
+    const timer = setTimeout(() => {
+      finish(
+        claimed
+          ? "the task didn't finish in time — try a simpler ask, or raise --timeout."
+          : "no peer answered. Start one in another terminal: `weave up` (or `weave up --daemon`).",
+        false,
+      );
+    }, timeoutMs);
+
+    // Subscribe from head+1 BEFORE declaring, so an instant completion can't slip past the listener.
+    void weave.head().then((head) => {
+      if (done) return; // timed out before we got here (vanishingly unlikely, but safe)
+      subscription = weave.subscribe(head + 1, (e) => {
+        if (e.subject !== id) return;
+        switch (e.kind) {
+          case TaskKind.Claimed:
+            claimed = true;
+            detail = `working (${e.actor})`;
+            break;
+          case TaskKind.Progress:
+            detail = (e.payload as ProgressPayload).note;
+            break;
+          case TaskKind.Completed:
+            finish((e.payload as { summary?: string }).summary ?? "(done, no summary)", true);
+            break;
+          case TaskKind.Failed: {
+            const p = e.payload as { summary?: string; error?: string };
+            finish(p.summary ?? p.error ?? "(failed)", false);
+            break;
+          }
+        }
+      });
+      void declareTask(weave, newId, actor, id, spec);
+    });
+  });
+}
+
+async function cmdChat(args: Args): Promise<void> {
+  const weave = await openSubstrate(args);
+  const newId = () => randomUUID();
+  const actor = str(args, "agent", `chat-${randomUUID().slice(0, 8)}`);
+  const pinnedSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
+  const timeoutMs = parseDuration(str(args, "timeout", "180s"));
+  const carry = !has(args, "no-context");
+  const history: ChatTurn[] = [];
+
+  console.log("weave chat — talk to your weave. Type a request and press enter.");
+  console.log(`  /help  /status  /reset  /quit${pinnedSkill ? `   [skill pinned: ${pinnedSkill}]` : ""}${carry ? "" : "   [context off]"}`);
+  console.log("  (thin client: a `weave up` peer must be running to answer)\n");
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+  // Line-queue model: lines typed or piped while a turn is in flight are buffered, not dropped. With
+  // rl.question() readline reads ahead to EOF during the await and 'close' fires before later lines
+  // are consumed — so scripted `printf 'a\nb\n' | weave chat` would silently skip 'b'. Queueing lines
+  // and only ending on a *drained* EOF makes interactive and piped multi-turn behave the same.
+  const queue: string[] = [];
+  let pending: ((v: string | null) => void) | null = null;
+  let closed = false;
+  const deliver = (v: string | null): void => { const r = pending; pending = null; r?.(v); };
+  rl.on("line", (l) => (pending ? deliver(l) : queue.push(l)));
+  rl.on("close", () => { closed = true; if (pending) deliver(null); }); // Ctrl-D / EOF / rl.close()
+  rl.on("SIGINT", () => rl.close()); // Ctrl-C → close → ends the loop
+  const nextLine = (): Promise<string | null> =>
+    queue.length > 0 ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((res) => { pending = res; });
+
+  for (;;) {
+    process.stdout.write("you› ");
+    const raw = await nextLine();
+    if (raw === null) break; // input drained (Ctrl-D / EOF) or interrupted (Ctrl-C)
+    const line = raw.trim();
+    if (!line) continue;
+
+    if (line === "/quit" || line === "/exit") break;
+    if (line === "/help") {
+      console.log("  Just type what you want; it's routed to a matching skill (or the general agent).");
+      console.log("  /status  show task states   /reset  forget conversation context   /quit  exit\n");
+      continue;
+    }
+    if (line === "/reset") {
+      history.length = 0;
+      console.log("  (conversation context cleared)\n");
+      continue;
+    }
+    if (line === "/status") {
+      const events = await readAll(weave);
+      const now = systemClock.now();
+      const goals = new Map<string, string>();
+      for (const e of events) if (e.kind === TaskKind.Declared) goals.set(e.subject, (e.payload as DeclaredPayload).spec.goal);
+      if (goals.size === 0) console.log("  (no tasks yet)");
+      for (const [subject, goal] of goals) {
+        const holder = currentHolder(events, subject, now);
+        const state = isSettled(events, subject) ? "done" : holder ? `held by ${holder.agentId}` : "free";
+        console.log(`  ${subject.padEnd(16)} [${state}] ${goal.length > 60 ? `${goal.slice(0, 59)}…` : goal}`);
+      }
+      console.log("");
+      continue;
+    }
+
+    const goal = carry ? buildChatGoal(line, history) : line;
+    const { answer, ok } = await chatTurn(weave, newId, actor, goal, pinnedSkill, timeoutMs);
+    console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
+    history.push({ q: line, a: answer });
+  }
+
+  if (!closed) rl.close();
+  weave.close();
+  console.log("\nweave: bye.");
+}
+
 async function cmdStatus(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events = await readAll(weave);
@@ -1228,6 +1415,9 @@ usage:
                   (graph.json/graph.md + inline forward/backlinks; warms embeddings if configured)
   weave search    <query...> [--db <path>] [--limit N] [--no-embed]
                   hybrid (BM25 + optional embeddings) search over accumulated knowledge
+  weave chat      [--db <path>] [--skill <name>] [--timeout 180s] [--no-context]
+                  conversational REPL: declare each line as a task and wait for a running
+                  peer to answer (thin client — start a peer with 'weave up' to do the work)
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
@@ -1265,6 +1455,8 @@ async function main(): Promise<void> {
       return cmdIndex(args);
     case "search":
       return cmdSearch(args);
+    case "chat":
+      return cmdChat(args);
     case "status":
       return cmdStatus(args);
     case "log":
