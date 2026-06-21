@@ -100,7 +100,7 @@ export class ClaudeAgentSdkWorker implements Worker {
     else ctx.signal.addEventListener("abort", () => controller.abort(), { once: true });
 
     const options: ClaudeRunOptions = {
-      model: this.cfg.model ?? DEFAULT_MODEL,
+      model: assignment.spec.model ?? this.cfg.model ?? DEFAULT_MODEL, // per-task tiering (ADR-0022)
       systemPrompt: this.cfg.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
       allowedTools: [], // force canUseTool to gate every tool
       mcpServers: this.deps.bridge.build(ctx.tools),

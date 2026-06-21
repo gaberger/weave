@@ -1,0 +1,24 @@
+/*
+ * sr-admin-down.nqe
+ * -----------------
+ * Detect SR configured but ADMIN-DOWN. On Arista EOS, `segment-routing mpls` is
+ * administratively shut by default — you MUST add `no shutdown` in that stanza or
+ * SR is silently inactive (IS-IS advertises no SR TLVs). This is the #1 SR gotcha.
+ *
+ * Walks router isis -> segment-routing mpls and flags any node whose SR stanza
+ * lacks a `no shutdown` child. Zero rows == every SR node is actually enabled.
+ *
+ * Run: run_query.py --network-id 111 --query-file nqe/sr-admin-down.nqe
+ */
+foreach device in network.devices
+foreach isis in device.files.config
+where matches(isis.text, "router isis*")
+foreach sr in isis.children
+where matches(sr.text, "segment-routing mpls")
+let enabled = length(foreach c in sr.children where matches(c.text, "no shutdown") select c) > 0
+where enabled == false
+select {
+  device:      device.name,
+  issue:       "segment-routing mpls present but not 'no shutdown' (SR admin-down)",
+  remediation: "Under '" + isis.text + " / segment-routing mpls' add 'no shutdown' to activate SR"
+}

@@ -52,7 +52,9 @@ export class ClaudeCliWorker implements Worker {
     if (ctx.signal.aborted) return { status: "aborted", summary: "cancelled", reason: "cancelled" };
 
     const args = ["-p", assignment.spec.goal];
-    if (this.cfg.model) args.push("--model", this.cfg.model);
+    // Per-task model wins over the worker's startup default (ADR-0022 tiering); fall back to cfg.
+    const model = assignment.spec.model ?? this.cfg.model;
+    if (model) args.push("--model", model);
     if (this.cfg.systemPrompt) args.push("--append-system-prompt", this.cfg.systemPrompt);
     if (this.cfg.allowedTools && this.cfg.allowedTools.length > 0) {
       args.push("--allowedTools", ...this.cfg.allowedTools); // variadic; keep last

@@ -5,6 +5,9 @@ export interface TaskSpec {
   readonly goal: string;
   /** Optional explicit routing to a named skill (ADR-0012); else skills match by predicate. */
   readonly skill?: string;
+  /** Optional model override for this task (ADR-0022 per-task tiering). When set, the Worker uses
+   *  it for this task; when absent, the Worker uses its own startup default. */
+  readonly model?: string;
   readonly inputs?: Readonly<Record<string, unknown>>;
 }
 

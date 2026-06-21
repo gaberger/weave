@@ -1,0 +1,29 @@
+/*
+ * sr-dup-sid.nqe
+ * --------------
+ * Detect DUPLICATE SR node-segment indices. The IS-IS node-segment index must be
+ * GLOBALLY UNIQUE across the SR domain (per Arista SR design) — two devices with
+ * the same index map to the same MPLS label (SRGB_base + index) and blackhole /
+ * mis-forward traffic. This is a class of outage NQE can catch statically.
+ *
+ * blockMatches captures {index} per device; group-by collapses to one row per
+ * index. collision == true means >1 device claims that index.
+ *
+ * Run: run_query.py --network-id 111 --query-file nqe/sr-dup-sid.nqe
+ */
+sidPattern = ```
+interface {iface:string}
+  node-segment ipv4 index {index:number}
+```;
+foreach device in network.devices
+foreach r in blockMatches(device.files.config, sidPattern)
+group device.name as devices by r.data.index as sidIndex
+select {
+  sidIndex:    sidIndex,
+  devices:     devices,
+  count:       length(devices),
+  collision:   length(devices) > 1,
+  remediation: if length(devices) > 1
+    then "Renumber so each loopback has a globally-unique node-segment index (convention: index = loopback /32 last octet); reconfigure 'node-segment ipv4 index N' on the duplicates"
+    else "OK — index is unique"
+}

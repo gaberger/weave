@@ -1,0 +1,32 @@
+/*
+ * sr-routerid-check.nqe
+ * ---------------------
+ * Config-vs-model cross-check: each IS-IS node's `router-id ipv4 X` must equal its
+ * Loopback0 /32 address. A mismatch means the SR/IGP router identity diverges from
+ * the address other nodes use to reach it — a subtle, hard-to-spot misconfig.
+ *
+ * Pairs the config tree (router-id line) with the parsed model (loopback /32),
+ * correlated per device. Only isis nodes appear (they have a router-id ipv4 line).
+ *
+ * Run: run_query.py --network-id 111 --query-file nqe/sr-routerid-check.nqe
+ * matchOk == false is the violation. (network 111: 8 nodes, 0 mismatches.)
+ */
+foreach device in network.devices
+foreach iface in device.interfaces
+where iface.loopbackMode == true
+foreach sub in iface.subinterfaces
+foreach addr in sub.ipv4.addresses
+where addr.prefixLength == 32
+foreach isis in device.files.config
+where matches(isis.text, "router isis*")
+foreach c in isis.children
+let rid = patternMatch(c.text, `router-id ipv4 {rid:ipv4Address}`)
+where isPresent(rid)
+select {
+  device:      device.name,
+  loopback0:   addr.ip,
+  routerId:    rid.rid,
+  matchOk:     rid.rid == addr.ip,
+  remediation: if rid.rid == addr.ip then "OK"
+    else "Set 'router-id ipv4 " + toString(addr.ip) + "' under router isis to match Loopback0"
+}

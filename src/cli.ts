@@ -17,6 +17,7 @@ import type { Worker } from "./ports/worker.js";
 import type { SealedEvent } from "./domain/event.js";
 import { systemClock } from "./domain/clock.js";
 import { TaskKind, type DeclaredPayload, type ProgressPayload } from "./domain/task.js";
+import { classifyTier, type Tier } from "./domain/model-tier.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
 import { compactWeave } from "./usecases/compaction.js";
@@ -54,7 +55,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "write", "read-only", "no-embed", "no-context", "route"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "write", "read-only", "no-embed", "no-context", "route", "no-tier"]);
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -86,6 +87,27 @@ const num = (args: Args, key: string, dflt: number): number => {
   return typeof v === "string" ? Number(v) : dflt;
 };
 const has = (args: Args, key: string): boolean => args.flags.has(key);
+
+// --- model tiering (ADR-0022) ----------------------------------------------
+// Default tier → model id ladder (Haiku/Sonnet/Opus). Overridable per tier via --tierN-model or
+// WEAVE_TIERN_MODEL so the harness never hardcodes ids in the domain. tier 2 == weave's prior default.
+const TIER_MODELS: Record<Tier, string> = {
+  1: "claude-haiku-4-5",
+  2: "claude-sonnet-4-6",
+  3: "claude-opus-4-8",
+};
+
+function tierModel(args: Args, tier: Tier): string {
+  return str(args, `tier${tier}-model`, process.env[`WEAVE_TIER${tier}_MODEL`] ?? TIER_MODELS[tier]);
+}
+
+/** Resolve the model for a goal at declare time: an explicit --model wins; else classify the goal
+ *  into a tier and map it to a model id (ADR-0022). Returns undefined to leave the choice to the
+ *  claiming peer's own default (used when tiering is off). */
+function modelForGoal(args: Args, goal: string): string {
+  if (has(args, "model")) return str(args, "model", TIER_MODELS[2]);
+  return tierModel(args, classifyTier(goal));
+}
 
 /** Channel config from flags or env (ADR-0014). Only set keys that have a value. */
 function channelConfig(args: Args): ChannelConfig {
@@ -695,10 +717,11 @@ async function cmdTask(args: Args): Promise<void> {
   }
   const weave = await openSubstrate(args);
   const taskId = str(args, "id", `task-${randomUUID().slice(0, 8)}`);
-  const spec: { goal: string; skill?: string } = { goal };
+  const spec: { goal: string; skill?: string; model?: string } = { goal };
   if (has(args, "skill")) spec.skill = str(args, "skill", "");
+  if (!has(args, "no-tier")) spec.model = modelForGoal(args, goal); // ADR-0022: route by complexity
   await declareTask(weave, () => randomUUID(), "cli", taskId, spec);
-  console.log(`weave: declared ${taskId}${spec.skill ? ` [skill:${spec.skill}]` : ""} — ${goal}`);
+  console.log(`weave: declared ${taskId}${spec.skill ? ` [skill:${spec.skill}]` : ""}${spec.model ? ` [model:${spec.model}]` : ""} — ${goal}`);
   weave.close();
 }
 
@@ -747,10 +770,12 @@ async function cmdLoop(args: Args): Promise<void> {
   // In --once mode we declare exactly one task and exit when *it* settles. Capture its id so a
   // terminal event for some other peer's task on a shared db doesn't trip our shutdown.
   let onceTaskId: string | undefined;
+  // Loops re-declare the same goal each tick, so classify the model once (ADR-0022).
+  const loopModel = has(args, "no-tier") ? undefined : modelForGoal(args, goal);
   const tick = async (): Promise<void> => {
     const id = `${skill}-${randomUUID().slice(0, 8)}`;
     if (once) onceTaskId = id;
-    await declareTask(weave, newId, agentId, id, { goal, skill });
+    await declareTask(weave, newId, agentId, id, { goal, skill, ...(loopModel ? { model: loopModel } : {}) });
   };
 
   console.log(`weave: loop "${skill}" every ${interval}${once ? " (once)" : ""} — ${goal}`);
@@ -1208,13 +1233,15 @@ function chatTurn(
   actor: string,
   goal: string,
   pinnedSkill: string | undefined,
+  model: string | undefined,
   timeoutMs: number,
   signal: AbortSignal | undefined,
 ): Promise<{ answer: string; ok: boolean; cancelled: boolean }> {
   return new Promise((resolve) => {
     const id = `chat-${randomUUID().slice(0, 8)}`;
-    const spec: { goal: string; skill?: string } = { goal };
+    const spec: { goal: string; skill?: string; model?: string } = { goal };
     if (pinnedSkill) spec.skill = pinnedSkill;
+    if (model) spec.model = model; // ADR-0022: per-turn tier (cheap for chat, escalates on hard asks)
 
     let detail = "thinking";
     let claimed = false;
@@ -1368,8 +1395,11 @@ async function cmdChat(args: Args): Promise<void> {
     }
 
     const goal = carry ? buildChatGoal(line, history) : line;
+    // Classify on the raw utterance (not the context-carried goal): conversational turns → Haiku,
+    // hard asks ("design…", "audit…") escalate to Opus. --no-tier leaves it to the peer's default.
+    const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, line);
     turnAbort = new AbortController();
-    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, timeoutMs, turnAbort.signal);
+    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal);
     turnAbort = null;
     if (cancelled) { console.log(`  (${answer})\n`); continue; } // don't pollute context with a cancel
     console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
@@ -1432,7 +1462,9 @@ usage:
                   supervise N lightweight peer processes (default 4) that claim work from
                   the shared weave; restarts crashed workers; stop the pool with weave down
   weave down      [--db <path>] [--pid-file <path>]   stop a daemonized peer or pool (SIGTERM)
-  weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>]
+  weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>] [--model m | --no-tier]
+                  (by default the goal is classified to a model tier — ADR-0022 — Haiku/Sonnet/Opus;
+                  --model pins one, --no-tier leaves the choice to the claiming peer's default)
   weave loop --skill <name> [--interval 6h] [--once] [--notify ch] [goal...]
                   [--daemon] [--pid-file <path>] [--log-file <path>]
                   re-declare a task routed to <skill> each tick (a skill = a use-case)
@@ -1447,8 +1479,10 @@ usage:
   weave search    <query...> [--db <path>] [--limit N] [--no-embed]
                   hybrid (BM25 + optional embeddings) search over accumulated knowledge
   weave chat      [--db <path>] [--route] [--skill <name>] [--timeout 180s] [--no-context]
+                  [--model m | --no-tier]
                   conversational REPL: each line is answered by the general agent (Ctrl-C cancels a
                   turn), follow-ups keep context; --route picks skills by keyword, --skill X pins one.
+                  by default each turn is tiered by complexity (chat → Haiku, hard asks → Opus).
                   thin client — start a peer with 'weave up' to do the work
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
