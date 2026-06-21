@@ -8,3 +8,4 @@ dist/
 .weave/
 .weave/
 weave
+*.bun-build
