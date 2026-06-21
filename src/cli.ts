@@ -6,9 +6,9 @@
  * Runs under `node --import tsx src/cli.ts` and compiles via `bun build --compile`.
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, openSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 
 import type { Substrate } from "./ports/substrate.js";
 import type { Worker } from "./ports/worker.js";
@@ -43,7 +43,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon"]);
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -186,9 +186,81 @@ async function readAll(weave: Substrate): Promise<SealedEvent[]> {
   return out;
 }
 
+// --- daemonize -------------------------------------------------------------
+
+/** True when we are the already-detached child (set by the parent before re-spawn). */
+const IS_DAEMON_CHILD = process.env.WEAVE_DAEMONIZED === "1";
+
+/** Default pid/log paths sit next to the db: `.weave/weave.db` → `.weave/weave.{pid,log}`. */
+function pidFileFor(args: Args): string {
+  return str(args, "pid-file", str(args, "db", DEFAULT_DB).replace(/\.db$/, "") + ".pid");
+}
+function logFileFor(args: Args): string {
+  return str(args, "log-file", str(args, "db", DEFAULT_DB).replace(/\.db$/, "") + ".log");
+}
+
+/**
+ * Decide what to do when a peer may already be running under `pidFile`.
+ * Returns `true` to proceed with daemonizing, `false` to abort (caller exits).
+ *
+ * TODO(you): implement the stale-PID policy. See request below the function.
+ */
+function shouldDaemonize(pidFile: string): boolean {
+  if (!existsSync(pidFile)) return true;
+  const raw = readFileSync(pidFile, "utf8").trim();
+  const pid = Number(raw);
+  if (!Number.isInteger(pid) || pid <= 0) return true; // garbage pidfile → reclaim
+  try {
+    process.kill(pid, 0); // signal 0: liveness probe, sends nothing
+    return false; // alive → refuse
+  } catch (e) {
+    // ESRCH → no such process (stale) → reclaim; EPERM → alive but not ours → refuse
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/**
+ * Re-spawn this process detached, redirecting output to `logFile`, and write `pidFile`.
+ * The parent prints a summary and exits; the child re-enters `cmdUp` with the daemon
+ * marker set, so it runs the normal foreground loop (now orphaned from the terminal).
+ */
+function daemonize(args: Args): void {
+  const pidFile = pidFileFor(args);
+  const logFile = logFileFor(args);
+  if (!shouldDaemonize(pidFile)) {
+    console.error(`weave: a peer already appears to be running (see ${pidFile}); aborting`);
+    process.exit(1);
+  }
+  mkdirSync(dirname(pidFile), { recursive: true });
+  mkdirSync(dirname(logFile), { recursive: true });
+  const out = openSync(logFile, "a");
+  // Reconstruct the relaunch argv. The two runtimes lay out argv differently:
+  //  • node --import tsx: argv = [node, /path/cli.ts, <cmd...>]; execArgv carries `--import tsx`.
+  //    The child needs execArgv + the real script path + the user args.
+  //  • bun --compile:     argv = [bin, /$bunfs/root/<entry>, <cmd...>]; the binary re-injects
+  //    its own entrypoint on launch, so we forward ONLY the user args (argv >= 2). Forwarding
+  //    the bunfs path would make the child parse it as the command ("unknown command").
+  const entry = process.argv[1] ?? "";
+  const compiled = entry.includes("/$bunfs/") || entry.includes("~BUN");
+  const userArgs = process.argv.slice(2);
+  const childArgs = compiled ? userArgs : [...process.execArgv, entry, ...userArgs];
+  const child = spawn(process.execPath, childArgs, {
+    detached: true,
+    stdio: ["ignore", out, out],
+    // Tell the child where its pidfile is so it can clean up on graceful shutdown.
+    env: { ...process.env, WEAVE_DAEMONIZED: "1", WEAVE_PID_FILE: pidFile },
+  });
+  writeFileSync(pidFile, String(child.pid));
+  child.unref();
+  console.log(`weave: peer daemonized (pid ${child.pid}) — logs: ${logFile}, pid: ${pidFile}`);
+  console.log(`weave: stop with — weave down${has(args, "db") ? ` --db ${str(args, "db", DEFAULT_DB)}` : ""}`);
+  process.exit(0);
+}
+
 // --- commands --------------------------------------------------------------
 
 async function cmdUp(args: Args): Promise<void> {
+  if (has(args, "daemon") && !IS_DAEMON_CHILD) return daemonize(args);
   const weave = await openSubstrate(args);
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
   const { skills, registry, backend, errors } = await assembleSkills(args, {
@@ -235,6 +307,9 @@ async function cmdUp(args: Args): Promise<void> {
     console.log("\nweave: shutting down…");
     clearInterval(keepAlive);
     if (compactTimer) clearInterval(compactTimer);
+    // If we were daemonized, remove our own pidfile so it doesn't go stale.
+    const pidFile = process.env.WEAVE_PID_FILE;
+    if (pidFile) try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
     ac.abort();
     void peer.stop().then(() => {
       weave.close();
@@ -244,6 +319,39 @@ async function cmdUp(args: Args): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
   await peer.start(ac.signal);
+}
+
+/** Stop a daemonized peer: read its pidfile, SIGTERM it, wait for it to exit. */
+async function cmdDown(args: Args): Promise<void> {
+  const pidFile = pidFileFor(args);
+  if (!existsSync(pidFile)) {
+    console.log(`weave: no pidfile at ${pidFile} — nothing to stop`);
+    return;
+  }
+  const pid = Number(readFileSync(pidFile, "utf8").trim());
+  if (!Number.isInteger(pid) || pid <= 0) {
+    console.error(`weave: garbage pidfile ${pidFile}; removing`);
+    rmSync(pidFile, { force: true });
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    process.kill(pid, "SIGTERM"); // ask the peer to shut down (it removes its own pidfile)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ESRCH") {
+      console.log(`weave: pid ${pid} already gone — clearing stale ${pidFile}`);
+      rmSync(pidFile, { force: true });
+      return;
+    }
+    throw e;
+  }
+  // Wait up to ~3s for graceful exit, polling liveness with signal 0.
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    try { process.kill(pid, 0); } catch { console.log(`weave: stopped peer (pid ${pid})`); return; }
+  }
+  console.error(`weave: pid ${pid} did not exit after SIGTERM; try: kill -9 ${pid}`);
+  process.exitCode = 1;
 }
 
 async function cmdTask(args: Args): Promise<void> {
@@ -451,7 +559,10 @@ function usage(): void {
 usage:
   weave up        [--db <path>] [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
+                  [--daemon] [--pid-file <path>] [--log-file <path>]
                   start a peer: claim tasks + route them to skills
+                  (--daemon detaches to the background; logs + pid default next to --db)
+  weave down      [--db <path>] [--pid-file <path>]   stop a daemonized peer (SIGTERM)
   weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>]
   weave loop --skill <name> [--interval 6h] [--once] [--notify ch] [goal...]
                   re-declare a task routed to <skill> each tick (a skill = a use-case)
@@ -474,6 +585,8 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "up":
       return cmdUp(args);
+    case "down":
+      return cmdDown(args);
     case "loop":
       return cmdLoop(args);
     case "skills":
