@@ -1,0 +1,54 @@
+/*
+ * sr-node-sids.nqe
+ * ----------------
+ * Enumerate every loopback /32 in the network and derive its SR/MPLS
+ * node (prefix) SID. One row per node — the anchor set for SR analysis.
+ *
+ * SID convention (this fabric): nodeSidIndex = last octet of the loopback,
+ * absolute label = SRGB_base + index.
+ *
+ * SRGB base is VENDOR-AWARE — defaults differ by platform:
+ *   - Arista EOS : 90000
+ *   - Cisco      : 16000
+ *   - (other)    : 16000   <- adjust as needed
+ * This Dual-Backbone fabric is 100% Arista EOS, so labels resolve to 9000x.
+ *
+ * NOTE: this derives the *intended* SID by convention. It does NOT read the
+ * device's configured prefix-SID/SRGB — Forward's NQE model does not expose the
+ * IS-IS node-segment index as a typed field — BUT the parsed config tree
+ * (device.files.config) is reachable, so the companion config-pattern check
+ * nqe/sr-sid-config-check.nqe verifies configured-vs-convention in pure NQE.
+ *
+ * IMPORTANT — only some nodes actually run SR. This "Dual-Backbone" fabric has
+ * an SR backbone (s-* nodes, even loopbacks) AND an LDP backbone (l-* nodes,
+ * odd loopbacks); the CE edge (.17-.24) runs neither. The `srEnabled` column
+ * marks the real SR nodes (s- name prefix). For non-SR rows the label is purely
+ * hypothetical ("what the SID would be if SR were enabled").
+ *
+ * Validated against Forward NQE (network 111 / Dual-Backbone). Key idioms:
+ *   - iface.loopbackMode == true       reliably selects loopbacks (vendor-neutral)
+ *   - IP lives on subinterfaces:       iface.subinterfaces[].ipv4.addresses[]
+ *   - toNumber(IpAddress) -> Int       then % 256 for the last octet
+ *   - enum compare uses the symbol:    device.platform.vendor == Vendor.ARISTA
+ *   - substring(s, start, end)         for the s-/l- backbone name prefix
+ */
+foreach device in network.devices
+foreach iface in device.interfaces
+where iface.loopbackMode == true
+foreach sub in iface.subinterfaces
+foreach addr in sub.ipv4.addresses
+where addr.prefixLength == 32
+let srgbBase =
+  if device.platform.vendor == Vendor.ARISTA then 90000
+  else if device.platform.vendor == Vendor.CISCO then 16000
+  else 16000
+let nodeSidIndex = toNumber(addr.ip) % 256
+let srEnabled    = substring(device.name, 0, 2) == "s-"   // SR backbone naming
+select {
+  device:         device.name,
+  vendor:         device.platform.vendor,
+  routerId:       addr.ip,
+  nodeSidIndex:   nodeSidIndex,
+  prefixSidLabel: srgbBase + nodeSidIndex,
+  srEnabled:      srEnabled
+}

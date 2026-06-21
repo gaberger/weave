@@ -1,0 +1,49 @@
+/*
+ * sr-srgb-check.nqe
+ * -----------------
+ * Explicit config-pattern check of SR enablement + SRGB range on each SR node.
+ * Patterns are embedded INLINE (single-line `patternMatch` literals) — no
+ * external parameter. Runs standalone:
+ *   run_query.py --network-id 111 --query-file nqe/sr-srgb-check.nqe
+ *
+ * Why inline patternMatch instead of blockMatches: blockMatches needs a
+ * PatternBlocks value, whose literal is multi-line, and NQE's lexer rejects
+ * newlines inside a `backtick` literal — so a block pattern can only arrive as
+ * a parameter. To keep the patterns explicit in the query we walk the config
+ * tree (device.files.config) and apply single-line patternMatch literals, which
+ * DO inline.
+ *
+ * What it checks, per SR node:
+ *   - SR enabled:  `router isis {proc}` -> `segment-routing mpls` -> `no shutdown`
+ *   - explicit SRGB override present?  a `label range {lo} {hi}` child line
+ *   - srgbBase: the configured base if overridden, else the Arista default 90000
+ *
+ * On network 111 (Arista EOS): all 8 SR nodes enabled, NONE carry an explicit
+ * label-range -> all use default base 90000. explicitSrgb == true on any row
+ * would be a deviation worth investigating.
+ *
+ * Idioms (validated): matches(text, "glob*") is GLOB not regex;
+ * patternMatch(line, `... {n:string}/{n:number}`) returns an Optional — narrow
+ * with isPresent() then read captures as m.<name>; inline list comprehension
+ * `(foreach ... select ...)` with length() for existence counts.
+ */
+foreach device in network.devices
+foreach isis in device.files.config
+let proc = patternMatch(isis.text, `router isis {proc:string}`)
+where isPresent(proc)
+foreach sr in isis.children
+where matches(sr.text, "segment-routing mpls")
+let enabled = length(foreach c in sr.children
+                     where matches(c.text, "no shutdown")
+                     select c) > 0
+let rangeCount = length(foreach c in sr.children
+                        let m = patternMatch(c.text, `label range {lo:number} {hi:number}`)
+                        where isPresent(m)
+                        select m)
+select {
+  device:       device.name,
+  isisProc:     proc.proc,
+  srEnabled:    enabled,
+  explicitSrgb: rangeCount > 0,
+  srgbBase:     if rangeCount > 0 then 0 else 90000
+}

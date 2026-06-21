@@ -1,0 +1,49 @@
+/*
+ * sr-sid-config-check.nqe
+ * -----------------------
+ * CONFIG-PATTERN CHECK: verify each SR node's *configured* IS-IS node-segment
+ * index matches the fabric convention (index == last octet of its loopback /32).
+ * matchOk == false is configured-vs-convention DRIFT.
+ *
+ * Patterns are embedded INLINE (single-line `patternMatch` literals) — no
+ * external parameter. Runs standalone:
+ *   run_query.py --network-id 111 --query-file nqe/sr-sid-config-check.nqe
+ *
+ * Why inline patternMatch (not blockMatches): blockMatches needs a PatternBlocks
+ * value, whose literal is multi-line, and NQE's lexer rejects newlines inside a
+ * `backtick` literal — so a block pattern can only arrive as a parameter. To keep
+ * the patterns explicit in the query we walk the config tree (device.files.config)
+ * and apply single-line patternMatch literals, which DO inline.
+ *
+ * How it works:
+ *   - matches(block.text, "interface Loopback*")   GLOB filter to loopback stanzas
+ *   - patternMatch(child.text, `node-segment ipv4 index {index:number}`)
+ *       -> Optional; isPresent() narrows it; capture read as m.index (Integer)
+ *   - lastOctet from the model: toNumber(addr.ip) % 256
+ *
+ * Scope: only nodes that actually run SR appear — non-SR loopbacks (LDP backbone,
+ * CE edge) have no node-segment child, so isPresent(m) drops them (correct).
+ *
+ * Assumption: one SR loopback (Loopback0) per device — true for this fabric.
+ * With multiple loopbacks per device, also match the `ip address <addr>/32`
+ * child to tie the right address to the stanza.
+ */
+foreach device in network.devices
+foreach iface in device.interfaces
+where iface.loopbackMode == true
+foreach sub in iface.subinterfaces
+foreach addr in sub.ipv4.addresses
+where addr.prefixLength == 32
+let lastOctet = toNumber(addr.ip) % 256
+foreach block in device.files.config
+where matches(block.text, "interface Loopback*")
+foreach child in block.children
+let m = patternMatch(child.text, `node-segment ipv4 index {index:number}`)
+where isPresent(m)
+select {
+  device:          device.name,
+  routerId:        addr.ip,
+  configuredIndex: m.index,
+  expectedIndex:   lastOctet,
+  matchOk:         m.index == lastOctet
+}

@@ -13,6 +13,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:bin": "bun build src/cli.ts --compile --outfile weave",
+    "build:dist": "bun run scripts/build.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test $(find src -name '*.test.ts')",
     "test:bun": "bun test ./src/adapters/secondary/bun-sqlite-substrate.bun-test.ts",
