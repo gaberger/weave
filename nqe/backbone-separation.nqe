@@ -22,6 +22,7 @@
   where hasSR && hasLDP
   select {
     device: device.name, scope: "device", issue: "runs BOTH SR and LDP",
+    violation: true,
     remediation: "Pick one label-distribution method: remove 'segment-routing mpls' (keep LDP) or remove 'mpls ldp'/'mpls ldp interface' (keep SR) — a node must not run both"
   }
 ) + (
@@ -34,6 +35,7 @@
   where ldp && mplsip == false
   select {
     device: device.name, scope: intf.text, issue: "LDP interface missing 'mpls ip'",
+    violation: true,
     remediation: "Add 'mpls ip' under '" + intf.text + "' so LDP installs labels on this link"
   }
 )

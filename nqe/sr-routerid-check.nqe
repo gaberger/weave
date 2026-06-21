@@ -27,6 +27,7 @@ select {
   loopback0:   addr.ip,
   routerId:    rid.rid,
   matchOk:     rid.rid == addr.ip,
+  violation:   rid.rid != addr.ip,
   remediation: if rid.rid == addr.ip then "OK"
     else "Set 'router-id ipv4 " + toString(addr.ip) + "' under router isis to match Loopback0"
 }

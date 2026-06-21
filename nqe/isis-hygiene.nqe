@@ -1,0 +1,40 @@
+/*
+ * isis-hygiene.nqe
+ * ----------------
+ * IS-IS / SR hygiene on the s-* backbone. Flags two classes of misconfig with a
+ * uniform {device, scope, issue, remediation} shape:
+ *   - "is-type not level-2": a `router isis` instance missing `is-type level-2`
+ *     (the fabric is a single-level L2 core; a stray L1/L1-2 node fragments the
+ *     SR/IGP domain).
+ *   - "node-segment off-loopback": a `node-segment` line on a NON-Loopback
+ *     interface. Prefix-SIDs must be anchored on a /32 loopback; on a transit
+ *     link it mis-binds the SID.
+ *
+ * Run: run_query.py --network-id 111 --query-file nqe/isis-hygiene.nqe
+ * (network 111: 0 rows.)
+ */
+(
+  // --- is-type level-2 missing ---
+  foreach device in network.devices
+  foreach isis in device.files.config
+  where matches(isis.text, "router isis*")
+  let l2 = length(foreach c in isis.children where c.text == "is-type level-2" select c) > 0
+  where l2 == false
+  select {
+    device: device.name, scope: isis.text, issue: "IS-IS instance missing 'is-type level-2'",
+    violation: true,
+    remediation: "Add 'is-type level-2' under '" + isis.text + "' to keep the core single-level"
+  }
+) + (
+  // --- node-segment on a non-loopback interface ---
+  foreach device in network.devices
+  foreach intf in device.files.config
+  where matches(intf.text, "interface Ethernet*")
+  foreach c in intf.children
+  where matches(c.text, "node-segment*")
+  select {
+    device: device.name, scope: intf.text, issue: "node-segment configured on a non-loopback interface",
+    violation: true,
+    remediation: "Move the '" + c.text + "' prefix-SID off '" + intf.text + "' onto the node's Loopback0 /32"
+  }
+)

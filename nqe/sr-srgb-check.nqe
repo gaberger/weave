@@ -45,5 +45,9 @@ select {
   isisProc:     proc.proc,
   srEnabled:    enabled,
   explicitSrgb: rangeCount > 0,
-  srgbBase:     if rangeCount > 0 then 0 else 90000
+  srgbBase:     if rangeCount > 0 then 0 else 90000,
+  violation:    rangeCount > 0,
+  remediation:  if rangeCount > 0
+    then "Explicit SRGB override on " + device.name + " — confirm the base/size is identical on EVERY SR node (mismatched SRGB breaks label math); align to the fabric standard (90000)"
+    else "OK — default SRGB (base 90000), consistent with the fabric"
 }

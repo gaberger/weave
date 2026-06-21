@@ -20,5 +20,6 @@ where enabled == false
 select {
   device:      device.name,
   issue:       "segment-routing mpls present but not 'no shutdown' (SR admin-down)",
+  violation:   true,
   remediation: "Under '" + isis.text + " / segment-routing mpls' add 'no shutdown' to activate SR"
 }
