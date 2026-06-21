@@ -1,9 +1,17 @@
-import { readFileSync, writeFileSync, realpathSync, openSync, closeSync, constants } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, openSync, closeSync, constants, type Dirent } from "node:fs";
 import { resolve, sep, dirname, basename, join } from "node:path";
 
 import type { ToolDefinition } from "../../ports/tool-host.js";
 
 const MAX_BYTES = 512 * 1024;
+const GREP_IGNORE = new Set(["node_modules", ".git", "dist", ".weave"]);
+const GREP_MAX_MATCHES = 2000;
+
+/** Convert a simple filename glob (`*`, `?`) to an anchored RegExp. */
+function globToRe(glob: string): RegExp {
+  const body = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(`^${body}$`);
+}
 
 /**
  * Resolve `p` under `root`, or null if it would escape — a path-traversal guard that also
@@ -55,6 +63,73 @@ export function readFileTool(root: string): ToolDefinition {
       } catch (e) {
         return { ok: false, output: { error: e instanceof Error ? e.message : String(e) } };
       }
+    },
+  };
+}
+
+/**
+ * `grep` (ADR-0019, the list/scan sibling of read_file): search files under `root` for a regex.
+ * Effect `read`. The enumeration primitive weave lacked — without it a skill can read a named
+ * file but cannot *discover* references across the tree (e.g. the ADR auditor finding every
+ * `ADR-NNNN` citation in code). Skips vendored/build dirs and oversized files; capped.
+ */
+export function grepTool(root: string): ToolDefinition {
+  return {
+    name: "grep",
+    description: "Search files under root for a regex: { pattern, path?, glob? } → { matches: [{file,line,text}], truncated }.",
+    effect: "read",
+    inputSchema: { pattern: "string (regex)", path: "string? (relative dir, default '.')", glob: "string? (filename glob e.g. *.ts)" },
+    execute: async (args) => {
+      const start = inRoot(root, String(args["path"] ?? "."));
+      if (start === null) return { ok: false, output: { error: "path escapes root" } };
+      let re: RegExp;
+      try {
+        re = new RegExp(String(args["pattern"] ?? ""));
+      } catch (e) {
+        return { ok: false, output: { error: `bad pattern: ${e instanceof Error ? e.message : String(e)}` } };
+      }
+      const globRe = args["glob"] ? globToRe(String(args["glob"])) : null;
+      const rootAbs = inRoot(root, ".") ?? resolve(root);
+      const matches: Array<{ file: string; line: number; text: string }> = [];
+      let truncated = false;
+      const walk = (dir: string): void => {
+        if (truncated) return;
+        let entries: Dirent[];
+        try {
+          entries = readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const ent of entries) {
+          if (truncated) return;
+          const full = join(dir, ent.name);
+          if (ent.isDirectory()) {
+            if (!GREP_IGNORE.has(ent.name)) walk(full);
+            continue;
+          }
+          if (!ent.isFile() || (globRe && !globRe.test(ent.name))) continue;
+          let text: string;
+          try {
+            if (statSync(full).size > MAX_BYTES) continue;
+            text = readFileSync(full, "utf8");
+          } catch {
+            continue;
+          }
+          const rel = full.startsWith(rootAbs + sep) ? full.slice(rootAbs.length + 1) : full;
+          const lines = text.split("\n");
+          for (let i = 0; i < lines.length; i++) {
+            if (re.test(lines[i] ?? "")) {
+              matches.push({ file: rel, line: i + 1, text: (lines[i] ?? "").slice(0, 300) });
+              if (matches.length >= GREP_MAX_MATCHES) {
+                truncated = true;
+                break;
+              }
+            }
+          }
+        }
+      };
+      walk(start);
+      return { ok: true, output: { matches, truncated } };
     },
   };
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { loadSkills } from "./skill-loader.js";
-import { readFileTool, editFileTool } from "./fs-tools.js";
+import { readFileTool, editFileTool, grepTool } from "./fs-tools.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
 import type { WorkerContext } from "../../ports/worker.js";
 
@@ -63,6 +63,38 @@ test("adr-audit reconciles file⟷INDEX and advances finished ADRs (no LLM)", as
     assert.match(read("ADR-0011-y.md"), /\*\*Status:\*\* Superseded by 0016/);
     // 0002 untouched.
     assert.match(read("ADR-0002-z.md"), /\*\*Status:\*\* Accepted/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("adr-audit flags citation danglers, skipping test fixtures and reserved/planned refs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "weave-adr-"));
+  try {
+    mkdirSync(join(root, "docs", "adrs"), { recursive: true });
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(
+      join(root, "docs", "adrs", "INDEX.md"),
+      "| ADR | Title | Status | Date |\n|--|--|--|--|\n| [0002](ADR-0002-z.md) | Z | Accepted | 2026-06-19 |\n",
+    );
+    writeFileSync(join(root, "docs", "adrs", "ADR-0002-z.md"), "# t\n\n- **Status:** Accepted\n");
+    writeFileSync(join(root, "src", "ok.ts"), "// implements ADR-0002\n"); // exists → not a dangler
+    writeFileSync(join(root, "src", "bad.ts"), "// per ADR-0042 we do X\n"); // no such ADR → dangler
+    writeFileSync(join(root, "src", "reserved.ts"), "// reserved for ADR-0006\n"); // planned → skip
+    writeFileSync(join(root, "src", "x.test.ts"), 'const fixture = "ADR-9999";\n'); // test fixture → skip
+
+    const { skills } = await loadSkills("examples/plugins");
+    const audit = skills.find((s) => s.name === "adr-audit");
+    assert.ok(audit, "adr-audit code skill should load");
+    const host = new ToolRegistry()
+      .register(readFileTool(root)).register(editFileTool(root)).register(grepTool(root))
+      .hostFor({ tools: "*", maxEffect: "irreversible" });
+    const res = await audit.run({ taskId: "t", spec: { goal: "adr audit", inputs: { indexPath: "docs/adrs/INDEX.md", scanPath: "src" } } }, ctxWith(host));
+
+    assert.equal(res.status, "completed");
+    assert.match(res.summary, /ADR-0042/); // the real dangler is reported
+    assert.doesNotMatch(res.summary, /ADR-9999/); // test fixture skipped
+    assert.doesNotMatch(res.summary, /ADR-0006/); // reserved/planned skipped
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

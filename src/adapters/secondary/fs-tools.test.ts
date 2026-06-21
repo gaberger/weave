@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, mkdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readFileTool, editFileTool } from "./fs-tools.js";
+import { readFileTool, editFileTool, grepTool } from "./fs-tools.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
 
 test("read_file returns content and is confined to its root", async () => {
@@ -60,6 +60,39 @@ test("edit_file replaces literal text and fails cleanly when absent", async () =
     const miss = await tool.execute({ path: "ADR.md", oldText: "Proposed", newText: "Accepted" });
     assert.equal(miss.ok, false);
     assert.equal((miss.output as { replaced: number }).replaced, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("grep finds regex matches across the tree, skips ignored dirs, and is read-effect", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "weave-fs-"));
+  try {
+    mkdirSync(join(dir, "src"), { recursive: true });
+    mkdirSync(join(dir, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(dir, "src", "a.ts"), "// see ADR-0042 here\nconst x = 1;\n");
+    writeFileSync(join(dir, "src", "b.ts"), "no refs\n");
+    writeFileSync(join(dir, "node_modules", "pkg", "c.ts"), "ADR-9999 should be ignored\n");
+    const host = new ToolRegistry().register(grepTool(dir)).hostFor({ tools: "*", maxEffect: "read" });
+    const res = await host.invoke({ name: "grep", args: { pattern: "ADR-[0-9]{4}", path: "src" } });
+    assert.equal(res.ok, true);
+    const matches = (res.output as { matches: Array<{ file: string; line: number; text: string }> }).matches;
+    assert.equal(matches.length, 1); // node_modules skipped
+    assert.equal(matches[0]?.file, "src/a.ts");
+    assert.equal(matches[0]?.line, 1);
+    // grep is read-effect: a read-capped grant still exposes it.
+    assert.ok(new ToolRegistry().register(grepTool(dir)).hostFor({ tools: "*", maxEffect: "read" }).available().some((d) => d.name === "grep"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("grep refuses a path escaping root", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "weave-fs-"));
+  try {
+    const host = new ToolRegistry().register(grepTool(dir)).hostFor({ tools: "*", maxEffect: "read" });
+    const res = await host.invoke({ name: "grep", args: { pattern: "x", path: "../.." } });
+    assert.equal(res.ok, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

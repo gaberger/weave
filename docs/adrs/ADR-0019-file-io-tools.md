@@ -64,5 +64,7 @@ weave authored this ADR set for.
 
 ## Follow-ups
 
-- Per-skill `root` scoping (e.g. an auditor granted only `docs/`); a `list_dir`/glob tool.
+- Per-skill `root` scoping (e.g. an auditor granted only `docs/`).
+- ~~a `list_dir`/glob tool~~ → added as `grep` (root-confined regex scan, effect `read`), the
+  enumeration primitive the ADR auditor needs to find `ADR-NNNN` citation danglers across code.
 - Run `edit_file` through the container sandbox (ADR-0018) for untrusted code skills.
