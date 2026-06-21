@@ -32,7 +32,7 @@ import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
 import { bashTool } from "./adapters/secondary/bash-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
-import { readFileTool, editFileTool } from "./adapters/secondary/fs-tools.js";
+import { readFileTool, editFileTool, grepTool } from "./adapters/secondary/fs-tools.js";
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
@@ -54,7 +54,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "write", "read-only", "no-embed", "no-context"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "write", "read-only", "no-embed", "no-context", "route"]);
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -401,6 +401,7 @@ async function assembleSkills(
     );
   }
   registry.register(readFileTool(process.cwd())); // read repo files (e.g. ADR auditor)
+  registry.register(grepTool(process.cwd())); // scan/discover refs across the tree (read)
   registry.register(editFileTool(process.cwd())); // edit repo files — irreversible, grant-gated
   registry.register(writeSkillTool(dir)); // self-authoring (ADR-0017) — irreversible, grant-gated
   return { skills, registry, backend: llm?.kind ?? "none", errors };
@@ -1208,7 +1209,8 @@ function chatTurn(
   goal: string,
   pinnedSkill: string | undefined,
   timeoutMs: number,
-): Promise<{ answer: string; ok: boolean }> {
+  signal: AbortSignal | undefined,
+): Promise<{ answer: string; ok: boolean; cancelled: boolean }> {
   return new Promise((resolve) => {
     const id = `chat-${randomUUID().slice(0, 8)}`;
     const spec: { goal: string; skill?: string } = { goal };
@@ -1219,23 +1221,38 @@ function chatTurn(
     let frame = 0;
     let done = false;
     let subscription: { unsubscribe(): void } | undefined;
+    const t0 = systemClock.now();
 
-    // Animate a "thinking" line only on a real terminal; piped/logged stdout gets no ANSI noise.
+    // Animate a "thinking" line (with elapsed seconds, so a slow real-LLM turn doesn't look hung)
+    // only on a real terminal; piped/logged stdout gets no ANSI noise.
     const tty = process.stdout.isTTY === true;
-    const draw = () => { if (tty) process.stdout.write(`\r  ${SPINNER[frame++ % SPINNER.length]} ${detail}…\x1b[K`); };
+    const draw = () => {
+      if (!tty) return;
+      const secs = Math.round((systemClock.now() - t0) / 1000);
+      process.stdout.write(`\r  ${SPINNER[frame++ % SPINNER.length]} ${detail}… ${secs}s  (Ctrl-C to cancel)\x1b[K`);
+    };
     const spin = tty ? setInterval(draw, 120) : undefined;
     draw();
 
-    const finish = (answer: string, ok: boolean): void => {
+    const finish = (answer: string, ok: boolean, cancelled = false): void => {
       if (done) return;
       done = true;
       if (spin) clearInterval(spin);
       clearTimeout(timer);
       clearTimeout(hint);
+      signal?.removeEventListener("abort", onAbort);
       subscription?.unsubscribe();
       if (tty) process.stdout.write("\r\x1b[K"); // wipe the spinner line
-      resolve({ answer, ok });
+      resolve({ answer, ok, cancelled });
     };
+
+    // Ctrl-C during a turn cancels the wait and returns to the prompt. The task keeps running on the
+    // peer (no remote-cancel here), so its answer just lands in `weave report` / the log later.
+    const onAbort = () => finish("cancelled (the task may still finish on the peer).", false, true);
+    if (signal) {
+      if (signal.aborted) return finish("cancelled.", false, true);
+      signal.addEventListener("abort", onAbort);
+    }
 
     const hint = setTimeout(() => {
       if (!claimed && !done) detail = "waiting for a peer to pick this up (is `weave up` running?)";
@@ -1251,7 +1268,7 @@ function chatTurn(
 
     // Subscribe from head+1 BEFORE declaring, so an instant completion can't slip past the listener.
     void weave.head().then((head) => {
-      if (done) return; // timed out before we got here (vanishingly unlikely, but safe)
+      if (done) return; // cancelled/timed out before we got here
       subscription = weave.subscribe(head + 1, (e) => {
         if (e.subject !== id) return;
         switch (e.kind) {
@@ -1281,14 +1298,21 @@ async function cmdChat(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const newId = () => randomUUID();
   const actor = str(args, "agent", `chat-${randomUUID().slice(0, 8)}`);
-  const pinnedSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
+  const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
+  // Conversational by default: pin the general `claude` agent so every turn is a quick chat reply,
+  // NOT routed by keyword to a heavy skill (a stray word like "research" would otherwise launch the
+  // researcher job). `--route` opts into full skill routing; `--skill X` targets one skill; under
+  // `--fake` there's no claude agent, so fall back to routing (the echo skill).
+  const route = has(args, "route") || has(args, "fake");
+  const pinnedSkill = explicitSkill ?? (route ? undefined : "claude");
   const timeoutMs = parseDuration(str(args, "timeout", "180s"));
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
 
-  console.log("weave chat — talk to your weave. Type a request and press enter.");
-  console.log(`  /help  /status  /reset  /quit${pinnedSkill ? `   [skill pinned: ${pinnedSkill}]` : ""}${carry ? "" : "   [context off]"}`);
-  console.log("  (thin client: a `weave up` peer must be running to answer)\n");
+  const mode = explicitSkill ? `skill: ${explicitSkill}` : route ? "routing by skill" : "conversational (general agent)";
+  console.log("weave chat — talk to your weave. Just type and press enter; ask follow-ups naturally.");
+  console.log(`  /help  /status  /reset  /quit   ·   ${mode}${carry ? "" : "   ·   context off"}`);
+  console.log("  (thin client: a `weave up` peer answers; Ctrl-C cancels a turn, again at the prompt exits)\n");
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
@@ -1299,10 +1323,12 @@ async function cmdChat(args: Args): Promise<void> {
   const queue: string[] = [];
   let pending: ((v: string | null) => void) | null = null;
   let closed = false;
+  let turnAbort: AbortController | null = null; // set while a turn is in flight
   const deliver = (v: string | null): void => { const r = pending; pending = null; r?.(v); };
   rl.on("line", (l) => (pending ? deliver(l) : queue.push(l)));
   rl.on("close", () => { closed = true; if (pending) deliver(null); }); // Ctrl-D / EOF / rl.close()
-  rl.on("SIGINT", () => rl.close()); // Ctrl-C → close → ends the loop
+  // Ctrl-C: cancel an in-flight turn and return to the prompt; at the prompt (no turn), exit.
+  rl.on("SIGINT", () => { if (turnAbort) turnAbort.abort(); else rl.close(); });
   const nextLine = (): Promise<string | null> =>
     queue.length > 0 ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((res) => { pending = res; });
 
@@ -1315,7 +1341,9 @@ async function cmdChat(args: Args): Promise<void> {
 
     if (line === "/quit" || line === "/exit") break;
     if (line === "/help") {
-      console.log("  Just type what you want; it's routed to a matching skill (or the general agent).");
+      console.log("  Just talk — each turn is a conversational reply from the general agent, and");
+      console.log("  follow-ups remember the prior turns. (Start with --route or --skill X to target skills.)");
+      console.log("  Ctrl-C cancels the current turn; at the prompt it exits.");
       console.log("  /status  show task states   /reset  forget conversation context   /quit  exit\n");
       continue;
     }
@@ -1340,7 +1368,10 @@ async function cmdChat(args: Args): Promise<void> {
     }
 
     const goal = carry ? buildChatGoal(line, history) : line;
-    const { answer, ok } = await chatTurn(weave, newId, actor, goal, pinnedSkill, timeoutMs);
+    turnAbort = new AbortController();
+    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, timeoutMs, turnAbort.signal);
+    turnAbort = null;
+    if (cancelled) { console.log(`  (${answer})\n`); continue; } // don't pollute context with a cancel
     console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
     history.push({ q: line, a: answer });
   }
@@ -1415,9 +1446,10 @@ usage:
                   (graph.json/graph.md + inline forward/backlinks; warms embeddings if configured)
   weave search    <query...> [--db <path>] [--limit N] [--no-embed]
                   hybrid (BM25 + optional embeddings) search over accumulated knowledge
-  weave chat      [--db <path>] [--skill <name>] [--timeout 180s] [--no-context]
-                  conversational REPL: declare each line as a task and wait for a running
-                  peer to answer (thin client — start a peer with 'weave up' to do the work)
+  weave chat      [--db <path>] [--route] [--skill <name>] [--timeout 180s] [--no-context]
+                  conversational REPL: each line is answered by the general agent (Ctrl-C cancels a
+                  turn), follow-ups keep context; --route picks skills by keyword, --skill X pins one.
+                  thin client — start a peer with 'weave up' to do the work
   weave status    [--db <path>]
   weave log       [--db <path>] [--follow]
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
