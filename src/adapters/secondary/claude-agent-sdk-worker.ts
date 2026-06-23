@@ -89,24 +89,29 @@ export class ClaudeAgentSdkWorker implements Worker {
     let leaseLost = false;
 
     // The lease gate (ADR-0003 §2). Unknown tools default to irreversible (fail closed).
-    const canUseTool: CanUseTool = async (toolName) => {
+    const canUseTool: CanUseTool = async (toolName, input?: unknown) => {
+      if (process.env["WEAVE_TOOL_DEBUG"]) process.stderr.write(`[canUseTool] ${toolName} input=${JSON.stringify(input)}\n`);
       // The SDK names in-process MCP tools `mcp__<server>__<tool>`; our effect map is keyed by the
       // bare tool name, so strip the prefix or the lookup misses and EVERY tool (incl. read-only
       // ones like the forward scripts' bash) fails closed to irreversible and gets lease-gated.
       const base = toolName.startsWith("mcp__") ? (toolName.split("__").pop() ?? toolName) : toolName;
       const effect: Effect = effectByName.get(base) ?? effectByName.get(toolName) ?? "irreversible";
+      if (process.env["WEAVE_TOOL_DEBUG"]) process.stderr.write(`[canUseTool] ${toolName} base=${base} effect=${effect}\n`);
       // Only irreversible effects need a held lease. Fail CLOSED: if the lease can't be confirmed,
       // deny (read-only tools are exempt via the corrected effect lookup above, so this no longer
       // blocks them — it only gates genuinely irreversible effects).
       if (effect === "irreversible") {
         let held = false;
-        try { held = await ctx.lease.held(); } catch { held = false; }
+        try { held = await ctx.lease.held(); } catch (e) { held = false; if (process.env["WEAVE_TOOL_DEBUG"]) process.stderr.write(`[canUseTool] lease.held threw: ${e instanceof Error ? e.message : String(e)}\n`); }
+        if (process.env["WEAVE_TOOL_DEBUG"]) process.stderr.write(`[canUseTool] ${toolName} held=${held}\n`);
         if (!held) {
           leaseLost = true;
           return { behavior: "deny", message: "weave: lease lost; aborting before irreversible effect", interrupt: true };
         }
       }
-      return { behavior: "allow" };
+      // MUST echo the input back via updatedInput — a bare {behavior:"allow"} drops the tool's
+      // arguments, so the handler runs with no input (or not at all).
+      return { behavior: "allow", updatedInput: (input ?? {}) as Record<string, unknown> };
     };
 
     // Link weave's cooperative cancellation to the SDK's AbortController.

@@ -33,28 +33,32 @@ export const realClaudeQuery: ClaudeQuery = ({ prompt, options }) =>
  */
 export const realToolBridge: ToolBridge = {
   build(host: ToolHost): Record<string, unknown> {
-    const tools = host.available().map((d) =>
-      tool(
+    const tools = host.available().map((d) => {
+      // Build the zod input shape from the tool's field names so the agent calls the tool DIRECTLY
+      // with its real fields (e.g. bash → {command}). weave's inputSchema is a FLAT
+      // { field: "<description>" } map (NOT JSON Schema), so the keys ARE the field names. The old
+      // `{args}` wrapper / `.properties` lookup yielded an empty shape → the agent's args were
+      // stripped → "validation errors across the board".
+      const props = (d.inputSchema && typeof d.inputSchema === "object") ? (d.inputSchema as Record<string, unknown>) : {};
+      const shape: Record<string, z.ZodTypeAny> = {};
+      for (const k of Object.keys(props)) shape[k] = z.unknown();
+      return tool(
         d.name,
-        `${d.description}\n\nCall with an "args" object matching this JSON schema: ${JSON.stringify(d.inputSchema)}`,
-        { args: z.unknown() },
-        async (a: { args?: unknown }) => {
+        `${d.description}\n\nInput JSON schema: ${JSON.stringify(d.inputSchema)}`,
+        shape,
+        async (input: Record<string, unknown>) => {
+          if (process.env["WEAVE_TOOL_DEBUG"]) process.stderr.write(`\n[tool] ${d.name} input=${JSON.stringify(input)}\n`);
           try {
-            const result = await host.invoke({
-              name: d.name,
-              args: (a.args ?? {}) as Record<string, unknown>,
-            });
+            const result = await host.invoke({ name: d.name, args: (input ?? {}) as Record<string, unknown> });
             return { content: [{ type: "text" as const, text: JSON.stringify(result.output ?? null) }] };
           } catch (err) {
-            return {
-              content: [
-                { type: "text" as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` },
-              ],
-            };
+            const msg = err instanceof Error ? err.message : String(err);
+            if (process.env["WEAVE_TOOL_DEBUG"]) process.stderr.write(`[tool] ${d.name} ERROR: ${msg}\n`);
+            return { content: [{ type: "text" as const, text: `Error: ${msg}` }] };
           }
         },
-      ),
-    );
+      );
+    });
 
     const server = createSdkMcpServer({ name: "weave-tools", version: "0.0.0", tools });
     return { "weave-tools": { type: "sdk", name: "weave-tools", instance: server.instance } };
