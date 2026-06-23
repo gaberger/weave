@@ -26,6 +26,8 @@ SKILLS_ROOT = SKILL_ROOT.parent
 sys.path.insert(0, str(SKILLS_ROOT / "forward-intent-check" / "scripts"))
 sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
 
 
@@ -281,7 +283,7 @@ Why this matters:
     args = parser.parse_args()
 
     # Initialize client
-    client = ForwardClient()
+    client = ForwardClient.from_env()
 
     # Get all intent checks
     checks = get_all_intent_checks(client, args.network_id)

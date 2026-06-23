@@ -23,6 +23,8 @@ SKILL_ROOT = SCRIPT_DIR.parent
 SKILLS_ROOT = SKILL_ROOT.parent
 sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
 
 
@@ -244,7 +246,7 @@ Examples:
     args = parser.parse_args()
 
     # Initialize client
-    client = ForwardClient()
+    client = ForwardClient.from_env()
 
     # Get BGP session data
     sessions = get_bgp_sessions(client, args.network_id)

@@ -213,6 +213,27 @@ class ForwardClient:
     def delete(self, path: str, query: Optional[dict] = None) -> Any:
         return self._request("DELETE", path, query=query)
 
+    def run_nqe_query(self, network_id: str, query_id: Optional[str] = None,
+                      query: Optional[str] = None, params: Optional[dict] = None,
+                      snapshot_id: Optional[str] = None, limit: int = 0) -> Any:
+        """Run an NQE query: POST /api/nqe?networkId=&snapshotId= with queryId or raw query.
+
+        Convenience wrapper restored for the discovery scripts (the bare endpoint is
+        POST /api/nqe). Returns the parsed JSON (typically {"items": [...]})."""
+        qs = {"networkId": network_id}
+        if snapshot_id:
+            qs["snapshotId"] = snapshot_id
+        body: dict = {}
+        if query_id:
+            body["queryId"] = query_id
+        if query:
+            body["query"] = query
+        if params:
+            body["parameters"] = params
+        if limit:
+            body["queryOptions"] = {"limit": limit}
+        return self.post("/api/nqe?" + urllib.parse.urlencode(qs), body)
+
 
 def emit_json(obj: Any) -> None:
     """Print an object as JSON to stdout."""
