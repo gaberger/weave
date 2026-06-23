@@ -1446,9 +1446,32 @@ async function recordAndTranscribe(o: {
   return text.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim(); // drop [BLANK_AUDIO] / [_TT_] markers
 }
 
-/** Voice REPL: push-to-talk → whisper STT → routed weave turn → spoken answer. Thin client like
- *  chat — a `weave up --netops` peer answers. Routes by default so NetOps utterances hit the
- *  forward-* skills; --skill X pins one. macOS-only (avfoundation mic + `say`). */
+/** Start an in-process peer on the given substrate so `weave voice --netops` is ONE command
+ *  (no separate `weave up`). Mirrors cmdUp's peer wiring (minus the event firehose + daemon
+ *  bits). Fire-and-forget start; returns a stop() to abort + drain on exit. */
+async function startEmbeddedPeer(args: Args, weave: Substrate): Promise<() => Promise<void>> {
+  const agentId = str(args, "peer-agent", `voice-peer-${randomUUID().slice(0, 8)}`);
+  const { skills, registry, backend, errors } = await assembleSkills(args, {
+    fake: has(args, "fake"), model: str(args, "model", "claude-sonnet-4-6"), weave, newId: () => randomUUID(),
+  });
+  for (const e of errors) console.error(`  ! skill load error in ${e.file}: ${e.error}`);
+  const router = new SkillRouterWorker(skills);
+  const peer = createPeer({
+    weave,
+    cfg: { agentId, grant: { tools: "*", maxEffect: "irreversible" },
+      leaseMs: num(args, "lease-ms", 30_000), maxConcurrent: num(args, "concurrency", 2), tickMs: num(args, "tick-ms", 3_000) },
+    newWorker: () => router, registry, clock: systemClock, newId: () => randomUUID(),
+  });
+  const ac = new AbortController();
+  void peer.start(ac.signal); // runs until aborted; we don't await it here
+  console.log(`  (embedded peer "${agentId}" [llm: ${backend}] — ${skills.length} skills ready)`);
+  return async () => { ac.abort(); await peer.stop().catch(() => {}); };
+}
+
+/** Voice REPL: push-to-talk → whisper STT → routed weave turn → spoken answer. Routes by default
+ *  so NetOps utterances hit the forward-* skills; --skill X pins one. With --netops it embeds its
+ *  own peer (single command); otherwise it's a thin client and a `weave up` peer answers.
+ *  macOS-only (avfoundation mic + `say`). */
 async function cmdVoice(args: Args): Promise<void> {
   if (process.platform !== "darwin") return void console.error("weave voice: needs macOS (avfoundation mic + `say`).");
   const whisper = str(args, "whisper-bin", "whisper-cli");
@@ -1458,42 +1481,76 @@ async function cmdVoice(args: Args): Promise<void> {
   const maxSecs = num(args, "max-secs", 20);
 
   const weave = await openSubstrate(args);
+  // --netops embeds a peer so this is ONE command; else rely on an external `weave up` peer.
+  const stopPeer = (has(args, "netops") && !has(args, "no-serve")) ? await startEmbeddedPeer(args, weave) : null;
   const newId = (): string => randomUUID();
   const actor = str(args, "agent", `voice-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
-  const pinnedSkill = explicitSkill; // undefined => route on the peer (NetOps utterances → forward-*)
+  const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
   const timeoutMs = parseDuration(str(args, "timeout", "300s"));
   const speaker = makeSpeaker(!has(args, "no-speak")); // voice mode speaks by default
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
 
-  console.log("weave voice — talk to your weave. Push-to-talk: Enter to record, speak, Enter to stop.");
-  console.log(`  /quit exits · routes to skills (start a 'weave up --netops' peer to answer) · model: ${model.split("/").pop()}\n`);
+  // Wake-word mode (`--wake`, default phrase "hello forward"): hands-free. Listen in short chunks
+  // until the phrase is heard, ack with "Hello", then record the question. Otherwise push-to-talk.
+  const wake = has(args, "wake") ? (str(args, "wake", "") || "hello forward") : null;
+  const wakeChunk = num(args, "wake-chunk", 4);
+  const ackPhrase = str(args, "wake-ack", "Hello");
+  const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+
+  console.log("weave voice — talk to your weave.");
+  console.log(wake
+    ? `  hands-free: say "${wake}" to wake, then ask · type /quit or Ctrl-C to exit · model: ${model.split("/").pop()}\n`
+    : `  push-to-talk: Enter to record, speak, Enter to stop · /quit exits · model: ${model.split("/").pop()}\n`);
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const queue: string[] = [];
   let pending: ((v: string | null) => void) | null = null;
   let closed = false;
+  let quit = false;
   rl.on("line", (l) => (pending ? (pending(l), (pending = null)) : queue.push(l)));
   rl.on("close", () => { closed = true; pending?.(null); });
+  rl.on("SIGINT", () => { speaker.stop(); quit = true; pending?.(null); }); // Ctrl-C quits
   const nextLine = (): Promise<string | null> =>
     queue.length ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((r) => (pending = r));
+  const drainQuit = (): boolean => { while (queue.length) if (queue.shift()!.trim() === "/quit") return true; return false; };
 
   for (;;) {
-    process.stdout.write("🎤 Enter to talk (or type a message) · /quit › ");
-    const start = await nextLine();
-    if (start === null) break;
-    const typed = start.trim();
-    if (typed === "/quit" || typed === "/exit") break;
-
+    if (quit || closed) break;
     let utterance: string;
-    if (typed) {
-      utterance = typed; // typed fallback when you'd rather not speak
-    } else {
-      speaker.stop(); // don't record weave talking over you
+
+    if (wake) {
+      // Listen in short chunks until the wake phrase is heard (typed /quit or Ctrl-C breaks out).
+      process.stdout.write(`👂 say "${wake}"…\r`);
+      let woken = false;
+      while (!woken && !quit && !closed) {
+        if (drainQuit()) { quit = true; break; }
+        const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk });
+        if (heard && norm(heard).includes(norm(wake))) woken = true;
+      }
+      if (quit || closed) break;
+      speaker.stop();
+      speaker.speak(ackPhrase); // "Hello"
+      await new Promise((r) => setTimeout(r, 800)); // let the ack finish before we record
+      console.log(`\n  (woke) — ask your question…`);
       utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs });
-      if (!utterance) { console.log("  (heard nothing — try again)\n"); continue; }
+      if (!utterance) { console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
       console.log(`you (voice)› ${utterance}\n`);
+    } else {
+      process.stdout.write("🎤 Enter to talk (or type a message) · /quit › ");
+      const start = await nextLine();
+      if (start === null) break;
+      const typed = start.trim();
+      if (typed === "/quit" || typed === "/exit") break;
+      if (typed) {
+        utterance = typed; // typed fallback when you'd rather not speak
+      } else {
+        speaker.stop(); // don't record weave talking over you
+        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs });
+        if (!utterance) { console.log("  (heard nothing — try again)\n"); continue; }
+        console.log(`you (voice)› ${utterance}\n`);
+      }
     }
 
     const goal = carry ? buildChatGoal(utterance, history) : utterance;
@@ -1507,6 +1564,7 @@ async function cmdVoice(args: Args): Promise<void> {
 
   if (!closed) rl.close();
   speaker.stop();
+  if (stopPeer) await stopPeer();
   weave.close();
   console.log("\nweave: bye.");
 }
