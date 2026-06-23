@@ -33,5 +33,6 @@ select {
   device:      device.name,
   interface:   intf.text,
   gap:         "isis SR core link without TI-LFA (no per-iface and no global fast-reroute)",
+  violation:   true,
   remediation: "Add 'isis ti-lfa link-protection' under '" + intf.text + "', or enable fabric-wide 'fast-reroute ti-lfa mode link-protection level-2' under 'router isis / address-family ipv4 unicast'"
 }

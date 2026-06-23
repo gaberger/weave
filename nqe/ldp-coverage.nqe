@@ -1,0 +1,29 @@
+/*
+ * ldp-coverage.nqe
+ * ----------------
+ * Find OSPF core links missing LDP. On the l-* backbone, `mpls ldp` uses
+ * `interface disabled default` (opt-in), so every OSPF-enabled core link must
+ * carry BOTH `mpls ldp interface` and `mpls ip` or it's an LDP black hole (no
+ * label binding for transit over that link).
+ *
+ * A gap = an Ethernet interface with `ip ospf area ...` that lacks `mpls ldp
+ * interface` and/or `mpls ip`.
+ *
+ * Run: run_query.py --network-id 111 --query-file nqe/ldp-coverage.nqe
+ * (network 111: 0 gaps.)
+ */
+foreach device in network.devices
+foreach intf in device.files.config
+where matches(intf.text, "interface Ethernet*")
+let ospfOn = length(foreach c in intf.children where matches(c.text, "ip ospf area*") select c) > 0
+let ldpIf  = length(foreach c in intf.children where matches(c.text, "mpls ldp interface") select c) > 0
+let mplsip = length(foreach c in intf.children where matches(c.text, "mpls ip") select c) > 0
+where ospfOn && (ldpIf == false || mplsip == false)
+select {
+  device:      device.name,
+  interface:   intf.text,
+  hasLdpIface: ldpIf,
+  hasMplsIp:   mplsip,
+  violation:   true,
+  remediation: "Add " + (if ldpIf == false then "'mpls ldp interface' " else "") + (if mplsip == false then "'mpls ip' " else "") + "under '" + intf.text + "' so LDP binds labels on this OSPF core link"
+}

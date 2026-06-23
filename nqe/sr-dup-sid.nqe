@@ -23,6 +23,7 @@ select {
   devices:     devices,
   count:       length(devices),
   collision:   length(devices) > 1,
+  violation:   length(devices) > 1,
   remediation: if length(devices) > 1
     then "Renumber so each loopback has a globally-unique node-segment index (convention: index = loopback /32 last octet); reconfigure 'node-segment ipv4 index N' on the duplicates"
     else "OK — index is unique"
