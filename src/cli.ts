@@ -1407,6 +1407,22 @@ function chatTurn(
 /** Wall-clock stamp HH:MM:SS.mmm for voice logs, so you can read the gap between interactions. */
 function tstamp(): string { return new Date(systemClock.now()).toISOString().slice(11, 23); }
 
+/** A "rich" answer (markdown, tables, hop lists, or raw IPs) reads terribly aloud — summarize it
+ *  for speech instead of speaking it verbatim. Plain short answers are spoken as-is. */
+function looksRich(t: string): boolean {
+  return t.length > 220 || /\d{1,3}(\.\d{1,3}){3}/.test(t) || /[|`#]|\n[-*]\s|\n\s*\n/.test(t);
+}
+
+/** Prompt that turns a detailed network result into a natural SPOKEN reply — the rich answer
+ *  carries its own context (e.g. "10.17.0.100 (NY DC host)"), so this just condenses + verbalizes. */
+function voiceSummaryPrompt(answer: string): string {
+  return "You are Forward, a voice NetOps assistant. Rewrite the result below as a brief SPOKEN reply for text-to-speech. " +
+    "Rules: at most two short sentences; conversational; translate IP addresses and device codes into their ROLE and LOCATION " +
+    "(e.g. \"the New York data center host\", \"the London edge router\", \"the S R plane\"); state the outcome plainly; " +
+    "do NOT read raw IP addresses, markdown, tables, code, or hop-by-hop lists; do NOT run any tools — just rewrite using the text given; " +
+    "end by offering one short relevant follow-up.\n\nResult to verbalize:\n" + answer;
+}
+
 /** Offline text-to-speech via macOS `say` (zero new dependency, works offline — matches
  *  weave's ethos). Returns a speaker that voices text (markdown stripped) and can be
  *  interrupted (new turn / Ctrl-C kills any in-flight speech). No-op + one warning off macOS;
@@ -1545,6 +1561,8 @@ async function cmdVoice(args: Args): Promise<void> {
   const actor = str(args, "agent", `voice-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
+  // Agent used to verbalize rich answers for speech (the conversational catch-all).
+  const summaryAgent = (str(args, "persona", "") === "netops" || has(args, "netops")) ? "netops" : has(args, "persona") ? "agent" : "claude";
   const timeoutMs = parseDuration(str(args, "timeout", "300s"));
   const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
@@ -1640,8 +1658,16 @@ async function cmdVoice(args: Args): Promise<void> {
     const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, utterance);
     const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, undefined);
     if (cancelled) { console.log(`  ${tstamp()} (${answer})\n`); continue; }
-    console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
-    speaker.speak(answer);
+    console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`); // screen: full detail
+    // Speak a CONTEXTUAL summary, not the verbatim markdown/IP dump. The printed answer already
+    // carries the context, so a quick no-tools rewrite condenses it to a natural spoken reply.
+    let spoken = answer;
+    if (ok && !has(args, "no-speak") && !has(args, "no-voice-summary") && looksRich(answer)) {
+      if (debug) console.error(`  ${tstamp()} [voice] summarizing ${answer.length} chars for speech…`);
+      const s = await chatTurn(weave, newId, actor, voiceSummaryPrompt(answer), summaryAgent, undefined, 60_000, undefined);
+      if (s.ok && s.answer.trim()) spoken = s.answer.trim();
+    }
+    speaker.speak(spoken);
     if (wake) await speaker.done(); // wait for the answer to finish before re-listening (no echo)
     history.push({ q: utterance, a: answer });
   }

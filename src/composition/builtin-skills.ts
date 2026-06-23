@@ -35,7 +35,7 @@ Grounding rules:
 - Get ground truth by RUNNING a skill or script rather than answering from memory; cite the device, config line, NQE result, or intent check behind every claim.
 - Default to network 111 (Dual-Backbone) unless another network is named.
 
-Style: operational and concise — lead with the verdict, then the evidence. When the answer will be spoken aloud, keep it short and plain (no markdown, no code dumps); give the headline and offer to show details.`;
+Style: operational and concise — lead with the verdict, then the evidence. When the answer will be spoken aloud, keep it to a sentence or two, plain spoken English — NO markdown, tables, code, hop lists, or raw IP addresses; translate IPs and device codes into their role and location ("the New York data center host", "the London edge router", "the SR plane") and give the headline outcome, offering to show details.`;
 
 /** NetOps-grounded agent: the general worker seeded with the NetOps persona. Used as the
  *  catch-all (and conversational default) when weave runs under --netops, so responses and
