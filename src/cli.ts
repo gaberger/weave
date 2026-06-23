@@ -367,6 +367,8 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
     // it discover existing files (e.g. nqe/*.nqe). `--read-only` opts back out for untrusted goals.
     const allowedTools = ["WebFetch", "WebSearch", "Read"];
     if (!has(args, "read-only")) allowedTools.push("Write", "Edit", "Glob");
+    // NetOps preset needs Bash — every forward-* skill runs `python3 .../scripts/*.py`.
+    if (has(args, "netops") || str(args, "persona", "") === "netops") allowedTools.push("Bash");
     return {
       kind: "claude-cli",
       make: (sp) => new ClaudeCliWorker({ model, ...(sp ? { systemPrompt: sp } : {}), allowedTools }),
@@ -448,8 +450,10 @@ async function assembleSkills(
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
   // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0021 §4).
   registry.register(recallTool(reportsDirFor(args), pickEmbedder(args)));
-  if (has(args, "bash")) {
-    // Opt-in shell access. Denylist always on; optional allowlist + timeout from flags.
+  if (has(args, "bash") || netops) {
+    // Shell access. Opt-in via --bash, and ALWAYS on under the NetOps preset: every forward-*
+    // skill works by running `python3 .../scripts/*.py`, so without bash the agent can't make a
+    // single Forward API call. Denylist always on; optional allowlist + timeout from flags.
     const allow = str(args, "bash-allow", "").split(",").map((s) => s.trim()).filter(Boolean);
     registry.register(
       bashTool({
@@ -1596,7 +1600,7 @@ async function cmdVoice(args: Args): Promise<void> {
   const maxSecs = num(args, "max-secs", 20);
   // VAD: auto-stop a command recording shortly after you stop talking (ffmpeg silencedetect).
   // Tunable via --silence-db / --silence-secs; --no-vad records until Enter/maxSecs.
-  const vadFilter = has(args, "no-vad") ? "" : `silencedetect=noise=${str(args, "silence-db", "-30")}dB:d=${str(args, "silence-secs", "1.2")}`;
+  const vadFilter = has(args, "no-vad") ? "" : `silencedetect=noise=${str(args, "silence-db", "-30")}dB:d=${str(args, "silence-secs", "2.0")}`;
 
   const weave = await openSubstrate(args);
   // --netops (or --persona netops, which implies it) embeds a peer so this is ONE command;
@@ -1608,9 +1612,9 @@ async function cmdVoice(args: Args): Promise<void> {
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
   const summaryAgent = "voice-summary"; // dedicated NO-TOOLS skill — never the tool-granted agent
-  // Voice must feel responsive — bound a turn to 30s by default (was 300s). Raise with --timeout
-  // for a known-long analysis; on timeout the agent reports what it has and offers to dig deeper.
-  const timeoutMs = parseDuration(str(args, "timeout", "30s"));
+  // Voice must feel responsive — bound a turn to 60s by default (was 300s). Enough for one focused
+  // NQE query + summarize; raise with --timeout for a known-long analysis.
+  const timeoutMs = parseDuration(str(args, "timeout", "60s"));
   const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
   const carry = !has(args, "no-context");
@@ -2097,7 +2101,36 @@ Domain use-cases are SKILLS, not harness code: drop a .ts (code skill) or .md (d
 agent skill: prompt + tools) into .weave/skills/. default db: ${DEFAULT_DB}`);
 }
 
+/** Load `.env` (cwd, walking up) into process.env WITHOUT overriding existing shell vars — so
+ *  `weave` picks up ANTHROPIC_API_KEY / FORWARD_* from the project `.env` like the python skills do.
+ *  Stdlib only (no dotenv dependency). Shell env always wins. */
+function loadDotenv(): void {
+  let dir = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    const f = join(dir, ".env");
+    if (existsSync(f)) {
+      try {
+        for (const raw of readFileSync(f, "utf8").split("\n")) {
+          const line = raw.trim();
+          if (!line || line.startsWith("#")) continue;
+          const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+          const k = m?.[1];
+          if (!k) continue;
+          let v = (m[2] ?? "").trim();
+          if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) v = v.slice(1, -1);
+          if (process.env[k] === undefined) process.env[k] = v;
+        }
+      } catch { /* unreadable .env — ignore */ }
+      return;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+}
+
 async function main(): Promise<void> {
+  loadDotenv(); // pick up ANTHROPIC_API_KEY / FORWARD_* from .env before backend/skill selection
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
   switch (cmd) {
