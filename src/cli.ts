@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { spawnSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
@@ -1390,8 +1390,130 @@ function chatTurn(
   });
 }
 
+/** Offline text-to-speech via macOS `say` (zero new dependency, works offline — matches
+ *  weave's ethos). Returns a speaker that voices text (markdown stripped) and can be
+ *  interrupted (new turn / Ctrl-C kills any in-flight speech). No-op + one warning off macOS;
+ *  the cloud/streaming half (STT + nicer TTS) layers in later behind a voice port. */
+function makeSpeaker(enabled: boolean): { speak: (t: string) => void; stop: () => void } {
+  if (!enabled) return { speak: () => {}, stop: () => {} };
+  if (process.platform !== "darwin") {
+    console.error("weave: --speak needs macOS `say` (offline TTS); voice output disabled.");
+    return { speak: () => {}, stop: () => {} };
+  }
+  let proc: ReturnType<typeof spawn> | null = null;
+  const stop = (): void => { if (proc) { proc.kill("SIGTERM"); proc = null; } };
+  const speak = (text: string): void => {
+    stop(); // interrupt any prior utterance
+    const clean = text
+      .replace(/```[\s\S]*?```/g, ". code block. ") // skip code fences
+      .replace(/`([^`]+)`/g, "$1") // inline code
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links -> label
+      .replace(/https?:\/\/\S+/g, "a link")
+      .replace(/[*_#>|]/g, "") // markdown punctuation
+      .replace(/\s+/g, " ").trim();
+    if (!clean) return;
+    try {
+      proc = spawn("say", [], { stdio: ["pipe", "ignore", "ignore"] });
+      proc.on("error", () => { proc = null; });
+      proc.stdin?.end(clean);
+    } catch { proc = null; }
+  };
+  return { speak, stop };
+}
+
+/** Record from the macOS mic (avfoundation) until Enter or maxSecs, then transcribe with
+ *  whisper-cli. Returns the cleaned transcript ("" on silence/failure). `awaitEnter` lets the
+ *  caller's readline signal an early stop; ffmpeg also self-stops at maxSecs. */
+async function recordAndTranscribe(o: {
+  awaitEnter: () => Promise<void>;
+  micDevice: string; model: string; whisper: string; maxSecs: number;
+}): Promise<string> {
+  const wav = join(tmpdir(), `weave-voice-${randomUUID().slice(0, 8)}.wav`);
+  const prefix = wav.replace(/\.wav$/, "");
+  const ff = spawn("ffmpeg", ["-y", "-f", "avfoundation", "-i", o.micDevice, "-ac", "1", "-ar", "16000", "-t", String(o.maxSecs), wav],
+    { stdio: ["pipe", "ignore", "ignore"] });
+  let ffErr = false;
+  ff.on("error", () => { ffErr = true; });
+  process.stdout.write(`  ● recording… speak now (Enter to stop · auto-stops at ${o.maxSecs}s)\n`);
+  const exited = new Promise<void>((res) => ff.on("close", () => res()));
+  void o.awaitEnter().then(() => { try { ff.stdin?.write("q"); } catch { /* already gone */ } });
+  await exited;
+  if (ffErr) { console.error("  ! ffmpeg not available (brew install ffmpeg) — cannot record."); return ""; }
+  const wr = spawnSync(o.whisper, ["-m", o.model, "-f", wav, "-l", "en", "-nt", "-np", "-otxt", "-of", prefix], { encoding: "utf8" });
+  let text = "";
+  try { text = readFileSync(`${prefix}.txt`, "utf8"); } catch { text = wr.stdout ?? ""; }
+  try { rmSync(wav, { force: true }); rmSync(`${prefix}.txt`, { force: true }); } catch { /* best effort */ }
+  return text.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim(); // drop [BLANK_AUDIO] / [_TT_] markers
+}
+
+/** Voice REPL: push-to-talk → whisper STT → routed weave turn → spoken answer. Thin client like
+ *  chat — a `weave up --netops` peer answers. Routes by default so NetOps utterances hit the
+ *  forward-* skills; --skill X pins one. macOS-only (avfoundation mic + `say`). */
+async function cmdVoice(args: Args): Promise<void> {
+  if (process.platform !== "darwin") return void console.error("weave voice: needs macOS (avfoundation mic + `say`).");
+  const whisper = str(args, "whisper-bin", "whisper-cli");
+  const model = str(args, "whisper-model", join(PACKAGE_ROOT, "models", "ggml-base.en.bin"));
+  if (!existsSync(model)) return void console.error(`weave voice: whisper model not found at ${model}\n  Download e.g. ggml-base.en.bin from https://huggingface.co/ggerganov/whisper.cpp, or pass --whisper-model <path>.`);
+  const micDevice = str(args, "mic", ":0"); // avfoundation audio index (`ffmpeg -f avfoundation -list_devices true -i ""`)
+  const maxSecs = num(args, "max-secs", 20);
+
+  const weave = await openSubstrate(args);
+  const newId = (): string => randomUUID();
+  const actor = str(args, "agent", `voice-${randomUUID().slice(0, 8)}`);
+  const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
+  const pinnedSkill = explicitSkill; // undefined => route on the peer (NetOps utterances → forward-*)
+  const timeoutMs = parseDuration(str(args, "timeout", "300s"));
+  const speaker = makeSpeaker(!has(args, "no-speak")); // voice mode speaks by default
+  const carry = !has(args, "no-context");
+  const history: ChatTurn[] = [];
+
+  console.log("weave voice — talk to your weave. Push-to-talk: Enter to record, speak, Enter to stop.");
+  console.log(`  /quit exits · routes to skills (start a 'weave up --netops' peer to answer) · model: ${model.split("/").pop()}\n`);
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const queue: string[] = [];
+  let pending: ((v: string | null) => void) | null = null;
+  let closed = false;
+  rl.on("line", (l) => (pending ? (pending(l), (pending = null)) : queue.push(l)));
+  rl.on("close", () => { closed = true; pending?.(null); });
+  const nextLine = (): Promise<string | null> =>
+    queue.length ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((r) => (pending = r));
+
+  for (;;) {
+    process.stdout.write("🎤 Enter to talk (or type a message) · /quit › ");
+    const start = await nextLine();
+    if (start === null) break;
+    const typed = start.trim();
+    if (typed === "/quit" || typed === "/exit") break;
+
+    let utterance: string;
+    if (typed) {
+      utterance = typed; // typed fallback when you'd rather not speak
+    } else {
+      speaker.stop(); // don't record weave talking over you
+      utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs });
+      if (!utterance) { console.log("  (heard nothing — try again)\n"); continue; }
+      console.log(`you (voice)› ${utterance}\n`);
+    }
+
+    const goal = carry ? buildChatGoal(utterance, history) : utterance;
+    const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, utterance);
+    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, undefined);
+    if (cancelled) { console.log(`  (${answer})\n`); continue; }
+    console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
+    speaker.speak(answer);
+    history.push({ q: utterance, a: answer });
+  }
+
+  if (!closed) rl.close();
+  speaker.stop();
+  weave.close();
+  console.log("\nweave: bye.");
+}
+
 async function cmdChat(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
+  const speaker = makeSpeaker(has(args, "speak")); // --speak: voice responses via offline TTS
   const newId = () => randomUUID();
   const actor = str(args, "agent", `chat-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
@@ -1424,7 +1546,7 @@ async function cmdChat(args: Args): Promise<void> {
   rl.on("line", (l) => (pending ? deliver(l) : queue.push(l)));
   rl.on("close", () => { closed = true; if (pending) deliver(null); }); // Ctrl-D / EOF / rl.close()
   // Ctrl-C: cancel an in-flight turn and return to the prompt; at the prompt (no turn), exit.
-  rl.on("SIGINT", () => { if (turnAbort) turnAbort.abort(); else rl.close(); });
+  rl.on("SIGINT", () => { speaker.stop(); if (turnAbort) turnAbort.abort(); else rl.close(); });
   const nextLine = (): Promise<string | null> =>
     queue.length > 0 ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((res) => { pending = res; });
 
@@ -1472,10 +1594,12 @@ async function cmdChat(args: Args): Promise<void> {
     turnAbort = null;
     if (cancelled) { console.log(`  (${answer})\n`); continue; } // don't pollute context with a cancel
     console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
+    speaker.speak(answer); // --speak: voice the response (offline, interruptible)
     history.push({ q: line, a: answer });
   }
 
   if (!closed) rl.close();
+  speaker.stop();
   weave.close();
   console.log("\nweave: bye.");
 }
@@ -1595,6 +1719,8 @@ async function main(): Promise<void> {
       return cmdSearch(args);
     case "chat":
       return cmdChat(args);
+    case "voice":
+      return cmdVoice(args);
     case "status":
       return cmdStatus(args);
     case "log":

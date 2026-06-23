@@ -9,3 +9,4 @@ dist/
 .weave/
 weave
 *.bun-build
+models/
