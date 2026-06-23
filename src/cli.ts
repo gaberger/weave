@@ -1507,8 +1507,10 @@ async function cmdVoice(args: Args): Promise<void> {
   const maxSecs = num(args, "max-secs", 20);
 
   const weave = await openSubstrate(args);
-  // --netops embeds a peer so this is ONE command; else rely on an external `weave up` peer.
-  const stopPeer = (has(args, "netops") && !has(args, "no-serve")) ? await startEmbeddedPeer(args, weave) : null;
+  // --netops (or --persona netops, which implies it) embeds a peer so this is ONE command;
+  // else rely on an external `weave up` peer. --no-serve forces the thin-client mode.
+  const wantEmbeddedPeer = (has(args, "netops") || str(args, "persona", "") === "netops") && !has(args, "no-serve");
+  const stopPeer = wantEmbeddedPeer ? await startEmbeddedPeer(args, weave) : null;
   const newId = (): string => randomUUID();
   const actor = str(args, "agent", `voice-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
