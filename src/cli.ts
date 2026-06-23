@@ -1414,8 +1414,9 @@ function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => 
     console.error("weave: --speak needs macOS `say` (offline TTS); voice output disabled.");
     return { speak: () => {}, stop: () => {} };
   }
-  // Default to a female US English voice (`say -v ?` lists installed voices; "Samantha" ships
-  // by default, "Ava"/"Allison" are premium). Override with --voice <name>; --voice "" = system default.
+  // Default to a female voice ("Karen", en_AU). `say -v '?'` lists installed voices; "Samantha"
+  // (en_US) is another solid default, premium "Ava"/"Zoe" need a download. Override with
+  // --voice <name>; --voice "" = system default.
   const vArgs = voice ? ["-v", voice] : [];
   let proc: ReturnType<typeof spawn> | null = null;
   const stop = (): void => { if (proc) { proc.kill("SIGTERM"); proc = null; } };
@@ -1513,7 +1514,7 @@ async function cmdVoice(args: Args): Promise<void> {
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
   const timeoutMs = parseDuration(str(args, "timeout", "300s"));
-  const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Samantha")); // female voice by default
+  const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
@@ -1599,7 +1600,7 @@ async function cmdVoice(args: Args): Promise<void> {
 
 async function cmdChat(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
-  const speaker = makeSpeaker(has(args, "speak"), str(args, "voice", "Samantha")); // --speak: voice via offline TTS (female by default)
+  const speaker = makeSpeaker(has(args, "speak"), str(args, "voice", "Karen")); // --speak: voice via offline TTS (female by default)
   const newId = () => randomUUID();
   const actor = str(args, "agent", `chat-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
