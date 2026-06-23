@@ -32,6 +32,8 @@ sys.path.insert(0, str(SKILLS_ROOT / "forward-path-analysis" / "scripts"))
 sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
 
 from search_path import search_path, SearchParams
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
 
 
@@ -501,7 +503,7 @@ Config file format (YAML):
     config = load_validation_config(Path(args.config))
 
     # Initialize client and validator
-    client = ForwardClient()
+    client = ForwardClient.from_env()
     validator = ValidationMatrix(client, args.network_id, args.snapshot_id)
 
     # Run all tests
