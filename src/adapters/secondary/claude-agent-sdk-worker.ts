@@ -32,10 +32,18 @@ export interface ClaudeRunOptions {
   systemPrompt?: string;
   maxTurns?: number;
   allowedTools?: string[];
+  disallowedTools?: string[];
   mcpServers?: Record<string, unknown>;
   canUseTool?: CanUseTool;
   abortController?: AbortController;
 }
+
+/** The SDK's built-in tools — disabled so the agent uses weave's gated MCP tools (e.g. the
+ *  forward scripts run through weave's `bash`, not the SDK's unsandboxed built-in Bash). */
+const SDK_BUILTIN_TOOLS = [
+  "Bash", "BashOutput", "KillBash", "KillShell", "Read", "Write", "Edit", "MultiEdit",
+  "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "TodoWrite", "ExitPlanMode",
+];
 export type ClaudeQuery = (params: {
   prompt: string;
   options: ClaudeRunOptions;
@@ -87,11 +95,12 @@ export class ClaudeAgentSdkWorker implements Worker {
       // ones like the forward scripts' bash) fails closed to irreversible and gets lease-gated.
       const base = toolName.startsWith("mcp__") ? (toolName.split("__").pop() ?? toolName) : toolName;
       const effect: Effect = effectByName.get(base) ?? effectByName.get(toolName) ?? "irreversible";
-      // Only irreversible effects need a held lease. Don't fail-closed if the lease *check* itself
-      // errors (e.g. a transient db blip) — that was silently blocking all tool use.
+      // Only irreversible effects need a held lease. Fail CLOSED: if the lease can't be confirmed,
+      // deny (read-only tools are exempt via the corrected effect lookup above, so this no longer
+      // blocks them — it only gates genuinely irreversible effects).
       if (effect === "irreversible") {
-        let held = true;
-        try { held = await ctx.lease.held(); } catch { held = true; }
+        let held = false;
+        try { held = await ctx.lease.held(); } catch { held = false; }
         if (!held) {
           leaseLost = true;
           return { behavior: "deny", message: "weave: lease lost; aborting before irreversible effect", interrupt: true };
@@ -109,6 +118,7 @@ export class ClaudeAgentSdkWorker implements Worker {
       model: assignment.spec.model ?? this.cfg.model ?? DEFAULT_MODEL, // per-task tiering (ADR-0022)
       systemPrompt: this.cfg.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
       allowedTools: [], // force canUseTool to gate every tool
+      disallowedTools: SDK_BUILTIN_TOOLS, // only weave's MCP tools — never the SDK's built-in Bash etc.
       mcpServers: this.deps.bridge.build(ctx.tools),
       canUseTool,
       abortController: controller,
