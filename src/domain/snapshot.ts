@@ -11,12 +11,12 @@ export interface SnapshotPayload {
   readonly settled: readonly string[];
 }
 
-/** Subjects known-settled = terminal events + any prior snapshot's settled set. */
+/** Subjects known-settled = terminal events (completed/failed/cancel) + any prior snapshot's set. */
 export function settledSubjects(events: readonly SealedEvent[]): Set<string> {
   const set = new Set<string>();
   for (const e of events) {
-    if (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed) {
-      set.add(e.subject);
+    if (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed || e.kind === TaskKind.Cancel) {
+      set.add(e.subject); // task.cancel is terminal: a stopped task must never be re-claimed
     } else if (e.kind === SNAPSHOT_KIND) {
       for (const s of (e.payload as SnapshotPayload).settled) set.add(s);
     }

@@ -1363,11 +1363,17 @@ function chatTurn(
       resolve({ answer, ok, cancelled });
     };
 
-    // Ctrl-C during a turn cancels the wait and returns to the prompt. The task keeps running on the
-    // peer (no remote-cancel here), so its answer just lands in `weave report` / the log later.
-    const onAbort = () => finish("cancelled (the task may still finish on the peer).", false, true);
+    // Ctrl-C / "stop" during a turn cancels for real: emit a terminal `task.cancel` so the holding
+    // peer aborts its worker and the task is never re-claimed (weave's async stop), then return to
+    // the prompt. Fire-and-forget — we don't wait for the peer to acknowledge.
+    const requestCancel = (): void => {
+      void weave
+        .append({ id: newId(), kind: TaskKind.Cancel, actor, subject: id, payload: { reason: "user-stop" } })
+        .catch(() => {}); // best effort; the abort already frees the local wait
+    };
+    const onAbort = () => { requestCancel(); finish("stopped.", false, true); };
     if (signal) {
-      if (signal.aborted) return finish("cancelled.", false, true);
+      if (signal.aborted) return finish("stopped.", false, true);
       signal.addEventListener("abort", onAbort);
     }
 
@@ -1638,6 +1644,7 @@ async function cmdVoice(args: Args): Promise<void> {
   const isRepeat = (u: string): boolean => /^(repeat|say that again|read that again|again)\b/i.test(u.trim());
   const isContinue = (u: string): boolean => /^(continue|go on|read (the )?rest|read it all|finish)\b/i.test(u.trim());
   const isHelp = (u: string): boolean => /^(help|what can (you|i) (do|ask)|what can i say)\b/i.test(u.trim());
+  const isStop = (u: string): boolean => /^(stop|cancel|never ?mind|forget it|quiet|shush|be quiet|nope)\b/i.test(u.trim());
   // Listener-friendly phrasing for failures — the raw strings are written for someone reading a
   // terminal (backticks, "weave up", "(failed)"), which sound robotic and confusing aloud.
   const voiceError = (answer: string): string => {
@@ -1650,8 +1657,8 @@ async function cmdVoice(args: Args): Promise<void> {
 
   console.log("weave voice — talk to your weave.");
   console.log(wake
-    ? `  hands-free: say "${wake}" to wake, then ask · type /quit or Ctrl-C to exit · model: ${model.split("/").pop()}\n`
-    : `  push-to-talk: Enter to record, speak, Enter to stop · /quit exits · model: ${model.split("/").pop()}\n`);
+    ? `  hands-free: say "${wake}" to wake, then ask · say "stop" or press Enter/Ctrl-C to cancel a turn · /quit exits · model: ${model.split("/").pop()}\n`
+    : `  push-to-talk: Enter to record, speak, Enter to stop · Enter/Ctrl-C cancels a running turn · /quit exits · model: ${model.split("/").pop()}\n`);
 
   // Spoken self-introduction at startup (her name is Forward — same as the wake word).
   const intro = has(args, "no-intro") ? "" : str(args, "intro", "Hi, I'm Forward, your A I NetOps agent. Say, Hello Forward, to wake me, then ask your question.");
@@ -1663,7 +1670,12 @@ async function cmdVoice(args: Args): Promise<void> {
   let closed = false;
   let quit = false;
   let turnAbort: AbortController | null = null; // set while an LLM turn is in flight
-  rl.on("line", (l) => (pending ? (pending(l), (pending = null)) : queue.push(l)));
+  rl.on("line", (l) => {
+    // During an LLM turn, ANY input (Enter or text) is a stop: silence speech and cancel the task.
+    if (turnAbort) { speaker.stop(); turnAbort.abort(); return; }
+    if (pending) { pending(l); pending = null; return; }
+    queue.push(l);
+  });
   rl.on("close", () => { closed = true; pending?.(null); });
   // Ctrl-C: silence + cancel an in-flight turn and stay in the loop; at the prompt (no turn) it quits.
   rl.on("SIGINT", () => { speaker.stop(); if (turnAbort) { turnAbort.abort(); } else { quit = true; pending?.(null); } });
@@ -1738,7 +1750,12 @@ async function cmdVoice(args: Args): Promise<void> {
       }
     }
 
-    // Spoken control words (handled locally, no LLM turn): repeat / continue / help.
+    // Spoken control words (handled locally, no LLM turn): stop / repeat / continue / help.
+    if (isStop(utterance)) {
+      speaker.stop(); // silence any lingering speech; a no-op cancel that returns to listening
+      console.log(`  ${tstamp()} (stopped)\n`);
+      continue;
+    }
     if (isRepeat(utterance)) {
       if (lastAnswer) { speaker.speak(lastAnswer); if (wake) await speaker.done(); }
       else speaker.speak("I haven't said anything yet.");
@@ -1750,7 +1767,7 @@ async function cmdVoice(args: Args): Promise<void> {
       continue;
     }
     if (isHelp(utterance)) {
-      speaker.speak("You can ask things like: what's the path from one host to another. Show BGP peers on a device. Or, run STIG checks. Say repeat to hear my last answer again.");
+      speaker.speak("You can ask things like: what's the path from one host to another. Show BGP peers on a device. Or, run STIG checks. Say stop to cancel what I'm doing, or repeat to hear my last answer again.");
       if (wake) await speaker.done();
       continue;
     }

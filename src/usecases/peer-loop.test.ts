@@ -5,7 +5,7 @@ import { FakeClock } from "../domain/clock.js";
 import type { Grant } from "../domain/grant.js";
 import type { SealedEvent } from "../domain/event.js";
 import { TaskKind } from "../domain/task.js";
-import { currentHolder } from "../domain/claim.js";
+import { currentHolder, isSettled } from "../domain/claim.js";
 import type { Worker } from "../ports/worker.js";
 import { InProcessSubstrate } from "../adapters/secondary/in-process-substrate.js";
 import { FakeWorker } from "../adapters/secondary/fake-worker.js";
@@ -158,6 +158,69 @@ test("lease loss mid-task: another peer reclaims and completes", async () => {
   );
   assert.equal(completedByA.length, 0, "A must not complete after losing its lease");
   assert.equal(releasedByA.length, 1, "A released the task as lease-lost (abortable effects)");
+
+  ac.abort();
+});
+
+test("task.cancel aborts the running worker and is terminal (no reclaim)", async () => {
+  const clock = new FakeClock(0);
+  const weave = new InProcessSubstrate(clock);
+  let n = 0;
+  const newId = () => `id-${++n}`;
+  const ran: string[] = [];
+
+  // A worker that blocks until its signal aborts — so a cancel event is what unblocks it.
+  const abortable = (agentId: string): Worker => ({
+    async run(_a, ctx) {
+      ran.push(agentId);
+      await new Promise<void>((res) => {
+        if (ctx.signal.aborted) return res();
+        ctx.signal.addEventListener("abort", () => res());
+      });
+      return { status: "aborted", summary: "cancelled", reason: "cancelled" };
+    },
+  });
+
+  const mk = (agentId: string) =>
+    createPeer({
+      weave,
+      cfg: { agentId, grant: GRANT, leaseMs: 1000, maxConcurrent: 1, tickMs: 100 },
+      newWorker: () => abortable(agentId),
+      clock,
+      timer: new ManualTimer(),
+      newId,
+    });
+
+  const ac = new AbortController();
+  const a = mk("agent-a");
+  const b = mk("agent-b"); // a second peer must NOT reclaim a cancelled task
+  void a.start(ac.signal);
+  void b.start(ac.signal);
+
+  await weave.append({
+    id: newId(),
+    kind: TaskKind.Declared,
+    actor: "client",
+    subject: "task-1",
+    payload: { spec: { goal: "long job" } },
+  });
+  await settle();
+  assert.equal(ran.length, 1, "exactly one peer started the task");
+
+  // Client requests a stop.
+  await weave.append({
+    id: newId(),
+    kind: TaskKind.Cancel,
+    actor: "client",
+    subject: "task-1",
+    payload: { reason: "user-stop" },
+  });
+  await settle();
+
+  const events = await collect(weave);
+  assert.equal(isSettled(events, "task-1"), true, "cancel is terminal — task is settled");
+  assert.equal(currentHolder(events, "task-1", clock.now()), null, "cancelled task has no holder");
+  assert.equal(ran.length, 1, "the other peer must not reclaim a cancelled task");
 
   ac.abort();
 });

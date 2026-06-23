@@ -26,6 +26,9 @@ export const TaskKind = {
   Completed: "task.completed",
   Failed: "task.failed",
   Released: "task.released",
+  /** A client's request to stop a task for good. Terminal (like completed/failed) so the task is
+   *  never re-claimed, and observed by the holding peer to abort its running worker (ADR-0002 §3). */
+  Cancel: "task.cancel",
   ToolInvoked: "tool.invoked",
 } as const;
 
@@ -49,4 +52,9 @@ export interface ProgressPayload {
 
 export interface ReleasePayload {
   readonly reason: "lease-lost" | "cancelled" | "lease-expired";
+}
+
+export interface CancelPayload {
+  /** Why it was cancelled (e.g. "user-stop") — for logs/audit; doesn't affect the protocol. */
+  readonly reason?: string;
 }

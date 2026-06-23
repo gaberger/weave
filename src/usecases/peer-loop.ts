@@ -94,8 +94,11 @@ export class PeerLoop {
     this.events.push(e);
     if (e.kind === TaskKind.Declared) {
       this.declared.set(e.subject, (e.payload as DeclaredPayload).spec);
-    } else if (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed) {
-      this.done.add(e.subject);
+    } else if (e.kind === TaskKind.Completed || e.kind === TaskKind.Failed || e.kind === TaskKind.Cancel) {
+      this.done.add(e.subject); // terminal — never (re-)claim
+      // A client's stop request: abort the worker if we're the one running it. The task is already
+      // terminal in the log (settled), so the worker's resulting Released is inert (won't re-run).
+      if (e.kind === TaskKind.Cancel) this.active.get(e.subject)?.abort.abort();
     }
     void this.schedule();
   }
