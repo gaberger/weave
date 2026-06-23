@@ -1474,7 +1474,7 @@ async function recordAndTranscribe(o: {
       buf += d.toString();
       const ms = [...buf.matchAll(/silence_start: ([0-9.]+)/g)];
       const last = ms[ms.length - 1];
-      if (last && parseFloat(last[1]) >= 0.8) stopRec();
+      if (last?.[1] && parseFloat(last[1]) >= 0.8) stopRec();
       if (buf.length > 8000) buf = buf.slice(-2000);
     });
   }
