@@ -1319,6 +1319,7 @@ function chatTurn(
   model: string | undefined,
   timeoutMs: number,
   signal: AbortSignal | undefined,
+  onProgress?: (note: string) => void, // streamed answer text / status notes (voice TTS streaming)
 ): Promise<{ answer: string; ok: boolean; cancelled: boolean }> {
   return new Promise((resolve) => {
     const id = `chat-${randomUUID().slice(0, 8)}`;
@@ -1386,9 +1387,12 @@ function chatTurn(
             claimed = true;
             detail = `working (${e.actor})`;
             break;
-          case TaskKind.Progress:
-            detail = (e.payload as ProgressPayload).note;
+          case TaskKind.Progress: {
+            const note = (e.payload as ProgressPayload).note;
+            detail = note;
+            onProgress?.(note); // feed the live answer stream to a voice speaker, if any
             break;
+          }
           case TaskKind.Completed:
             finish((e.payload as { summary?: string }).summary ?? "(done, no summary)", true);
             break;
@@ -1405,45 +1409,67 @@ function chatTurn(
 }
 
 /** Offline text-to-speech via macOS `say` (zero new dependency, works offline — matches
- *  weave's ethos). Returns a speaker that voices text (markdown stripped) and can be
- *  interrupted (new turn / Ctrl-C kills any in-flight speech). No-op + one warning off macOS;
- *  the cloud/streaming half (STT + nicer TTS) layers in later behind a voice port. */
-function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => void; stop: () => void; done: () => Promise<void> } {
-  if (!enabled) return { speak: () => {}, stop: () => {}, done: () => Promise.resolve() };
+ *  weave's ethos). Returns a speaker that voices text (markdown stripped). Two entry points:
+ *   • `speak(t)` — interrupting: drops any queued/in-flight speech and says `t` now.
+ *   • `enqueue(t)` — appends `t` to a FIFO that plays back-to-back without gaps. This is what
+ *     lets the answer stream out sentence-by-sentence as the LLM produces it (time-to-first-audio
+ *     drops from full-completion to the first sentence) instead of one big utterance at the end.
+ *  `stop()` clears the queue and kills in-flight speech (new turn / Ctrl-C / barge-in). `done()`
+ *  resolves when the queue has fully drained — callers await it before re-opening the mic so the
+ *  TTS output isn't captured and re-transcribed (the echo bug). No-op + one warning off macOS. */
+function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => void; enqueue: (t: string) => void; stop: () => void; done: () => Promise<void> } {
+  const noop = { speak: () => {}, enqueue: () => {}, stop: () => {}, done: () => Promise.resolve() };
+  if (!enabled) return noop;
   if (process.platform !== "darwin") {
     console.error("weave: --speak needs macOS `say` (offline TTS); voice output disabled.");
-    return { speak: () => {}, stop: () => {}, done: () => Promise.resolve() };
+    return noop;
   }
   // Default to a female voice ("Karen", en_AU). `say -v '?'` lists installed voices; "Samantha"
   // (en_US) is another solid default, premium "Ava"/"Zoe" need a download. Override with
   // --voice <name>; --voice "" = system default.
   const vArgs = voice ? ["-v", voice] : [];
-  let proc: ReturnType<typeof spawn> | null = null;
-  const stop = (): void => { if (proc) { proc.kill("SIGTERM"); proc = null; } };
-  const speak = (text: string): void => {
-    stop(); // interrupt any prior utterance
-    const clean = text
+  const clean = (text: string): string =>
+    text
       .replace(/```[\s\S]*?```/g, ". code block. ") // skip code fences
       .replace(/`([^`]+)`/g, "$1") // inline code
       .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links -> label
       .replace(/https?:\/\/\S+/g, "a link")
       .replace(/[*_#>|]/g, "") // markdown punctuation
       .replace(/\s+/g, " ").trim();
-    if (!clean) return;
+
+  let proc: ReturnType<typeof spawn> | null = null;
+  const queue: string[] = [];
+  let waiters: Array<() => void> = [];
+  const settleIfIdle = (): void => {
+    if (proc || queue.length > 0) return;
+    const w = waiters; waiters = []; for (const f of w) f();
+  };
+  const playNext = (): void => {
+    if (proc) return;
+    const next = queue.shift();
+    if (next === undefined) { settleIfIdle(); return; }
     try {
       proc = spawn("say", vArgs, { stdio: ["pipe", "ignore", "ignore"] });
-      proc.on("error", () => { proc = null; });
-      proc.on("close", () => { proc = null; });
-      proc.stdin?.end(clean);
-    } catch { proc = null; }
+      proc.on("error", () => { proc = null; playNext(); });
+      proc.on("close", () => { proc = null; playNext(); });
+      proc.stdin?.end(next);
+    } catch { proc = null; playNext(); }
   };
-  // Resolve when the current utterance finishes — callers await this before re-opening the
-  // mic so the TTS output isn't captured and re-transcribed (the echo bug).
-  const done = (): Promise<void> => {
-    const p = proc;
-    return p ? new Promise((res) => p.on("close", () => res())) : Promise.resolve();
+  const stop = (): void => {
+    queue.length = 0;
+    if (proc) { const p = proc; proc = null; p.kill("SIGTERM"); }
+    settleIfIdle();
   };
-  return { speak, stop, done };
+  const enqueue = (text: string): void => {
+    const c = clean(text);
+    if (!c) return;
+    queue.push(c);
+    playNext();
+  };
+  const speak = (text: string): void => { stop(); enqueue(text); }; // interrupt, then say
+  const done = (): Promise<void> =>
+    !proc && queue.length === 0 ? Promise.resolve() : new Promise((res) => waiters.push(res));
+  return { speak, enqueue, stop, done };
 }
 
 /** Record from the macOS mic (avfoundation) until Enter, end-of-speech (VAD), or maxSecs, then
@@ -1454,6 +1480,7 @@ async function recordAndTranscribe(o: {
   awaitEnter: () => Promise<void>;
   micDevice: string; model: string; whisper: string; maxSecs: number;
   debug?: boolean; quiet?: boolean; vadFilter?: string; // vadFilter: ffmpeg silencedetect=…
+  initialSilenceSecs?: number; // best-effort: stop early if no speech onset within this window
 }): Promise<string> {
   const wav = join(tmpdir(), `weave-voice-${randomUUID().slice(0, 8)}.wav`);
   const prefix = wav.replace(/\.wav$/, "");
@@ -1466,12 +1493,19 @@ async function recordAndTranscribe(o: {
   ff.on("error", () => { ffErr = true; });
   let stopped = false;
   const stopRec = (): void => { if (stopped) return; stopped = true; try { ff.stdin?.write("q"); } catch { /* gone */ } };
+  // Best-effort "you never spoke" fast-exit: a silence_end marks speech onset (silence broke), so
+  // if we see none within initialSilenceSecs we stop rather than waiting out maxSecs (~20s).
+  let speechSeen = false;
+  const initTimer = o.initialSilenceSecs && o.initialSilenceSecs > 0
+    ? setTimeout(() => { if (!speechSeen) stopRec(); }, o.initialSilenceSecs * 1000)
+    : null;
   if (o.vadFilter && ff.stderr) {
     // Stop on the LAST silence_start past a small floor: ignores leading silence (ts≈0) and
     // triggers ~`d` seconds after you actually stop talking.
     let buf = "";
     ff.stderr.on("data", (d: Buffer) => {
       buf += d.toString();
+      if (buf.includes("silence_end")) speechSeen = true; // speech broke a prior silence
       const ms = [...buf.matchAll(/silence_start: ([0-9.]+)/g)];
       const last = ms[ms.length - 1];
       if (last?.[1] && parseFloat(last[1]) >= 0.8) stopRec();
@@ -1482,9 +1516,19 @@ async function recordAndTranscribe(o: {
   const exited = new Promise<void>((res) => ff.on("close", () => res()));
   void o.awaitEnter().then(() => stopRec());
   await exited;
+  if (initTimer) clearTimeout(initTimer);
   if (ffErr) { console.error("  ! ffmpeg not available (brew install ffmpeg) — cannot record."); return ""; }
   const tRec = systemClock.now();
-  const wr = spawnSync(o.whisper, ["-m", o.model, "-f", wav, "-l", "en", "-nt", "-np", "-otxt", "-of", prefix], { encoding: "utf8" });
+  // Async spawn (not spawnSync): whisper inference can run a few seconds and we must NOT freeze the
+  // event loop — the spinner, the TTS queue, and progress streaming all need to keep ticking.
+  const wr = await new Promise<{ status: number | null; stdout: string; stderr: string }>((res) => {
+    const p = spawn(o.whisper, ["-m", o.model, "-f", wav, "-l", "en", "-nt", "-np", "-otxt", "-of", prefix], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    p.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+    p.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+    p.on("error", () => res({ status: -1, stdout: "", stderr: "whisper-cli not found (set --whisper-bin)" }));
+    p.on("close", (code) => res({ status: code, stdout: out, stderr: err }));
+  });
   let raw = "";
   try { raw = readFileSync(`${prefix}.txt`, "utf8"); } catch { raw = wr.stdout ?? ""; }
   const cleaned = raw.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim(); // drop [BLANK_AUDIO] / [_TT_] markers
@@ -1547,6 +1591,16 @@ async function cmdVoice(args: Args): Promise<void> {
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
+  // Spoken-length cap: long NetOps answers (tables/diffs) become minutes-long monologues through
+  // `say`. We speak up to this many chars, then point at the screen; "continue" reads the rest.
+  const speakCap = num(args, "speak-cap", 700); // 0 disables
+  const moreLine = "There's more on screen. Say continue to hear the rest.";
+  // Confirm before irreversible NetOps actions: the embedded peer runs with maxEffect:irreversible
+  // and STT is error-prone, so a mis-heard "push config" should never auto-execute. --no-confirm off.
+  const confirmGate = !has(args, "no-confirm");
+  const destructive = /\b(push|deploy|delete|remove|shut\s?down|reload|reboot|provision|commit|apply|drop|disable|clear|erase|wipe|overwrite|rollback)\b/i;
+  let lastAnswer = ""; // for "repeat / say that again"
+  let lastMore = "";   // unspoken remainder, for "continue / read the rest"
 
   // Wake-word mode (`--wake`, default phrase "hello forward"): hands-free. Listen in short chunks
   // until the phrase is heard, ack with "Hello", then record the question. Otherwise push-to-talk.
@@ -1555,6 +1609,28 @@ async function cmdVoice(args: Args): Promise<void> {
   const ackPhrase = str(args, "wake-ack", "Hello");
   const heardAck = str(args, "heard-ack", "On it."); // spoken when a command is captured (before the LLM turn)
   const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  // Fuzzy wake: tolerate common whisper mis-hears ("hi/hey forward", "for word") rather than a strict
+  // substring of the exact phrase — false rejects ("why won't it wake") are the worst wake-word UX.
+  const wakeMatch = (heard: string): boolean => {
+    const h = norm(heard);
+    if (!h) return false;
+    if (h.includes(norm(wake ?? ""))) return true;
+    if (/\b(hello|hallo|hi|hey|ok|okay)\b.*\bfor\s?wards?\b/.test(h)) return true; // greeting + forward
+    return /\bfor\s?wards?\b/.test(h) && h.split(" ").length <= 3; // bare "forward" only if short
+  };
+  // Spoken control words, anchored at the utterance start so "repeat the BGP table" still routes.
+  const isRepeat = (u: string): boolean => /^(repeat|say that again|read that again|again)\b/i.test(u.trim());
+  const isContinue = (u: string): boolean => /^(continue|go on|read (the )?rest|read it all|finish)\b/i.test(u.trim());
+  const isHelp = (u: string): boolean => /^(help|what can (you|i) (do|ask)|what can i say)\b/i.test(u.trim());
+  // Listener-friendly phrasing for failures — the raw strings are written for someone reading a
+  // terminal (backticks, "weave up", "(failed)"), which sound robotic and confusing aloud.
+  const voiceError = (answer: string): string => {
+    if (/no peer answered|weave up/i.test(answer)) return "I couldn't reach my worker. Make sure a weave peer is running, then try again.";
+    if (/didn't finish in time|raise --timeout/i.test(answer)) return "That took too long to finish. Try a simpler request.";
+    if (/cancelled/i.test(answer)) return "Okay, cancelled.";
+    const short = answer.replace(/`[^`]*`/g, "").replace(/\s+/g, " ").trim().slice(0, 200);
+    return `Sorry, that didn't work. ${short}`;
+  };
 
   console.log("weave voice — talk to your weave.");
   console.log(wake
@@ -1570,9 +1646,11 @@ async function cmdVoice(args: Args): Promise<void> {
   let pending: ((v: string | null) => void) | null = null;
   let closed = false;
   let quit = false;
+  let turnAbort: AbortController | null = null; // set while an LLM turn is in flight
   rl.on("line", (l) => (pending ? (pending(l), (pending = null)) : queue.push(l)));
   rl.on("close", () => { closed = true; pending?.(null); });
-  rl.on("SIGINT", () => { speaker.stop(); quit = true; pending?.(null); }); // Ctrl-C quits
+  // Ctrl-C: silence + cancel an in-flight turn and stay in the loop; at the prompt (no turn) it quits.
+  rl.on("SIGINT", () => { speaker.stop(); if (turnAbort) { turnAbort.abort(); } else { quit = true; pending?.(null); } });
   const nextLine = (): Promise<string | null> =>
     queue.length ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((r) => (pending = r));
   const drainQuit = (): boolean => { while (queue.length) if (queue.shift()!.trim() === "/quit") return true; return false; };
@@ -1584,23 +1662,31 @@ async function cmdVoice(args: Args): Promise<void> {
     if (wake) {
       // Listen in short chunks until the wake phrase is heard (typed /quit or Ctrl-C breaks out).
       process.stdout.write(`👂 say "${wake}"…\r`);
-      let woken = false;
+      let woken = "";
       while (!woken && !quit && !closed) {
         if (drainQuit()) { quit = true; break; }
         const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk, debug, quiet: true });
-        const matched = !!heard && norm(heard).includes(norm(wake));
+        const matched = wakeMatch(heard);
         if (debug) console.error(`  [voice] wake ${matched ? "MATCH ✓" : "no"} (heard ${JSON.stringify(heard)})`);
-        if (matched) woken = true;
+        if (matched) woken = heard;
       }
       if (quit || closed) break;
-      speaker.stop();
-      speaker.speak(ackPhrase); // "Hello"
-      await speaker.done(); // wait for the ack to finish so we don't record it
-      await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
-      console.log(`\n  (woke) — ask your question…`);
-      utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter });
-      if (!utterance) { console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
-      console.log(`you (voice)› ${utterance}\n`);
+      // One-breath: if the wake chunk already carried the question ("Hello Forward, what's the path
+      // from A to B"), strip the wake phrase and use the remainder — skips the ack + a record cycle.
+      const after = norm(woken).replace(/^.*?\bfor\s?wards?\b[\s,]*/, "").trim();
+      if (after && after.split(" ").length >= 2) {
+        utterance = after;
+        console.log(`\n  (woke) you (voice)› ${utterance}\n`);
+      } else {
+        speaker.stop();
+        speaker.speak(ackPhrase); // "Hello"
+        await speaker.done(); // wait for the ack to finish so we don't record it
+        await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
+        console.log(`\n  (woke) — ask your question…`);
+        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter, initialSilenceSecs: num(args, "initial-silence", 5) });
+        if (!utterance) { speaker.speak("I didn't catch that. Try again."); console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
+        console.log(`you (voice)› ${utterance}\n`);
+      }
     } else {
       process.stdout.write("🎤 Enter to talk (or type a message) · /quit › ");
       const start = await nextLine();
@@ -1611,19 +1697,103 @@ async function cmdVoice(args: Args): Promise<void> {
         utterance = typed; // typed fallback when you'd rather not speak
       } else {
         speaker.stop(); // don't record weave talking over you
-        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter });
-        if (!utterance) { console.log("  (heard nothing — try again)\n"); continue; }
+        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter, initialSilenceSecs: num(args, "initial-silence", 5) });
+        if (!utterance) { speaker.speak("I didn't catch that. Try again."); console.log("  (heard nothing — try again)\n"); continue; }
         console.log(`you (voice)› ${utterance}\n`);
       }
     }
 
-    speaker.speak(heardAck); // ack: confirm we heard the command before the (silent) LLM turn
+    // Spoken control words (handled locally, no LLM turn): repeat / continue / help.
+    if (isRepeat(utterance)) {
+      if (lastAnswer) { speaker.speak(lastAnswer); if (wake) await speaker.done(); }
+      else speaker.speak("I haven't said anything yet.");
+      continue;
+    }
+    if (isContinue(utterance)) {
+      if (lastMore) { speaker.speak(lastMore); lastMore = ""; if (wake) await speaker.done(); }
+      else speaker.speak("There's nothing more to read.");
+      continue;
+    }
+    if (isHelp(utterance)) {
+      speaker.speak("You can ask things like: what's the path from one host to another. Show BGP peers on a device. Or, run STIG checks. Say repeat to hear my last answer again.");
+      if (wake) await speaker.done();
+      continue;
+    }
+
+    // Confirmation gate for irreversible actions: a mis-transcribed "push config" must not auto-run.
+    if (confirmGate && destructive.test(utterance)) {
+      speaker.speak(`You asked me to: ${utterance}. Say yes to confirm, or no to cancel.`);
+      await speaker.done();
+      const reply = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs: 6, debug, vadFilter, initialSilenceSecs: 4 });
+      if (!/\b(yes|yeah|confirm|do it|go ahead|proceed|affirmative)\b/i.test(reply)) {
+        speaker.speak("Okay, cancelled.");
+        console.log(`  (cancelled — said ${JSON.stringify(reply || "nothing")})\n`);
+        continue;
+      }
+    }
+
+    speaker.stop();
+    speaker.enqueue(heardAck); // ack: confirm we heard the command; plays while the LLM turn runs
+
+    // --- Streaming TTS: speak the answer sentence-by-sentence as the peer produces it, so first
+    //     audio comes within ~1s instead of after the whole (up to 300s) turn completes. The SDK
+    //     worker emits each answer text block as a progress note; we buffer to sentence boundaries.
+    let streamBuf = "";
+    let spokenLen = 0;
+    let capped = false;
+    let tail = ""; // prose past the spoken cap, saved for "continue"
+    const enqueueSpoken = (s: string): void => {
+      const t = s.trim();
+      if (!t) return;
+      if (capped) { tail += (tail ? " " : "") + t; return; }
+      speaker.enqueue(t);
+      spokenLen += t.length;
+      if (speakCap > 0 && spokenLen >= speakCap) { capped = true; speaker.enqueue(moreLine); }
+    };
+    const flushSentences = (): void => {
+      for (;;) {
+        const m = /^[\s\S]*?[.!?\n]/.exec(streamBuf);
+        if (!m) break;
+        streamBuf = streamBuf.slice(m[0].length);
+        enqueueSpoken(m[0]);
+      }
+    };
+    const onProgress = (note: string): void => {
+      const t = note.trim();
+      if (!t || /^skill:\s/i.test(t)) return; // skip the router's "skill: X" status note (not prose)
+      streamBuf += (streamBuf ? " " : "") + t;
+      flushSentences();
+    };
+
     const goal = carry ? buildChatGoal(utterance, history) : utterance;
     const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, utterance);
-    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, undefined);
-    if (cancelled) { console.log(`  (${answer})\n`); continue; }
+    turnAbort = new AbortController();
+    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal, onProgress);
+    turnAbort = null;
+    if (cancelled) { speaker.stop(); console.log(`  (${answer})\n`); continue; }
     console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
-    speaker.speak(answer);
+
+    if (!ok) {
+      speaker.stop(); // drop any half-streamed prose; speak a clean, listener-friendly failure
+      speaker.speak(voiceError(answer));
+      lastMore = "";
+    } else if (spokenLen > 0 || streamBuf.trim()) {
+      // We streamed the answer live — just flush the un-spoken tail (last block had no end mark).
+      if (streamBuf.trim()) enqueueSpoken(streamBuf);
+      lastMore = tail;
+    } else {
+      // Nothing streamed (e.g. a routed skill answer arrived only at completion) — speak it now,
+      // capping monologue length and saving the remainder for "continue".
+      if (speakCap > 0 && answer.length > speakCap) {
+        speaker.enqueue(answer.slice(0, speakCap));
+        speaker.enqueue(moreLine);
+        lastMore = answer.slice(speakCap);
+      } else {
+        speaker.enqueue(answer);
+        lastMore = "";
+      }
+    }
+    lastAnswer = answer;
     if (wake) await speaker.done(); // wait for the answer to finish before re-listening (no echo)
     history.push({ q: utterance, a: answer });
   }
