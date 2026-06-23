@@ -1,47 +1,50 @@
 /*
  * plane-validation.nqe
  * --------------------
- * Verify that a set of CEs reach each other's loopbacks over the EXPECTED backbone
- * plane during the LDP->SR migration. In network 111 the two backbones are separate
- * ASes (l-* = AS 65010 / LDP, s-* = AS 65020 / SR). A CE opts a prefix into SR by
- * tagging it (community 65020:1) via 'route-map SR-MIGRATE out', gated by membership
- * in 'ip prefix-list MIGRATE-TO-SR-LIST'. The PEs' 'route-map CE-STEER-OUT' then
- * AS-path-prepends the *other* plane so the tagged prefix rides SR (and untagged
- * rides LDP).
+ * Verify that CEs reach each other's loopbacks over the EXPECTED backbone plane
+ * during the LDP->SR migration. In network 111 the two backbones are separate ASes
+ * (l-* = AS 65010 / LDP, s-* = AS 65020 / SR). A CE opts a prefix into SR by tagging
+ * it (community 65020:1) via 'route-map SR-MIGRATE out', gated by 'ip prefix-list
+ * MIGRATE-TO-SR-LIST'. The PEs' 'route-map CE-STEER-OUT' then AS-path-prepends the
+ * other plane so the tagged prefix rides SR (and untagged rides LDP).
  *
  * This query reads the parsed FIB (not config text): for each observer CE it finds
  * the active next-hop toward every other CE's /32 loopback, resolves the egress link,
- * and derives the plane from the far-end PE's name prefix (l-* / s-*). A violation is
- * a loopback reached over a plane != targetPlane.
+ * and derives the plane from the far-end PE's name prefix (l-* / s-*). It ALWAYS emits
+ * one record per CE->CE loopback observation with an explicit PASS/FAIL `status`, so
+ * the full plane-assignment matrix is visible even when nothing is wrong.
  *
- * Parameters:
- *   targetPlane : "s-plane" | "l-plane"  — the plane these CEs are expected to use
- *   targetCE    : List<String>           — CE device names to cross-check
- *   Match       : Bool                   — true = emit violations; false = report-only
+ * Parameters (all optional — sensible defaults so the query never returns 0 rows):
+ *   targetPlane : expected plane, "s-plane" | "l-plane"  (default: "s-plane")
+ *   targetCE    : CE device names to cross-check          (default: every *-ce device)
+ *   Match       : true = flag mismatches as `violation`   (default behavior gated here)
  *
- * Run (net 111, payment CEs expected on SR):
+ * The check engine counts rows where `violation == true` (0 -> PASS). `status` is the
+ * human-readable per-row verdict; `violation` drives the intent check.
+ *
+ * Run (defaults — full matrix, no params needed):
+ *   run_query.py --network-id 111 --query-file nqe/plane-validation.nqe
+ * Run (scoped to payment CEs):
  *   run_query.py --network-id 111 --query-file nqe/plane-validation.nqe \
  *     --params-json '{"targetPlane":"s-plane",
- *                     "targetCE":["ny-dc-ce","lon-dc-ce","la-br-ce"],
- *                     "Match":true}'
+ *                     "targetCE":["ny-dc-ce","lon-dc-ce","la-br-ce"],"Match":true}'
  *
- * NOTE (network 111, snapshot 187): with the payment CE set above this returns 2
- * violations — la-br-ce's loopback 10.0.0.20/32 is reached over the l-plane from both
- * ny-dc-ce (via l-pe-ny) and lon-dc-ce (via l-pe-lon), i.e. activePlane=l-plane vs
- * expectedPlane=s-plane. Root cause: la-br-ce's MIGRATE-TO-SR-LIST is empty, so its
- * prefixes never get community 65020:1 and the PEs steer them onto LDP. The reverse
- * direction (la-br -> DC) correctly rides s-plane (the 4 non-violation rows). Fix: add
- * la-br's loopback + payment subnet to MIGRATE-TO-SR-LIST on la-br-ce.
+ * NOTE (network 111, snapshot 187): scoped to the payment CEs this returns 6 rows,
+ * 2 with status=FAIL / violation=true — la-br-ce's loopback 10.0.0.20/32 reached over
+ * the l-plane from both ny-dc-ce (via l-pe-ny) and lon-dc-ce (via l-pe-lon). Root
+ * cause: la-br-ce's MIGRATE-TO-SR-LIST is empty, so its prefixes never get community
+ * 65020:1. Fix: add la-br's loopback + payment subnet to MIGRATE-TO-SR-LIST on la-br-ce.
  */
 @query query(targetPlane: String, targetCE: List<String>, Match: Bool) =
   foreach ownerDev in network.devices
-  where ownerDev.name in targetCE
+  where (length(targetCE) == 0 && matches(ownerDev.name, "*-ce")) || (ownerDev.name in targetCE)
+  let expectedPlane = if targetPlane == "" then "s-plane" else targetPlane
   foreach ownerIntf in ownerDev.interfaces
   where ownerIntf.loopbackMode
   foreach ownerSub in ownerIntf.subinterfaces
   foreach ownerAddr in ownerSub.ipv4.addresses
   foreach observerDev in network.devices
-  where observerDev.name in targetCE
+  where (length(targetCE) == 0 && matches(observerDev.name, "*-ce")) || (observerDev.name in targetCE)
   where observerDev.name != ownerDev.name
   foreach ni in observerDev.networkInstances
   where isPresent(ni.afts.ipv4Unicast)
@@ -58,12 +61,14 @@
               else if substring(l.deviceName, 0, 2) == "s-"
                    then "s-plane"
                    else "UNKNOWN"
+  let mismatch = plane != expectedPlane
   select {
-    violation: Match && plane != targetPlane,
-    migratedCE: ownerDev.name,
+    status: if mismatch then "FAIL" else "PASS",
+    violation: Match && mismatch,
     observerCE: observerDev.name,
+    targetCE: ownerDev.name,
     prefix: ipEntry.prefix,
     peerPE: l.deviceName,
     activePlane: plane,
-    expectedPlane: targetPlane
+    expectedPlane: expectedPlane
   };
