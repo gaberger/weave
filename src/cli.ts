@@ -1626,9 +1626,17 @@ async function cmdVoice(args: Args): Promise<void> {
   // Confirm before irreversible NetOps actions: the embedded peer runs with maxEffect:irreversible
   // and STT is error-prone, so a mis-heard "push config" should never auto-execute. --no-confirm off.
   const confirmGate = !has(args, "no-confirm");
-  const destructive = /\b(push|deploy|delete|remove|shut\s?down|reload|reboot|provision|commit|apply|drop|disable|clear|erase|wipe|overwrite|rollback)\b/i;
-  let lastAnswer = ""; // for "repeat / say that again"
-  let lastMore = "";   // unspoken remainder, for "continue / read the rest"
+  // Imperative, state-changing verbs. Broadened to cover NetOps idioms the first pass missed
+  // (failover/withdraw/shut/isolate/blackhole/no-shut). A read-only QUESTION that merely mentions one
+  // ("is the link down?", "did anyone remove the ACL?") is exempted via isQuestion so the gate
+  // doesn't nag on lookups.
+  const destructive = /\b(push|deploy|delete|remove|shut\s?(down)?|no\s+shut|reload|reboot|restart|provision|commit|apply|drop|disable|deactivate|clear|erase|wipe|overwrite|rollback|fail\s?over|withdraw|isolate|blackhole|bounce)\b/i;
+  const isQuestion = (u: string): boolean =>
+    /\?\s*$/.test(u.trim()) ||
+    /^(what|what'?s|whats|is|are|was|were|did|does|do|show|can|could|how|why|which|list|get|who|where|when|tell me|check)\b/i.test(u.trim());
+  let lastAnswer = "";  // full answer (screen/history)
+  let lastSpoken = "";  // what was actually VOICED (summary/streamed) — "repeat" replays this
+  let lastMore = "";    // unspoken remainder, for "continue / read the rest"
 
   // Wake-word mode (`--wake`, default phrase "hello forward"): hands-free. Listen in short chunks
   // until the phrase is heard, ack with "Hello", then record the question. Otherwise push-to-talk.
@@ -1646,11 +1654,14 @@ async function cmdVoice(args: Args): Promise<void> {
     if (/\b(hello|hallo|hi|hey|ok|okay)\b.*\bfor\s?wards?\b/.test(h)) return true; // greeting + forward
     return /\bfor\s?wards?\b/.test(h) && h.split(" ").length <= 3; // bare "forward" only if short
   };
-  // Spoken control words, anchored at the utterance start so "repeat the BGP table" still routes.
-  const isRepeat = (u: string): boolean => /^(repeat|say that again|read that again|again)\b/i.test(u.trim());
-  const isContinue = (u: string): boolean => /^(continue|go on|read (the )?rest|read it all|finish)\b/i.test(u.trim());
-  const isHelp = (u: string): boolean => /^(help|what can (you|i) (do|ask)|what can i say)\b/i.test(u.trim());
-  const isStop = (u: string): boolean => /^(stop|cancel|never ?mind|forget it|quiet|shush|be quiet|nope)\b/i.test(u.trim());
+  // Spoken control words. Anchored at BOTH ends (whole short utterance) so real NetOps commands like
+  // "stop advertising the route" or "cancel change-set CHG-7" or "clear counters" route to the LLM
+  // instead of being swallowed as a local control word. Optional trailing politeness is tolerated.
+  const ctl = (re: RegExp, u: string): boolean => re.test(norm(u));
+  const isRepeat = (u: string): boolean => ctl(/^(repeat( that)?|say that again|read that again|again)$/, u);
+  const isContinue = (u: string): boolean => ctl(/^(continue|go on|keep going|read (the )?rest|read it all|finish)$/, u);
+  const isHelp = (u: string): boolean => ctl(/^(help|what can (you|i) (do|ask)|what can i say|options)$/, u);
+  const isStop = (u: string): boolean => ctl(/^(stop|cancel|never ?mind|forget it|quiet|be quiet|shush|nope)( (it|now|please|that))?$/, u);
   // Listener-friendly phrasing for failures — the raw strings are written for someone reading a
   // terminal (backticks, "weave up", "(failed)"), which sound robotic and confusing aloud.
   const voiceError = (answer: string): string => {
@@ -1788,7 +1799,8 @@ async function cmdVoice(args: Args): Promise<void> {
       continue;
     }
     if (isRepeat(utterance)) {
-      if (lastAnswer) { speaker.speak(lastAnswer); if (wake) await speaker.done(); }
+      // Replay what was actually VOICED (the summary / streamed answer), not the raw markdown dump.
+      if (lastSpoken) { speaker.speak(lastSpoken); if (wake) await speaker.done(); }
       else speaker.speak("I haven't said anything yet.");
       continue;
     }
@@ -1804,13 +1816,20 @@ async function cmdVoice(args: Args): Promise<void> {
     }
 
     // Confirmation gate for irreversible actions: a mis-transcribed "push config" must not auto-run.
-    if (confirmGate && destructive.test(utterance)) {
-      speaker.speak(`You asked me to: ${utterance}. Say yes to confirm, or no to cancel.`);
+    // We record the reply only AFTER the prompt audio has fully finished (await done + buffer) so the
+    // mic can't capture our own "...say yes..." (echo-confirm). And we proceed only on an explicit,
+    // utterance-LEADING affirmative with NO negation present — so a captured prompt echo (which starts
+    // with "you asked…") or a hedged "yes but wait" cancels rather than fires the irreversible action.
+    if (confirmGate && destructive.test(utterance) && !isQuestion(utterance)) {
+      speaker.speak(`You asked me to: ${utterance}. Should I go ahead? Say yes or no.`);
       await speaker.done();
-      const reply = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs: 6, debug, vadFilter, initialSilenceSecs: 4 });
-      if (!/\b(yes|yeah|confirm|do it|go ahead|proceed|affirmative)\b/i.test(reply)) {
+      await new Promise((r) => setTimeout(r, 250)); // let the prompt audio release before we record
+      const reply = norm(await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs: 6, debug, vadFilter, initialSilenceSecs: 4 }));
+      const affirmed = /^(yes|yeah|yep|yup|sure|confirm|affirmative|correct|proceed|go ahead|do it|go for it)\b/.test(reply);
+      const negated = /\b(no|nope|don'?t|do not|cancel|stop|wait|never ?mind|hold on)\b/.test(reply);
+      if (!affirmed || negated) {
         speaker.speak("Okay, cancelled.");
-        console.log(`  (cancelled — said ${JSON.stringify(reply || "nothing")})\n`);
+        console.log(`  ${tstamp()} (cancelled — heard ${JSON.stringify(reply || "nothing")})\n`);
         continue;
       }
     }
@@ -1818,18 +1837,22 @@ async function cmdVoice(args: Args): Promise<void> {
     speaker.stop();
     speaker.enqueue(heardAck); // ack: confirm we heard the command; plays while the LLM turn runs
 
-    // --- Streaming TTS: speak the answer sentence-by-sentence as the peer produces it, so first
-    //     audio comes within ~1s instead of after the whole (up to 300s) turn completes. The SDK
-    //     worker emits each answer text block as a progress note; we buffer to sentence boundaries.
+    // --- Streaming TTS: voice the answer sentence-by-sentence as the peer produces it (first audio
+    //     in ~1s, great for conversational replies). NetOps/skill answers arrive WHOLE at completion
+    //     — their only progress note is "skill: X" (filtered) — so nothing streams and they take the
+    //     contextual-summary path below. `answerSpoken` accumulates exactly what we've voiced, so the
+    //     barge-in echo guard and "repeat" both reflect what's actually audible.
     let streamBuf = "";
     let spokenLen = 0;
     let capped = false;
-    let tail = ""; // prose past the spoken cap, saved for "continue"
+    let tail = "";          // prose past the spoken cap, saved for "continue"
+    let answerSpoken = "";  // the answer text actually voiced this turn (echo guard + repeat)
     const enqueueSpoken = (s: string): void => {
       const t = s.trim();
       if (!t) return;
       if (capped) { tail += (tail ? " " : "") + t; return; }
       speaker.enqueue(t);
+      answerSpoken += (answerSpoken ? " " : "") + t;
       spokenLen += t.length;
       if (speakCap > 0 && spokenLen >= speakCap) { capped = true; speaker.enqueue(moreLine); }
     };
@@ -1855,63 +1878,66 @@ async function cmdVoice(args: Args): Promise<void> {
     const turnModel = has(args, "no-tier") ? undefined
       : has(args, "model") ? str(args, "model", TIER_MODELS[2])
       : tierModel(args, classifyTier(utterance) === 3 ? 2 : 1);
-    // --stream: low-latency mode — speak the answer sentence-by-sentence as it arrives (great for
-    // conversational replies). Default: wait for completion and speak a CONTEXTUAL summary (below),
-    // which reads far better for rich NetOps answers than a streamed raw IP/table dump.
-    const wantStream = has(args, "stream");
+    const wantStream = has(args, "stream"); // force RAW streaming even for rich answers (skip summary)
 
-    // Barge-in spans the whole busy window (LLM turn + spoken answer). The listener aborts the turn
-    // (real task.cancel via turnAbort) and/or silences the speaker on the wake word or "stop".
-    // `currentSpeech` feeds the echo guard so the mic hearing our own TTS doesn't self-interrupt.
-    let currentSpeech = heardAck;
+    // Barge-in spans the whole busy window (LLM turn + spoken answer). The echo guard compares the
+    // mic against everything we're currently saying (ack + answer voiced so far + buffered text), so
+    // our own TTS — heard live as the answer streams — can't self-interrupt the turn.
     const busy = { done: false };
     let signalStop = (): void => {};
     const stopSignal = new Promise<void>((r) => { signalStop = r; });
     const endBarge = (): void => { busy.done = true; signalStop(); };
+    const speaking = (): string => `${heardAck} ${answerSpoken} ${streamBuf}`;
     const bargeP = (wake && bargeIn)
-      ? listenForInterrupt(busy, stopSignal, () => currentSpeech).then((hit) => {
+      ? listenForInterrupt(busy, stopSignal, speaking).then((hit) => {
           if (hit) { busy.done = true; speaker.stop(); turnAbort?.abort(); }
           return hit;
         })
       : Promise.resolve(false);
 
     turnAbort = new AbortController();
-    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal, wantStream ? onProgress : undefined);
+    // Always pass onProgress: conversational answers voice live; skill answers' progress is filtered,
+    // so they arrive at completion and take the summary path below.
+    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal, onProgress);
     turnAbort = null;
     if (cancelled) { endBarge(); await bargeP; speaker.stop(); console.log(`  ${tstamp()} (${answer})\n`); continue; }
     console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`); // screen: full detail
     if (!ok) {
       speaker.stop(); // drop any half-streamed prose; speak a clean, listener-friendly failure
-      currentSpeech = voiceError(answer);
-      speaker.speak(currentSpeech);
+      answerSpoken = voiceError(answer);
+      speaker.speak(answerSpoken);
       lastMore = "";
-    } else if (wantStream && (spokenLen > 0 || streamBuf.trim())) {
-      // Streamed live — just flush the un-spoken tail (the last block had no sentence end-mark).
+    } else if (spokenLen > 0 || streamBuf.trim()) {
+      // Streamed live (conversational) — flush the un-spoken tail (the last block had no end mark).
       if (streamBuf.trim()) enqueueSpoken(streamBuf);
-      currentSpeech = answer;
       lastMore = tail;
     } else {
-      // Speak a CONTEXTUAL summary, not the verbatim markdown/IP dump. The detail is already on
-      // screen; a pin-only NO-TOOLS skill (voice-summary) condenses it — untrusted result text
-      // can't escalate because that worker has no tools to call.
+      // Nothing streamed (skill/NetOps answer arrives whole): speak a CONTEXTUAL summary, not the raw
+      // markdown/IP dump. A pin-only NO-TOOLS skill (voice-summary) condenses it — untrusted result
+      // text can't escalate (no tools). `--stream` forces the raw answer instead.
       let spoken = answer;
-      if (!has(args, "no-speak") && !has(args, "no-voice-summary") && looksRich(answer)) {
+      if (!wantStream && !has(args, "no-speak") && !has(args, "no-voice-summary") && looksRich(answer)) {
         if (debug) console.error(`  ${tstamp()} [voice] summarizing ${answer.length} chars for speech (no-tools agent)…`);
         const s = await chatTurn(weave, newId, actor, answer, summaryAgent, undefined, 60_000, undefined);
         if (s.ok && s.answer.trim()) spoken = s.answer.trim();
       }
-      currentSpeech = spoken; // update the echo guard before we start speaking
-      // Cap the spoken length so a long reply isn't an unskippable monologue; "continue" reads on.
-      if (speakCap > 0 && spoken.length > speakCap) {
-        speaker.speak(spoken.slice(0, speakCap));
+      if (busy.done) {
+        // User barged in (said stop/wake) during the silent summary sub-turn — don't speak it.
+        lastMore = "";
+      } else if (speakCap > 0 && spoken.length > speakCap) {
+        // Cap the spoken length so a long reply isn't an unskippable monologue; "continue" reads on.
+        answerSpoken = spoken.slice(0, speakCap);
+        speaker.speak(answerSpoken);
         speaker.enqueue(moreLine);
         lastMore = spoken.slice(speakCap);
       } else {
+        answerSpoken = spoken;
         speaker.speak(spoken);
         lastMore = "";
       }
     }
     lastAnswer = answer;
+    lastSpoken = answerSpoken; // "repeat" replays what was actually voiced (summary/streamed), not raw
     if (wake) await speaker.done(); // wait for the answer to finish before re-listening (no echo)
     endBarge();
     if (await bargeP) console.log(`  ${tstamp()} (barge-in — stopped)\n`); // user cut in mid-answer
