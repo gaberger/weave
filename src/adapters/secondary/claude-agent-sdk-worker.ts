@@ -82,14 +82,20 @@ export class ClaudeAgentSdkWorker implements Worker {
 
     // The lease gate (ADR-0003 §2). Unknown tools default to irreversible (fail closed).
     const canUseTool: CanUseTool = async (toolName) => {
-      const effect: Effect = effectByName.get(toolName) ?? "irreversible";
-      if (effect === "irreversible" && !(await ctx.lease.held())) {
-        leaseLost = true;
-        return {
-          behavior: "deny",
-          message: "weave: lease lost; aborting before irreversible effect",
-          interrupt: true,
-        };
+      // The SDK names in-process MCP tools `mcp__<server>__<tool>`; our effect map is keyed by the
+      // bare tool name, so strip the prefix or the lookup misses and EVERY tool (incl. read-only
+      // ones like the forward scripts' bash) fails closed to irreversible and gets lease-gated.
+      const base = toolName.startsWith("mcp__") ? (toolName.split("__").pop() ?? toolName) : toolName;
+      const effect: Effect = effectByName.get(base) ?? effectByName.get(toolName) ?? "irreversible";
+      // Only irreversible effects need a held lease. Don't fail-closed if the lease *check* itself
+      // errors (e.g. a transient db blip) — that was silently blocking all tool use.
+      if (effect === "irreversible") {
+        let held = true;
+        try { held = await ctx.lease.held(); } catch { held = true; }
+        if (!held) {
+          leaseLost = true;
+          return { behavior: "deny", message: "weave: lease lost; aborting before irreversible effect", interrupt: true };
+        }
       }
       return { behavior: "allow" };
     };

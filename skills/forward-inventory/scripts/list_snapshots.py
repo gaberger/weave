@@ -18,6 +18,10 @@ def main() -> int:
         action="store_true",
         help="Return only the latest processed snapshot",
     )
+    p.add_argument(
+        "--note",
+        help="Filter to snapshots whose note contains this text (case-insensitive)",
+    )
     args = p.parse_args()
 
     try:
@@ -28,6 +32,13 @@ def main() -> int:
             data = client.get(f"/api/networks/{args.network_id}/snapshots")
     except ForwardError as e:
         die(str(e))
+
+    # --note: find snapshots by their note/annotation (case-insensitive substring).
+    if args.note and isinstance(data, dict) and isinstance(data.get("snapshots"), list):
+        needle = args.note.lower()
+        matches = [s for s in data["snapshots"] if needle in str(s.get("note", "")).lower()]
+        data = {**{k: v for k, v in data.items() if k != "snapshots"}, "snapshots": matches,
+                "noteFilter": args.note, "matchCount": len(matches)}
 
     emit_json(data)
     return 0
