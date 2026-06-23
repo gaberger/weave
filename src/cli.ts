@@ -367,6 +367,8 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
     // it discover existing files (e.g. nqe/*.nqe). `--read-only` opts back out for untrusted goals.
     const allowedTools = ["WebFetch", "WebSearch", "Read"];
     if (!has(args, "read-only")) allowedTools.push("Write", "Edit", "Glob");
+    // NetOps preset needs Bash — every forward-* skill runs `python3 .../scripts/*.py`.
+    if (has(args, "netops") || str(args, "persona", "") === "netops") allowedTools.push("Bash");
     return {
       kind: "claude-cli",
       make: (sp) => new ClaudeCliWorker({ model, ...(sp ? { systemPrompt: sp } : {}), allowedTools }),
@@ -448,8 +450,10 @@ async function assembleSkills(
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
   // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0021 §4).
   registry.register(recallTool(reportsDirFor(args), pickEmbedder(args)));
-  if (has(args, "bash")) {
-    // Opt-in shell access. Denylist always on; optional allowlist + timeout from flags.
+  if (has(args, "bash") || netops) {
+    // Shell access. Opt-in via --bash, and ALWAYS on under the NetOps preset: every forward-*
+    // skill works by running `python3 .../scripts/*.py`, so without bash the agent can't make a
+    // single Forward API call. Denylist always on; optional allowlist + timeout from flags.
     const allow = str(args, "bash-allow", "").split(",").map((s) => s.trim()).filter(Boolean);
     registry.register(
       bashTool({
