@@ -1404,6 +1404,9 @@ function chatTurn(
   });
 }
 
+/** Wall-clock stamp HH:MM:SS.mmm for voice logs, so you can read the gap between interactions. */
+function tstamp(): string { return new Date(systemClock.now()).toISOString().slice(11, 23); }
+
 /** Offline text-to-speech via macOS `say` (zero new dependency, works offline — matches
  *  weave's ethos). Returns a speaker that voices text (markdown stripped) and can be
  *  interrupted (new turn / Ctrl-C kills any in-flight speech). No-op + one warning off macOS;
@@ -1489,7 +1492,7 @@ async function recordAndTranscribe(o: {
   try { raw = readFileSync(`${prefix}.txt`, "utf8"); } catch { raw = wr.stdout ?? ""; }
   const cleaned = raw.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim(); // drop [BLANK_AUDIO] / [_TT_] markers
   if (o.debug) {
-    console.error(`  [voice] mic=${o.micDevice} rec=${tRec - t0}ms whisper=${systemClock.now() - tRec}ms raw=${JSON.stringify(raw.trim())} → ${JSON.stringify(cleaned)}`);
+    console.error(`  ${tstamp()} [voice] mic=${o.micDevice} rec=${tRec - t0}ms whisper=${systemClock.now() - tRec}ms raw=${JSON.stringify(raw.trim())} → ${JSON.stringify(cleaned)}`);
     if (wr.status !== 0) console.error(`  [voice] whisper exit=${wr.status}: ${String(wr.stderr ?? "").trim().slice(-300)}`);
   }
   try { rmSync(wav, { force: true }); rmSync(`${prefix}.txt`, { force: true }); } catch { /* best effort */ }
@@ -1577,30 +1580,45 @@ async function cmdVoice(args: Args): Promise<void> {
     queue.length ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((r) => (pending = r));
   const drainQuit = (): boolean => { while (queue.length) if (queue.shift()!.trim() === "/quit") return true; return false; };
 
+  // Conversation state (wake mode): after waking we stay awake for follow-ups until a silent or
+  // garbage turn, then go back to sleep — so you don't repeat the wake word for every command.
+  let awake = false;
+  const isNoise = (t: string): boolean => {
+    const n = norm(t);
+    return n.length < 3 || /^(you|thank you|thanks( for watching)?|bye|uh+|um+|hmm+|okay|ok)$/.test(n);
+  };
+
   for (;;) {
     if (quit || closed) break;
     let utterance: string;
 
     if (wake) {
-      // Listen in short chunks until the wake phrase is heard (typed /quit or Ctrl-C breaks out).
-      process.stdout.write(`👂 say "${wake}"…\r`);
-      let woken = false;
-      while (!woken && !quit && !closed) {
-        if (drainQuit()) { quit = true; break; }
-        const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk, debug, quiet: true });
-        const matched = !!heard && norm(heard).includes(norm(wake));
-        if (debug) console.error(`  [voice] wake ${matched ? "MATCH ✓" : "no"} (heard ${JSON.stringify(heard)})`);
-        if (matched) woken = true;
+      if (!awake) {
+        // Listen in short chunks until the wake phrase is heard (typed /quit or Ctrl-C breaks out).
+        process.stdout.write(`👂 say "${wake}"…\r`);
+        let woken = false;
+        while (!woken && !quit && !closed) {
+          if (drainQuit()) { quit = true; break; }
+          const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk, debug, quiet: true });
+          const matched = !!heard && norm(heard).includes(norm(wake));
+          if (debug) console.error(`  ${tstamp()} [voice] wake ${matched ? "MATCH ✓" : "no"} (heard ${JSON.stringify(heard)})`);
+          if (matched) woken = true;
+        }
+        if (quit || closed) break;
+        speaker.stop();
+        speaker.speak(ackPhrase); // "Hello"
+        await speaker.done(); // wait for the ack to finish so we don't record it
+        await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
+        awake = true; // stay awake for follow-ups until a silent turn
+        console.log(`\n  ${tstamp()} (awake) — I'm listening… just keep talking; pause to sleep.`);
       }
-      if (quit || closed) break;
-      speaker.stop();
-      speaker.speak(ackPhrase); // "Hello"
-      await speaker.done(); // wait for the ack to finish so we don't record it
-      await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
-      console.log(`\n  (woke) — ask your question…`);
       utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter });
-      if (!utterance) { console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
-      console.log(`you (voice)› ${utterance}\n`);
+      if (!utterance || isNoise(utterance)) {
+        console.log(`  ${tstamp()} (back to sleep — say "${wake}" to wake me)\n`);
+        awake = false;
+        continue;
+      }
+      console.log(`${tstamp()} you (voice)› ${utterance}\n`);
     } else {
       process.stdout.write("🎤 Enter to talk (or type a message) · /quit › ");
       const start = await nextLine();
@@ -1612,8 +1630,8 @@ async function cmdVoice(args: Args): Promise<void> {
       } else {
         speaker.stop(); // don't record weave talking over you
         utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter });
-        if (!utterance) { console.log("  (heard nothing — try again)\n"); continue; }
-        console.log(`you (voice)› ${utterance}\n`);
+        if (!utterance || isNoise(utterance)) { console.log(`  ${tstamp()} (heard nothing — try again)\n`); continue; }
+        console.log(`${tstamp()} you (voice)› ${utterance}\n`);
       }
     }
 
@@ -1621,8 +1639,8 @@ async function cmdVoice(args: Args): Promise<void> {
     const goal = carry ? buildChatGoal(utterance, history) : utterance;
     const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, utterance);
     const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, undefined);
-    if (cancelled) { console.log(`  (${answer})\n`); continue; }
-    console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
+    if (cancelled) { console.log(`  ${tstamp()} (${answer})\n`); continue; }
+    console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
     speaker.speak(answer);
     if (wake) await speaker.done(); // wait for the answer to finish before re-listening (no echo)
     history.push({ q: utterance, a: answer });
