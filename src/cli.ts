@@ -2103,24 +2103,34 @@ agent skill: prompt + tools) into .weave/skills/. default db: ${DEFAULT_DB}`);
 
 /** Load `.env` (cwd, walking up) into process.env WITHOUT overriding existing shell vars — so
  *  `weave` picks up ANTHROPIC_API_KEY / FORWARD_* from the project `.env` like the python skills do.
- *  Stdlib only (no dotenv dependency). Shell env always wins. */
+ *  Stdlib only (no dotenv dependency). Shell env always wins.
+ *
+ *  Security: consume ONLY an explicit allow-list of keys, so a stray/hostile `.env` (e.g. in a
+ *  shared parent directory the walk reaches) cannot inject process-altering vars like NODE_OPTIONS,
+ *  LD_PRELOAD, PATH, CLAUDE_PLUGIN_ROOT, or WEAVE_PID_FILE. The loaded path is logged to stderr. */
 function loadDotenv(): void {
+  const allowed = (k: string): boolean =>
+    k === "ANTHROPIC_API_KEY" || k === "OPENAI_API_KEY" ||
+    k === "WEAVE_EMBED_KEY" || k === "WEAVE_EMBED_URL" || k === "WEAVE_EMBED_MODEL" ||
+    k.startsWith("FORWARD_"); // Forward API creds (FORWARD_API_BASE_URL/KEY/SECRET/CA_BUNDLE/…)
   let dir = process.cwd();
   for (let i = 0; i < 8; i++) {
     const f = join(dir, ".env");
     if (existsSync(f)) {
+      let loaded = 0;
       try {
         for (const raw of readFileSync(f, "utf8").split("\n")) {
           const line = raw.trim();
           if (!line || line.startsWith("#")) continue;
           const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
           const k = m?.[1];
-          if (!k) continue;
+          if (!k || !allowed(k)) continue; // ignore anything not on the allow-list
           let v = (m[2] ?? "").trim();
           if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) v = v.slice(1, -1);
-          if (process.env[k] === undefined) process.env[k] = v;
+          if (process.env[k] === undefined) { process.env[k] = v; loaded++; }
         }
-      } catch { /* unreadable .env — ignore */ }
+      } catch { return; /* unreadable .env — ignore */ }
+      if (loaded > 0) process.stderr.write(`weave: loaded ${loaded} allow-listed var(s) from ${f}\n`);
       return;
     }
     const parent = dirname(dir);
