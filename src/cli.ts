@@ -1675,6 +1675,7 @@ async function cmdVoice(args: Args): Promise<void> {
   rl.on("line", (l) => {
     // During an LLM turn, ANY input (Enter or text) is a stop: silence speech and cancel the task.
     if (turnAbort) { speaker.stop(); turnAbort.abort(); return; }
+    speaker.stop(); // a keypress also silences any in-flight answer playback (keyboard barge-in)
     if (pending) { pending(l); pending = null; return; }
     queue.push(l);
   });
@@ -1691,6 +1692,30 @@ async function cmdVoice(args: Args): Promise<void> {
   const isNoise = (t: string): boolean => {
     const n = norm(t);
     return n.length < 3 || /^(you|thank you|thanks( for watching)?|bye|uh+|um+|hmm+|okay|ok)$/.test(n);
+  };
+
+  // Barge-in (wake mode, default on): while the assistant is thinking or speaking, keep the mic open
+  // in short chunks and listen for the wake phrase or "stop"/"cancel" to interrupt. The hard part is
+  // half-duplex echo — the mic hears our own TTS — so we ignore any transcript that's a fragment of
+  // what we're currently saying (passed via `speaking()`); only a phrase NOT in our speech counts.
+  const bargeIn = !has(args, "no-barge-in");
+  const bargeChunk = num(args, "barge-chunk", 3);
+  const listenForInterrupt = async (
+    state: { done: boolean },
+    stopSignal: Promise<void>,
+    speaking: () => string,
+  ): Promise<boolean> => {
+    while (!state.done && !quit && !closed) {
+      const heard = await recordAndTranscribe({ awaitEnter: () => stopSignal, micDevice, model, whisper, maxSecs: bargeChunk, debug, quiet: true });
+      if (state.done) break;
+      const h = norm(heard);
+      if (!h || norm(speaking()).includes(h)) continue; // empty, or our own voice echoing back
+      if (wakeMatch(heard) || isStop(heard)) {
+        if (debug) console.error(`  ${tstamp()} [voice] BARGE-IN ✓ (heard ${JSON.stringify(heard)})`);
+        return true;
+      }
+    }
+    return false;
   };
 
   for (;;) {
@@ -1825,18 +1850,36 @@ async function cmdVoice(args: Args): Promise<void> {
     // conversational replies). Default: wait for completion and speak a CONTEXTUAL summary (below),
     // which reads far better for rich NetOps answers than a streamed raw IP/table dump.
     const wantStream = has(args, "stream");
+
+    // Barge-in spans the whole busy window (LLM turn + spoken answer). The listener aborts the turn
+    // (real task.cancel via turnAbort) and/or silences the speaker on the wake word or "stop".
+    // `currentSpeech` feeds the echo guard so the mic hearing our own TTS doesn't self-interrupt.
+    let currentSpeech = heardAck;
+    const busy = { done: false };
+    let signalStop = (): void => {};
+    const stopSignal = new Promise<void>((r) => { signalStop = r; });
+    const endBarge = (): void => { busy.done = true; signalStop(); };
+    const bargeP = (wake && bargeIn)
+      ? listenForInterrupt(busy, stopSignal, () => currentSpeech).then((hit) => {
+          if (hit) { busy.done = true; speaker.stop(); turnAbort?.abort(); }
+          return hit;
+        })
+      : Promise.resolve(false);
+
     turnAbort = new AbortController();
     const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal, wantStream ? onProgress : undefined);
     turnAbort = null;
-    if (cancelled) { speaker.stop(); console.log(`  ${tstamp()} (${answer})\n`); continue; }
+    if (cancelled) { endBarge(); await bargeP; speaker.stop(); console.log(`  ${tstamp()} (${answer})\n`); continue; }
     console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`); // screen: full detail
     if (!ok) {
       speaker.stop(); // drop any half-streamed prose; speak a clean, listener-friendly failure
-      speaker.speak(voiceError(answer));
+      currentSpeech = voiceError(answer);
+      speaker.speak(currentSpeech);
       lastMore = "";
     } else if (wantStream && (spokenLen > 0 || streamBuf.trim())) {
       // Streamed live — just flush the un-spoken tail (the last block had no sentence end-mark).
       if (streamBuf.trim()) enqueueSpoken(streamBuf);
+      currentSpeech = answer;
       lastMore = tail;
     } else {
       // Speak a CONTEXTUAL summary, not the verbatim markdown/IP dump. The detail is already on
@@ -1848,6 +1891,7 @@ async function cmdVoice(args: Args): Promise<void> {
         const s = await chatTurn(weave, newId, actor, answer, summaryAgent, undefined, 60_000, undefined);
         if (s.ok && s.answer.trim()) spoken = s.answer.trim();
       }
+      currentSpeech = spoken; // update the echo guard before we start speaking
       // Cap the spoken length so a long reply isn't an unskippable monologue; "continue" reads on.
       if (speakCap > 0 && spoken.length > speakCap) {
         speaker.speak(spoken.slice(0, speakCap));
@@ -1860,6 +1904,8 @@ async function cmdVoice(args: Args): Promise<void> {
     }
     lastAnswer = answer;
     if (wake) await speaker.done(); // wait for the answer to finish before re-listening (no echo)
+    endBarge();
+    if (await bargeP) console.log(`  ${tstamp()} (barge-in — stopped)\n`); // user cut in mid-answer
     history.push({ q: utterance, a: answer });
   }
 
