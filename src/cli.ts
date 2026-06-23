@@ -1602,7 +1602,9 @@ async function cmdVoice(args: Args): Promise<void> {
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
   const summaryAgent = "voice-summary"; // dedicated NO-TOOLS skill — never the tool-granted agent
-  const timeoutMs = parseDuration(str(args, "timeout", "300s"));
+  // Voice must feel responsive — bound a turn to 30s by default (was 300s). Raise with --timeout
+  // for a known-long analysis; on timeout the agent reports what it has and offers to dig deeper.
+  const timeoutMs = parseDuration(str(args, "timeout", "30s"));
   const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
   const carry = !has(args, "no-context");
