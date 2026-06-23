@@ -1408,11 +1408,11 @@ function chatTurn(
  *  weave's ethos). Returns a speaker that voices text (markdown stripped) and can be
  *  interrupted (new turn / Ctrl-C kills any in-flight speech). No-op + one warning off macOS;
  *  the cloud/streaming half (STT + nicer TTS) layers in later behind a voice port. */
-function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => void; stop: () => void } {
-  if (!enabled) return { speak: () => {}, stop: () => {} };
+function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => void; stop: () => void; done: () => Promise<void> } {
+  if (!enabled) return { speak: () => {}, stop: () => {}, done: () => Promise.resolve() };
   if (process.platform !== "darwin") {
     console.error("weave: --speak needs macOS `say` (offline TTS); voice output disabled.");
-    return { speak: () => {}, stop: () => {} };
+    return { speak: () => {}, stop: () => {}, done: () => Promise.resolve() };
   }
   // Default to a female voice ("Karen", en_AU). `say -v '?'` lists installed voices; "Samantha"
   // (en_US) is another solid default, premium "Ava"/"Zoe" need a download. Override with
@@ -1433,10 +1433,17 @@ function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => 
     try {
       proc = spawn("say", vArgs, { stdio: ["pipe", "ignore", "ignore"] });
       proc.on("error", () => { proc = null; });
+      proc.on("close", () => { proc = null; });
       proc.stdin?.end(clean);
     } catch { proc = null; }
   };
-  return { speak, stop };
+  // Resolve when the current utterance finishes — callers await this before re-opening the
+  // mic so the TTS output isn't captured and re-transcribed (the echo bug).
+  const done = (): Promise<void> => {
+    const p = proc;
+    return p ? new Promise((res) => p.on("close", () => res())) : Promise.resolve();
+  };
+  return { speak, stop, done };
 }
 
 /** Record from the macOS mic (avfoundation) until Enter or maxSecs, then transcribe with
@@ -1526,6 +1533,7 @@ async function cmdVoice(args: Args): Promise<void> {
   const wake = has(args, "wake") ? (str(args, "wake", "") || "hello forward") : null;
   const wakeChunk = num(args, "wake-chunk", 4);
   const ackPhrase = str(args, "wake-ack", "Hello");
+  const heardAck = str(args, "heard-ack", "On it."); // spoken when a command is captured (before the LLM turn)
   const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
 
   console.log("weave voice — talk to your weave.");
@@ -1563,7 +1571,8 @@ async function cmdVoice(args: Args): Promise<void> {
       if (quit || closed) break;
       speaker.stop();
       speaker.speak(ackPhrase); // "Hello"
-      await new Promise((r) => setTimeout(r, 800)); // let the ack finish before we record
+      await speaker.done(); // wait for the ack to finish so we don't record it
+      await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
       console.log(`\n  (woke) — ask your question…`);
       utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug });
       if (!utterance) { console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
@@ -1584,12 +1593,14 @@ async function cmdVoice(args: Args): Promise<void> {
       }
     }
 
+    speaker.speak(heardAck); // ack: confirm we heard the command before the (silent) LLM turn
     const goal = carry ? buildChatGoal(utterance, history) : utterance;
     const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, utterance);
     const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, undefined);
     if (cancelled) { console.log(`  (${answer})\n`); continue; }
     console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
     speaker.speak(answer);
+    if (wake) await speaker.done(); // wait for the answer to finish before re-listening (no echo)
     history.push({ q: utterance, a: answer });
   }
 
