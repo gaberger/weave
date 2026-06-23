@@ -1600,7 +1600,7 @@ async function cmdVoice(args: Args): Promise<void> {
   const maxSecs = num(args, "max-secs", 20);
   // VAD: auto-stop a command recording shortly after you stop talking (ffmpeg silencedetect).
   // Tunable via --silence-db / --silence-secs; --no-vad records until Enter/maxSecs.
-  const vadFilter = has(args, "no-vad") ? "" : `silencedetect=noise=${str(args, "silence-db", "-30")}dB:d=${str(args, "silence-secs", "2.0")}`;
+  const vadFilter = has(args, "no-vad") ? "" : `silencedetect=noise=${str(args, "silence-db", "-30")}dB:d=${str(args, "silence-secs", "3.0")}`;
 
   const weave = await openSubstrate(args);
   // --netops (or --persona netops, which implies it) embeds a peer so this is ONE command;
@@ -1849,7 +1849,12 @@ async function cmdVoice(args: Args): Promise<void> {
     };
 
     const goal = carry ? buildChatGoal(utterance, history) : utterance;
-    const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, utterance);
+    // Voice biases to cheap/fast models — the forward scripts do the heavy lifting; the LLM mostly
+    // picks a query and summarizes. Hard ("frontier") asks get Sonnet, everything else Haiku; NEVER
+    // Opus. --model pins one; --no-tier defers to the peer default.
+    const turnModel = has(args, "no-tier") ? undefined
+      : has(args, "model") ? str(args, "model", TIER_MODELS[2])
+      : tierModel(args, classifyTier(utterance) === 3 ? 2 : 1);
     // --stream: low-latency mode — speak the answer sentence-by-sentence as it arrives (great for
     // conversational replies). Default: wait for completion and speak a CONTEXTUAL summary (below),
     // which reads far better for rich NetOps answers than a streamed raw IP/table dump.
