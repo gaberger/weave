@@ -1,0 +1,46 @@
+/*
+ * ce-plane-classification.nqe
+ * ---------------------------
+ * Determine which backbone PLANE each CE uses to reach every remote CE loopback,
+ * read FAITHFULLY from the installed forwarding table (not inferred from the
+ * names of transit hops in a path trace).
+ *
+ * How: on each CE, walk the FIB (networkInstances[].afts.ipv4Unicast.ipEntries)
+ * for remote /32 loopbacks, take the REMOTE BGP next-hop's IP, resolve that IP to
+ * the PE that owns it, and classify by the PE's name — s-pe-* => S-plane (SR),
+ * l-pe-* => L-plane (LDP). Because each PE is single-plane, the CE's chosen PE
+ * uplink IS the plane.
+ *
+ * Why this and not an intent check: a path-based intent check can't faithfully
+ * assert the plane here (both PEs are independently reachable from a dual-homed
+ * CE, so an egress-PE sentinel passes for either plane). The forwarding model is
+ * the reliable source — this query reproduces the path-analysis result (22 L / 4 S
+ * on net 111) statically, and surfaces the la-br-ce asymmetry (egresses S while
+ * peers reach it via L).
+ *
+ * NQE notes: e.prefix is an IpSubnet (use toString for glob match); nextHopType
+ * is an enum (NextHopType.REMOTE); resolve the next-hop by joining its ipAddress
+ * to the PE's interface addresses.
+ *
+ * Run: run_query.py --network-id 111 --query-file nqe/ce-plane-classification.nqe
+ */
+foreach ce in network.devices
+where matches(ce.name, "*-ce")
+foreach ni in ce.networkInstances
+foreach e in ni.afts.ipv4Unicast.ipEntries
+where matches(toString(e.prefix), "10.0.0.*/32")
+foreach nh in e.nextHops
+where nh.nextHopType == NextHopType.REMOTE && isPresent(nh.ipAddress)
+foreach pe in network.devices
+foreach iface in pe.interfaces
+foreach sub in iface.subinterfaces
+foreach addr in sub.ipv4.addresses
+where addr.ip == nh.ipAddress
+select {
+  ce:         ce.name,
+  dstLoopback: e.prefix,
+  viaPE:      pe.name,
+  plane:      if matches(pe.name, "s-*") then "S-plane (SR)"
+              else if matches(pe.name, "l-*") then "L-plane (LDP)"
+              else "unknown"
+}

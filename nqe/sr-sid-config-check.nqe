@@ -45,5 +45,8 @@ select {
   routerId:        addr.ip,
   configuredIndex: m.index,
   expectedIndex:   lastOctet,
-  matchOk:         m.index == lastOctet
+  matchOk:         m.index == lastOctet,
+  violation:       m.index != lastOctet,
+  remediation:     if m.index == lastOctet then "OK"
+    else "Set 'node-segment ipv4 index " + toString(lastOctet) + "' on the Loopback0 of " + device.name + " to match the last-octet convention"
 }

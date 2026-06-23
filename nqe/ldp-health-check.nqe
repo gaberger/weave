@@ -1,0 +1,38 @@
+/*
+ * ldp-health-check.nqe
+ * --------------------
+ * LDP backbone parity (mirror of the SR checks) for the l-* / OSPF+LDP nodes.
+ * Per node with an `mpls ldp` stanza, verifies:
+ *   - ldpEnabled:      `mpls ldp` has a `no shutdown` child (LDP not admin-down)
+ *   - routerIdMatches: `router-id X` under mpls ldp equals the node's Loopback0 /32
+ *   - transportLoopbk: `transport-address interface Loopback0` is set
+ * (config tree paired with the parsed model loopback; `ok` is the AND of all three)
+ *
+ * Run: run_query.py --network-id 111 --query-file nqe/ldp-health-check.nqe
+ * Filter to problems with: where ok == false. (network 111: 8 nodes, all ok.)
+ */
+foreach device in network.devices
+foreach iface in device.interfaces
+where iface.loopbackMode == true
+foreach sub in iface.subinterfaces
+foreach addr in sub.ipv4.addresses
+where addr.prefixLength == 32
+foreach ldp in device.files.config
+where ldp.text == "mpls ldp"
+let enabled = length(foreach c in ldp.children where matches(c.text, "no shutdown") select c) > 0
+let ridOk   = length(foreach c in ldp.children
+                     let m = patternMatch(c.text, `router-id {rid:ipv4Address}`)
+                     where isPresent(m) && m.rid == addr.ip select m) > 0
+let taOk    = length(foreach c in ldp.children
+                     where matches(c.text, "transport-address interface Loopback*") select c) > 0
+select {
+  device:          device.name,
+  loopback0:       addr.ip,
+  ldpEnabled:      enabled,
+  routerIdMatches: ridOk,
+  transportLoopbk: taOk,
+  ok:              enabled && ridOk && taOk,
+  violation:       enabled == false || ridOk == false || taOk == false,
+  remediation:     if enabled && ridOk && taOk then "OK"
+    else "Under 'mpls ldp' ensure: 'no shutdown', 'router-id " + toString(addr.ip) + "', and 'transport-address interface Loopback0'"
+}

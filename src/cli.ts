@@ -1408,6 +1408,25 @@ function chatTurn(
   });
 }
 
+/** Wall-clock stamp HH:MM:SS.mmm for voice logs, so you can read the gap between interactions. */
+function tstamp(): string { return new Date(systemClock.now()).toISOString().slice(11, 23); }
+
+/** A "rich" answer (markdown, tables, hop lists, or raw IPs) reads terribly aloud — summarize it
+ *  for speech instead of speaking it verbatim. Plain short answers are spoken as-is. */
+function looksRich(t: string): boolean {
+  return t.length > 220 || /\d{1,3}(\.\d{1,3}){3}/.test(t) || /[|`#]|\n[-*]\s|\n\s*\n/.test(t);
+}
+
+/** Prompt that turns a detailed network result into a natural SPOKEN reply — the rich answer
+ *  carries its own context (e.g. "10.17.0.100 (NY DC host)"), so this just condenses + verbalizes. */
+function voiceSummaryPrompt(answer: string): string {
+  return "You are Forward, a voice NetOps assistant. Rewrite the result below as a brief SPOKEN reply for text-to-speech. " +
+    "Rules: at most two short sentences; conversational; translate IP addresses and device codes into their ROLE and LOCATION " +
+    "(e.g. \"the New York data center host\", \"the London edge router\", \"the S R plane\"); state the outcome plainly; " +
+    "do NOT read raw IP addresses, markdown, tables, code, or hop-by-hop lists; do NOT run any tools — just rewrite using the text given; " +
+    "end by offering one short relevant follow-up.\n\nResult to verbalize:\n" + answer;
+}
+
 /** Offline text-to-speech via macOS `say` (zero new dependency, works offline — matches
  *  weave's ethos). Returns a speaker that voices text (markdown stripped). Two entry points:
  *   • `speak(t)` — interrupting: drops any queued/in-flight speech and says `t` now.
@@ -1533,7 +1552,7 @@ async function recordAndTranscribe(o: {
   try { raw = readFileSync(`${prefix}.txt`, "utf8"); } catch { raw = wr.stdout ?? ""; }
   const cleaned = raw.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim(); // drop [BLANK_AUDIO] / [_TT_] markers
   if (o.debug) {
-    console.error(`  [voice] mic=${o.micDevice} rec=${tRec - t0}ms whisper=${systemClock.now() - tRec}ms raw=${JSON.stringify(raw.trim())} → ${JSON.stringify(cleaned)}`);
+    console.error(`  ${tstamp()} [voice] mic=${o.micDevice} rec=${tRec - t0}ms whisper=${systemClock.now() - tRec}ms raw=${JSON.stringify(raw.trim())} → ${JSON.stringify(cleaned)}`);
     if (wr.status !== 0) console.error(`  [voice] whisper exit=${wr.status}: ${String(wr.stderr ?? "").trim().slice(-300)}`);
   }
   try { rmSync(wav, { force: true }); rmSync(`${prefix}.txt`, { force: true }); } catch { /* best effort */ }
@@ -1586,6 +1605,8 @@ async function cmdVoice(args: Args): Promise<void> {
   const actor = str(args, "agent", `voice-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
+  // Agent used to verbalize rich answers for speech (the conversational catch-all).
+  const summaryAgent = (str(args, "persona", "") === "netops" || has(args, "netops")) ? "netops" : has(args, "persona") ? "agent" : "claude";
   const timeoutMs = parseDuration(str(args, "timeout", "300s"));
   const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
@@ -1655,37 +1676,56 @@ async function cmdVoice(args: Args): Promise<void> {
     queue.length ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((r) => (pending = r));
   const drainQuit = (): boolean => { while (queue.length) if (queue.shift()!.trim() === "/quit") return true; return false; };
 
+  // Conversation state (wake mode): after waking we stay awake for follow-ups until a silent or
+  // garbage turn, then go back to sleep — so you don't repeat the wake word for every command.
+  let awake = false;
+  const isNoise = (t: string): boolean => {
+    const n = norm(t);
+    return n.length < 3 || /^(you|thank you|thanks( for watching)?|bye|uh+|um+|hmm+|okay|ok)$/.test(n);
+  };
+
   for (;;) {
     if (quit || closed) break;
-    let utterance: string;
+    let utterance = ""; // assigned by each capture path below (or we `continue` before use)
 
     if (wake) {
-      // Listen in short chunks until the wake phrase is heard (typed /quit or Ctrl-C breaks out).
-      process.stdout.write(`👂 say "${wake}"…\r`);
-      let woken = "";
-      while (!woken && !quit && !closed) {
-        if (drainQuit()) { quit = true; break; }
-        const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk, debug, quiet: true });
-        const matched = wakeMatch(heard);
-        if (debug) console.error(`  [voice] wake ${matched ? "MATCH ✓" : "no"} (heard ${JSON.stringify(heard)})`);
-        if (matched) woken = heard;
+      let oneBreath = false;
+      if (!awake) {
+        // Listen in short chunks until the wake phrase is heard (typed /quit or Ctrl-C breaks out).
+        process.stdout.write(`👂 say "${wake}"…\r`);
+        let woken = "";
+        while (!woken && !quit && !closed) {
+          if (drainQuit()) { quit = true; break; }
+          const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk, debug, quiet: true });
+          const matched = wakeMatch(heard); // fuzzy: tolerate "hi/hey forward", "for word"
+          if (debug) console.error(`  ${tstamp()} [voice] wake ${matched ? "MATCH ✓" : "no"} (heard ${JSON.stringify(heard)})`);
+          if (matched) woken = heard;
+        }
+        if (quit || closed) break;
+        awake = true; // stay awake for follow-ups until a silent/noise turn
+        // One-breath: if the wake chunk already carried the question ("Hello Forward, what's the
+        // path from A to B"), strip the wake phrase and use the remainder — skip ack + a record cycle.
+        const after = norm(woken).replace(/^.*?\bfor\s?wards?\b[\s,]*/, "").trim();
+        if (after && after.split(" ").length >= 2 && !isNoise(after)) {
+          utterance = after;
+          oneBreath = true;
+          console.log(`\n  ${tstamp()} (awake) you (voice)› ${utterance}\n`);
+        } else {
+          speaker.stop();
+          speaker.speak(ackPhrase); // "Hello"
+          await speaker.done(); // wait for the ack to finish so we don't record it
+          await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
+          console.log(`\n  ${tstamp()} (awake) — I'm listening… just keep talking; pause to sleep.`);
+        }
       }
-      if (quit || closed) break;
-      // One-breath: if the wake chunk already carried the question ("Hello Forward, what's the path
-      // from A to B"), strip the wake phrase and use the remainder — skips the ack + a record cycle.
-      const after = norm(woken).replace(/^.*?\bfor\s?wards?\b[\s,]*/, "").trim();
-      if (after && after.split(" ").length >= 2) {
-        utterance = after;
-        console.log(`\n  (woke) you (voice)› ${utterance}\n`);
-      } else {
-        speaker.stop();
-        speaker.speak(ackPhrase); // "Hello"
-        await speaker.done(); // wait for the ack to finish so we don't record it
-        await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
-        console.log(`\n  (woke) — ask your question…`);
+      if (!oneBreath) {
         utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter, initialSilenceSecs: num(args, "initial-silence", 5) });
-        if (!utterance) { speaker.speak("I didn't catch that. Try again."); console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
-        console.log(`you (voice)› ${utterance}\n`);
+        if (!utterance || isNoise(utterance)) {
+          console.log(`  ${tstamp()} (back to sleep — say "${wake}" to wake me)\n`);
+          awake = false;
+          continue;
+        }
+        console.log(`${tstamp()} you (voice)› ${utterance}\n`);
       }
     } else {
       process.stdout.write("🎤 Enter to talk (or type a message) · /quit › ");
@@ -1698,8 +1738,8 @@ async function cmdVoice(args: Args): Promise<void> {
       } else {
         speaker.stop(); // don't record weave talking over you
         utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter, initialSilenceSecs: num(args, "initial-silence", 5) });
-        if (!utterance) { speaker.speak("I didn't catch that. Try again."); console.log("  (heard nothing — try again)\n"); continue; }
-        console.log(`you (voice)› ${utterance}\n`);
+        if (!utterance || isNoise(utterance)) { speaker.speak("I didn't catch that. Try again."); console.log(`  ${tstamp()} (heard nothing — try again)\n`); continue; }
+        console.log(`${tstamp()} you (voice)› ${utterance}\n`);
       }
     }
 
@@ -1767,29 +1807,40 @@ async function cmdVoice(args: Args): Promise<void> {
 
     const goal = carry ? buildChatGoal(utterance, history) : utterance;
     const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, utterance);
+    // --stream: low-latency mode — speak the answer sentence-by-sentence as it arrives (great for
+    // conversational replies). Default: wait for completion and speak a CONTEXTUAL summary (below),
+    // which reads far better for rich NetOps answers than a streamed raw IP/table dump.
+    const wantStream = has(args, "stream");
     turnAbort = new AbortController();
-    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal, onProgress);
+    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal, wantStream ? onProgress : undefined);
     turnAbort = null;
-    if (cancelled) { speaker.stop(); console.log(`  (${answer})\n`); continue; }
-    console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
+    if (cancelled) { speaker.stop(); console.log(`  ${tstamp()} (${answer})\n`); continue; }
+    console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`); // screen: full detail
 
     if (!ok) {
       speaker.stop(); // drop any half-streamed prose; speak a clean, listener-friendly failure
       speaker.speak(voiceError(answer));
       lastMore = "";
-    } else if (spokenLen > 0 || streamBuf.trim()) {
-      // We streamed the answer live — just flush the un-spoken tail (last block had no end mark).
+    } else if (wantStream && (spokenLen > 0 || streamBuf.trim())) {
+      // Streamed live — just flush the un-spoken tail (the last block had no sentence end-mark).
       if (streamBuf.trim()) enqueueSpoken(streamBuf);
       lastMore = tail;
     } else {
-      // Nothing streamed (e.g. a routed skill answer arrived only at completion) — speak it now,
-      // capping monologue length and saving the remainder for "continue".
-      if (speakCap > 0 && answer.length > speakCap) {
-        speaker.enqueue(answer.slice(0, speakCap));
+      // Speak a contextual summary, not the verbatim markdown/IP dump. The printed answer already
+      // carries the detail, so a quick no-tools rewrite condenses it to a natural spoken reply.
+      let spoken = answer;
+      if (!has(args, "no-speak") && !has(args, "no-voice-summary") && looksRich(answer)) {
+        if (debug) console.error(`  ${tstamp()} [voice] summarizing ${answer.length} chars for speech…`);
+        const s = await chatTurn(weave, newId, actor, voiceSummaryPrompt(answer), summaryAgent, undefined, 60_000, undefined);
+        if (s.ok && s.answer.trim()) spoken = s.answer.trim();
+      }
+      // Cap the spoken length so a long reply isn't an unskippable monologue; "continue" reads on.
+      if (speakCap > 0 && spoken.length > speakCap) {
+        speaker.speak(spoken.slice(0, speakCap));
         speaker.enqueue(moreLine);
-        lastMore = answer.slice(speakCap);
+        lastMore = spoken.slice(speakCap);
       } else {
-        speaker.enqueue(answer);
+        speaker.speak(spoken);
         lastMore = "";
       }
     }
