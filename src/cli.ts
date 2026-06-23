@@ -1442,8 +1442,8 @@ function looksRich(t: string): boolean {
  *  `stop()` clears the queue and kills in-flight speech (new turn / Ctrl-C / barge-in). `done()`
  *  resolves when the queue has fully drained — callers await it before re-opening the mic so the
  *  TTS output isn't captured and re-transcribed (the echo bug). No-op + one warning off macOS. */
-function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => void; enqueue: (t: string) => void; stop: () => void; done: () => Promise<void> } {
-  const noop = { speak: () => {}, enqueue: () => {}, stop: () => {}, done: () => Promise.resolve() };
+function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => void; enqueue: (t: string) => void; stop: () => void; done: () => Promise<void>; speaking: () => boolean } {
+  const noop = { speak: () => {}, enqueue: () => {}, stop: () => {}, done: () => Promise.resolve(), speaking: () => false };
   if (!enabled) return noop;
   if (process.platform !== "darwin") {
     console.error("weave: --speak needs macOS `say` (offline TTS); voice output disabled.");
@@ -1494,7 +1494,8 @@ function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => 
   const speak = (text: string): void => { stop(); enqueue(text); }; // interrupt, then say
   const done = (): Promise<void> =>
     !proc && queue.length === 0 ? Promise.resolve() : new Promise((res) => waiters.push(res));
-  return { speak, enqueue, stop, done };
+  const speaking = (): boolean => proc !== null || queue.length > 0; // audio is (or is about to be) playing
+  return { speak, enqueue, stop, done, speaking };
 }
 
 /** Record from the macOS mic (avfoundation) until Enter, end-of-speech (VAD), or maxSecs, then
@@ -1711,24 +1712,39 @@ async function cmdVoice(args: Args): Promise<void> {
 
   // Barge-in (wake mode, default on): while the assistant is thinking or speaking, keep the mic open
   // in short chunks and listen for the wake phrase or "stop"/"cancel" to interrupt. The hard part is
-  // half-duplex echo — the mic hears our own TTS — so we ignore any transcript that's a fragment of
-  // what we're currently saying (passed via `speaking()`); only a phrase NOT in our speech counts.
+  // half-duplex echo — the mic hears our own TTS. Two guards: (1) a token-OVERLAP test drops a chunk
+  // that's mostly our own current words (robust to whisper garbling, unlike a strict substring); and
+  // (2) while audio is actually playing we require N consecutive confident hits (debounce) so a lone
+  // garbled echo can't cancel — but when we're silent (mid-thought) we interrupt on the first hit.
   const bargeIn = !has(args, "no-barge-in");
   const bargeChunk = num(args, "barge-chunk", 3);
+  const bargeDebounce = num(args, "barge-debounce", 2); // consecutive hits needed WHILE speaking
+  const echoOverlap = (heard: string, spoken: string): number => {
+    const ht = norm(heard).split(" ").filter(Boolean);
+    if (!ht.length) return 1;
+    const sp = new Set(norm(spoken).split(" ").filter(Boolean));
+    return ht.filter((w) => sp.has(w)).length / ht.length;
+  };
   const listenForInterrupt = async (
     state: { done: boolean },
     stopSignal: Promise<void>,
     speaking: () => string,
   ): Promise<boolean> => {
+    let hits = 0;
     while (!state.done && !quit && !closed) {
       const heard = await recordAndTranscribe({ awaitEnter: () => stopSignal, micDevice, model, whisper, maxSecs: bargeChunk, debug, quiet: true });
       if (state.done) break;
       const h = norm(heard);
-      if (!h || norm(speaking()).includes(h)) continue; // empty, or our own voice echoing back
-      if (wakeMatch(heard) || isStop(heard)) {
-        if (debug) console.error(`  ${tstamp()} [voice] BARGE-IN ✓ (heard ${JSON.stringify(heard)})`);
+      const playing = speaker.speaking();
+      if (!h || (playing && echoOverlap(heard, speaking()) >= 0.5)) { hits = 0; continue; } // silence / our own echo
+      if (!(wakeMatch(heard) || isStop(heard))) { hits = 0; continue; }
+      if (!playing) { // no audio out (mid-thought) → no echo risk → interrupt immediately
+        if (debug) console.error(`  ${tstamp()} [voice] BARGE-IN ✓ (silent; heard ${JSON.stringify(heard)})`);
         return true;
       }
+      hits += 1; // while speaking, demand consecutive confirmations
+      if (debug) console.error(`  ${tstamp()} [voice] barge candidate ${hits}/${bargeDebounce} (heard ${JSON.stringify(heard)})`);
+      if (hits >= bargeDebounce) return true;
     }
     return false;
   };
@@ -1887,7 +1903,8 @@ async function cmdVoice(args: Args): Promise<void> {
     let signalStop = (): void => {};
     const stopSignal = new Promise<void>((r) => { signalStop = r; });
     const endBarge = (): void => { busy.done = true; signalStop(); };
-    const speaking = (): string => `${heardAck} ${answerSpoken} ${streamBuf}`;
+    let filler = ""; // spoken heartbeat text — included in the echo guard so it can't self-barge
+    const speaking = (): string => `${heardAck} ${filler} ${answerSpoken} ${streamBuf}`;
     const bargeP = (wake && bargeIn)
       ? listenForInterrupt(busy, stopSignal, speaking).then((hit) => {
           if (hit) { busy.done = true; speaker.stop(); turnAbort?.abort(); }
@@ -1895,12 +1912,37 @@ async function cmdVoice(args: Args): Promise<void> {
         })
       : Promise.resolve(false);
 
+    // Heartbeat (#7): a slow NetOps turn voices nothing until completion (the answer arrives whole,
+    // not streamed), so eyes-free it's indistinguishable from a crash. Speak "still working" every
+    // `heartbeat-secs` while the turn is silent (no answer voiced yet, not already speaking, not
+    // barged). Streamed/conversational turns are already audible, so the answerSpoken/streamBuf guard
+    // keeps us quiet there. Heartbeat text feeds the echo guard via `filler`.
+    const hbEvery = num(args, "heartbeat-secs", 25) * 1000; // 0 disables
+    const hbPhrases = ["Still working on it.", "Still on it, one moment.", "Almost there.", "Working on it."];
+    let hbCount = 0;
+    const hbTimer = (hbEvery > 0 && !has(args, "no-speak")) ? setInterval(() => {
+      if (busy.done || answerSpoken || streamBuf || speaker.speaking() || hbCount >= hbPhrases.length) return;
+      filler = hbPhrases[hbCount % hbPhrases.length]!;
+      speaker.enqueue(filler);
+      hbCount += 1;
+    }, hbEvery) : null;
+
     turnAbort = new AbortController();
     // Always pass onProgress: conversational answers voice live; skill answers' progress is filtered,
     // so they arrive at completion and take the summary path below.
     const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal, onProgress);
     turnAbort = null;
-    if (cancelled) { endBarge(); await bargeP; speaker.stop(); console.log(`  ${tstamp()} (${answer})\n`); continue; }
+    if (hbTimer) clearInterval(hbTimer);
+    // A voice barge-in is an "interrupt to talk", not a silent kill: stop, say "Yes?", and the next
+    // (awake) loop iteration captures the redirect. Distinguish from a Ctrl-C/timeout cancel (bargeP false).
+    if (cancelled) {
+      endBarge();
+      const byVoice = await bargeP;
+      speaker.stop();
+      if (byVoice) { speaker.speak("Yes?"); await speaker.done(); console.log(`  ${tstamp()} (barge-in — go ahead)\n`); }
+      else console.log(`  ${tstamp()} (${answer})\n`);
+      continue;
+    }
     console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`); // screen: full detail
     if (!ok) {
       speaker.stop(); // drop any half-streamed prose; speak a clean, listener-friendly failure
@@ -1940,7 +1982,13 @@ async function cmdVoice(args: Args): Promise<void> {
     lastSpoken = answerSpoken; // "repeat" replays what was actually voiced (summary/streamed), not raw
     if (wake) await speaker.done(); // wait for the answer to finish before re-listening (no echo)
     endBarge();
-    if (await bargeP) console.log(`  ${tstamp()} (barge-in — stopped)\n`); // user cut in mid-answer
+    if (await bargeP) {
+      // User cut in mid-answer — treat it as "interrupt to talk": acknowledge and let the next
+      // (awake) iteration capture the redirect, rather than just falling silent.
+      speaker.speak("Yes?");
+      await speaker.done();
+      console.log(`  ${tstamp()} (barge-in — go ahead)\n`);
+    }
     history.push({ q: utterance, a: answer });
   }
 
