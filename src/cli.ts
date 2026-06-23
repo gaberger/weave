@@ -2055,7 +2055,36 @@ Domain use-cases are SKILLS, not harness code: drop a .ts (code skill) or .md (d
 agent skill: prompt + tools) into .weave/skills/. default db: ${DEFAULT_DB}`);
 }
 
+/** Load `.env` (cwd, walking up) into process.env WITHOUT overriding existing shell vars — so
+ *  `weave` picks up ANTHROPIC_API_KEY / FORWARD_* from the project `.env` like the python skills do.
+ *  Stdlib only (no dotenv dependency). Shell env always wins. */
+function loadDotenv(): void {
+  let dir = process.cwd();
+  for (let i = 0; i < 8; i++) {
+    const f = join(dir, ".env");
+    if (existsSync(f)) {
+      try {
+        for (const raw of readFileSync(f, "utf8").split("\n")) {
+          const line = raw.trim();
+          if (!line || line.startsWith("#")) continue;
+          const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+          const k = m?.[1];
+          if (!k) continue;
+          let v = (m[2] ?? "").trim();
+          if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) v = v.slice(1, -1);
+          if (process.env[k] === undefined) process.env[k] = v;
+        }
+      } catch { /* unreadable .env — ignore */ }
+      return;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+}
+
 async function main(): Promise<void> {
+  loadDotenv(); // pick up ANTHROPIC_API_KEY / FORWARD_* from .env before backend/skill selection
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
   switch (cmd) {
