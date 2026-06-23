@@ -1446,24 +1446,41 @@ function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => 
   return { speak, stop, done };
 }
 
-/** Record from the macOS mic (avfoundation) until Enter or maxSecs, then transcribe with
- *  whisper-cli. Returns the cleaned transcript ("" on silence/failure). `awaitEnter` lets the
- *  caller's readline signal an early stop; ffmpeg also self-stops at maxSecs. */
+/** Record from the macOS mic (avfoundation) until Enter, end-of-speech (VAD), or maxSecs, then
+ *  transcribe with whisper-cli. Returns the cleaned transcript ("" on silence/failure).
+ *  `awaitEnter` lets the caller's readline signal an early stop. When `vadFilter` is set, ffmpeg's
+ *  silencedetect logs trailing silence and we stop automatically — so you don't wait out maxSecs. */
 async function recordAndTranscribe(o: {
   awaitEnter: () => Promise<void>;
   micDevice: string; model: string; whisper: string; maxSecs: number;
-  debug?: boolean; quiet?: boolean; // quiet: suppress the "recording…" line (wake chunks)
+  debug?: boolean; quiet?: boolean; vadFilter?: string; // vadFilter: ffmpeg silencedetect=…
 }): Promise<string> {
   const wav = join(tmpdir(), `weave-voice-${randomUUID().slice(0, 8)}.wav`);
   const prefix = wav.replace(/\.wav$/, "");
   const t0 = systemClock.now();
-  const ff = spawn("ffmpeg", ["-y", "-f", "avfoundation", "-i", o.micDevice, "-ac", "1", "-ar", "16000", "-t", String(o.maxSecs), wav],
-    { stdio: ["pipe", "ignore", "ignore"] });
+  const ffArgs = ["-y", "-f", "avfoundation", "-i", o.micDevice, "-ac", "1", "-ar", "16000"];
+  if (o.vadFilter) ffArgs.push("-af", o.vadFilter); // analysis-only pass-through; wav still recorded
+  ffArgs.push("-t", String(o.maxSecs), wav);
+  const ff = spawn("ffmpeg", ffArgs, { stdio: ["pipe", "ignore", o.vadFilter ? "pipe" : "ignore"] });
   let ffErr = false;
   ff.on("error", () => { ffErr = true; });
-  if (!o.quiet) process.stdout.write(`  ● recording… speak now (Enter to stop · auto-stops at ${o.maxSecs}s)\n`);
+  let stopped = false;
+  const stopRec = (): void => { if (stopped) return; stopped = true; try { ff.stdin?.write("q"); } catch { /* gone */ } };
+  if (o.vadFilter && ff.stderr) {
+    // Stop on the LAST silence_start past a small floor: ignores leading silence (ts≈0) and
+    // triggers ~`d` seconds after you actually stop talking.
+    let buf = "";
+    ff.stderr.on("data", (d: Buffer) => {
+      buf += d.toString();
+      const ms = [...buf.matchAll(/silence_start: ([0-9.]+)/g)];
+      const last = ms[ms.length - 1];
+      if (last && parseFloat(last[1]) >= 0.8) stopRec();
+      if (buf.length > 8000) buf = buf.slice(-2000);
+    });
+  }
+  if (!o.quiet) process.stdout.write(`  ● listening… speak now${o.vadFilter ? " (auto-stops when you pause" : " (Enter to stop"} · ${o.maxSecs}s max)\n`);
   const exited = new Promise<void>((res) => ff.on("close", () => res()));
-  void o.awaitEnter().then(() => { try { ff.stdin?.write("q"); } catch { /* already gone */ } });
+  void o.awaitEnter().then(() => stopRec());
   await exited;
   if (ffErr) { console.error("  ! ffmpeg not available (brew install ffmpeg) — cannot record."); return ""; }
   const tRec = systemClock.now();
@@ -1512,6 +1529,9 @@ async function cmdVoice(args: Args): Promise<void> {
   if (!existsSync(model)) return void console.error(`weave voice: whisper model not found at ${model}\n  Download e.g. ggml-base.en.bin from https://huggingface.co/ggerganov/whisper.cpp, or pass --whisper-model <path>.`);
   const micDevice = str(args, "mic", ":0"); // avfoundation audio index (`ffmpeg -f avfoundation -list_devices true -i ""`)
   const maxSecs = num(args, "max-secs", 20);
+  // VAD: auto-stop a command recording shortly after you stop talking (ffmpeg silencedetect).
+  // Tunable via --silence-db / --silence-secs; --no-vad records until Enter/maxSecs.
+  const vadFilter = has(args, "no-vad") ? "" : `silencedetect=noise=${str(args, "silence-db", "-30")}dB:d=${str(args, "silence-secs", "1.2")}`;
 
   const weave = await openSubstrate(args);
   // --netops (or --persona netops, which implies it) embeds a peer so this is ONE command;
@@ -1540,6 +1560,10 @@ async function cmdVoice(args: Args): Promise<void> {
   console.log(wake
     ? `  hands-free: say "${wake}" to wake, then ask · type /quit or Ctrl-C to exit · model: ${model.split("/").pop()}\n`
     : `  push-to-talk: Enter to record, speak, Enter to stop · /quit exits · model: ${model.split("/").pop()}\n`);
+
+  // Spoken self-introduction at startup (her name is Forward — same as the wake word).
+  const intro = has(args, "no-intro") ? "" : str(args, "intro", "Hi, I'm Forward, your A I NetOps agent. Say, Hello Forward, to wake me, then ask your question.");
+  if (intro) { speaker.speak(intro); await speaker.done(); }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const queue: string[] = [];
@@ -1574,7 +1598,7 @@ async function cmdVoice(args: Args): Promise<void> {
       await speaker.done(); // wait for the ack to finish so we don't record it
       await new Promise((r) => setTimeout(r, 300)); // small buffer for room echo
       console.log(`\n  (woke) — ask your question…`);
-      utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug });
+      utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter });
       if (!utterance) { console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
       console.log(`you (voice)› ${utterance}\n`);
     } else {
@@ -1587,7 +1611,7 @@ async function cmdVoice(args: Args): Promise<void> {
         utterance = typed; // typed fallback when you'd rather not speak
       } else {
         speaker.stop(); // don't record weave talking over you
-        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug });
+        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug, vadFilter });
         if (!utterance) { console.log("  (heard nothing — try again)\n"); continue; }
         console.log(`you (voice)› ${utterance}\n`);
       }
