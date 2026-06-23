@@ -38,7 +38,7 @@ import { readFileTool, editFileTool, grepTool } from "./adapters/secondary/fs-to
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
-import { echoSkill, claudeSkill } from "./composition/builtin-skills.js";
+import { echoSkill, claudeSkill, netopsAgentSkill, personaAgentSkill } from "./composition/builtin-skills.js";
 import { loadAgentSkills, loadClaudeSkills } from "./composition/agent-skill.js";
 import { notifyTool } from "./composition/notify-tool.js";
 import { buildGraph, neighbours, type GraphEdge, type KnowledgeGraph, type ReportInput } from "./domain/knowledge-graph.js";
@@ -399,7 +399,10 @@ async function assembleSkills(
   // dependency on the user's global ~/.claude/skills. CLAUDE_PLUGIN_ROOT points at the
   // package root so each skill's `${CLAUDE_PLUGIN_ROOT}/skills/<name>/scripts/...`
   // path resolves to the vendored copy (the bash tool inherits process.env).
-  const netops = has(args, "netops") || process.env.WEAVE_NETOPS === "1";
+  // A named agent (`--persona netops`) bundles its skills + grounding: selecting the netops
+  // persona also loads the vendored forward-* skills, so `--persona netops` == `--netops`.
+  const personaArg = str(args, "persona", "");
+  const netops = has(args, "netops") || process.env.WEAVE_NETOPS === "1" || personaArg === "netops";
   if (netops) process.env.CLAUDE_PLUGIN_ROOT ??= PACKAGE_ROOT;
   // Claude Code skill dirs to scan: the vendored NetOps dir (when --netops), searched
   // FIRST so it wins name-dedup; PLUS the global dirs only when --claude-skills is set
@@ -418,7 +421,18 @@ async function assembleSkills(
       for (const s of loadClaudeSkills(d, llm.make))
         if (!seen.has(s.name)) (seen.add(s.name), claudeSkills.push(s));
   }
-  const fallback = llm ? claudeSkill(llm.make) : echoSkill;
+  // Persona / grounding: point weave at a specific agent at launch. `--persona netops`
+  // (the default under --netops) makes the catch-all + chat default the Forward NetOps agent
+  // (grounded to the forward-* skills + scripts); any other non-empty --persona value is used
+  // verbatim as that agent's system prompt; empty = the generic assistant.
+  const persona = personaArg || (netops ? "netops" : "");
+  const fallback: Skill = !llm
+    ? echoSkill
+    : persona === "netops"
+      ? netopsAgentSkill(llm.make)
+      : persona
+        ? personaAgentSkill("agent", "Custom-persona agent (system prompt set at launch).", llm.make, persona)
+        : claudeSkill(llm.make);
   const skills: Skill[] = [...codeSkills, ...agentSkills, ...claudeSkills, fallback];
 
   const registry = new ToolRegistry();
@@ -1394,12 +1408,15 @@ function chatTurn(
  *  weave's ethos). Returns a speaker that voices text (markdown stripped) and can be
  *  interrupted (new turn / Ctrl-C kills any in-flight speech). No-op + one warning off macOS;
  *  the cloud/streaming half (STT + nicer TTS) layers in later behind a voice port. */
-function makeSpeaker(enabled: boolean): { speak: (t: string) => void; stop: () => void } {
+function makeSpeaker(enabled: boolean, voice?: string): { speak: (t: string) => void; stop: () => void } {
   if (!enabled) return { speak: () => {}, stop: () => {} };
   if (process.platform !== "darwin") {
     console.error("weave: --speak needs macOS `say` (offline TTS); voice output disabled.");
     return { speak: () => {}, stop: () => {} };
   }
+  // Default to a female US English voice (`say -v ?` lists installed voices; "Samantha" ships
+  // by default, "Ava"/"Allison" are premium). Override with --voice <name>; --voice "" = system default.
+  const vArgs = voice ? ["-v", voice] : [];
   let proc: ReturnType<typeof spawn> | null = null;
   const stop = (): void => { if (proc) { proc.kill("SIGTERM"); proc = null; } };
   const speak = (text: string): void => {
@@ -1413,7 +1430,7 @@ function makeSpeaker(enabled: boolean): { speak: (t: string) => void; stop: () =
       .replace(/\s+/g, " ").trim();
     if (!clean) return;
     try {
-      proc = spawn("say", [], { stdio: ["pipe", "ignore", "ignore"] });
+      proc = spawn("say", vArgs, { stdio: ["pipe", "ignore", "ignore"] });
       proc.on("error", () => { proc = null; });
       proc.stdin?.end(clean);
     } catch { proc = null; }
@@ -1427,23 +1444,31 @@ function makeSpeaker(enabled: boolean): { speak: (t: string) => void; stop: () =
 async function recordAndTranscribe(o: {
   awaitEnter: () => Promise<void>;
   micDevice: string; model: string; whisper: string; maxSecs: number;
+  debug?: boolean; quiet?: boolean; // quiet: suppress the "recording…" line (wake chunks)
 }): Promise<string> {
   const wav = join(tmpdir(), `weave-voice-${randomUUID().slice(0, 8)}.wav`);
   const prefix = wav.replace(/\.wav$/, "");
+  const t0 = systemClock.now();
   const ff = spawn("ffmpeg", ["-y", "-f", "avfoundation", "-i", o.micDevice, "-ac", "1", "-ar", "16000", "-t", String(o.maxSecs), wav],
     { stdio: ["pipe", "ignore", "ignore"] });
   let ffErr = false;
   ff.on("error", () => { ffErr = true; });
-  process.stdout.write(`  ● recording… speak now (Enter to stop · auto-stops at ${o.maxSecs}s)\n`);
+  if (!o.quiet) process.stdout.write(`  ● recording… speak now (Enter to stop · auto-stops at ${o.maxSecs}s)\n`);
   const exited = new Promise<void>((res) => ff.on("close", () => res()));
   void o.awaitEnter().then(() => { try { ff.stdin?.write("q"); } catch { /* already gone */ } });
   await exited;
   if (ffErr) { console.error("  ! ffmpeg not available (brew install ffmpeg) — cannot record."); return ""; }
+  const tRec = systemClock.now();
   const wr = spawnSync(o.whisper, ["-m", o.model, "-f", wav, "-l", "en", "-nt", "-np", "-otxt", "-of", prefix], { encoding: "utf8" });
-  let text = "";
-  try { text = readFileSync(`${prefix}.txt`, "utf8"); } catch { text = wr.stdout ?? ""; }
+  let raw = "";
+  try { raw = readFileSync(`${prefix}.txt`, "utf8"); } catch { raw = wr.stdout ?? ""; }
+  const cleaned = raw.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim(); // drop [BLANK_AUDIO] / [_TT_] markers
+  if (o.debug) {
+    console.error(`  [voice] mic=${o.micDevice} rec=${tRec - t0}ms whisper=${systemClock.now() - tRec}ms raw=${JSON.stringify(raw.trim())} → ${JSON.stringify(cleaned)}`);
+    if (wr.status !== 0) console.error(`  [voice] whisper exit=${wr.status}: ${String(wr.stderr ?? "").trim().slice(-300)}`);
+  }
   try { rmSync(wav, { force: true }); rmSync(`${prefix}.txt`, { force: true }); } catch { /* best effort */ }
-  return text.replace(/\[[^\]]*\]/g, " ").replace(/\s+/g, " ").trim(); // drop [BLANK_AUDIO] / [_TT_] markers
+  return cleaned;
 }
 
 /** Start an in-process peer on the given substrate so `weave voice --netops` is ONE command
@@ -1488,7 +1513,8 @@ async function cmdVoice(args: Args): Promise<void> {
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
   const timeoutMs = parseDuration(str(args, "timeout", "300s"));
-  const speaker = makeSpeaker(!has(args, "no-speak")); // voice mode speaks by default
+  const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Samantha")); // female voice by default
+  const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
 
@@ -1526,15 +1552,17 @@ async function cmdVoice(args: Args): Promise<void> {
       let woken = false;
       while (!woken && !quit && !closed) {
         if (drainQuit()) { quit = true; break; }
-        const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk });
-        if (heard && norm(heard).includes(norm(wake))) woken = true;
+        const heard = await recordAndTranscribe({ awaitEnter: () => new Promise<void>(() => undefined), micDevice, model, whisper, maxSecs: wakeChunk, debug, quiet: true });
+        const matched = !!heard && norm(heard).includes(norm(wake));
+        if (debug) console.error(`  [voice] wake ${matched ? "MATCH ✓" : "no"} (heard ${JSON.stringify(heard)})`);
+        if (matched) woken = true;
       }
       if (quit || closed) break;
       speaker.stop();
       speaker.speak(ackPhrase); // "Hello"
       await new Promise((r) => setTimeout(r, 800)); // let the ack finish before we record
       console.log(`\n  (woke) — ask your question…`);
-      utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs });
+      utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug });
       if (!utterance) { console.log(`  (heard nothing — say "${wake}" again)\n`); continue; }
       console.log(`you (voice)› ${utterance}\n`);
     } else {
@@ -1547,7 +1575,7 @@ async function cmdVoice(args: Args): Promise<void> {
         utterance = typed; // typed fallback when you'd rather not speak
       } else {
         speaker.stop(); // don't record weave talking over you
-        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs });
+        utterance = await recordAndTranscribe({ awaitEnter: () => nextLine().then(() => undefined), micDevice, model, whisper, maxSecs, debug });
         if (!utterance) { console.log("  (heard nothing — try again)\n"); continue; }
         console.log(`you (voice)› ${utterance}\n`);
       }
@@ -1571,7 +1599,7 @@ async function cmdVoice(args: Args): Promise<void> {
 
 async function cmdChat(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
-  const speaker = makeSpeaker(has(args, "speak")); // --speak: voice responses via offline TTS
+  const speaker = makeSpeaker(has(args, "speak"), str(args, "voice", "Samantha")); // --speak: voice via offline TTS (female by default)
   const newId = () => randomUUID();
   const actor = str(args, "agent", `chat-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
@@ -1580,7 +1608,12 @@ async function cmdChat(args: Args): Promise<void> {
   // researcher job). `--route` opts into full skill routing; `--skill X` targets one skill; under
   // `--fake` there's no claude agent, so fall back to routing (the echo skill).
   const route = has(args, "route") || has(args, "fake");
-  const pinnedSkill = explicitSkill ?? (route ? undefined : "claude");
+  // Conversational default = the launch persona's agent (netops / custom / generic), so
+  // `weave chat --netops` talks as the Forward NetOps agent, not the generic assistant.
+  const personaArg = str(args, "persona", "");
+  const persona = personaArg || (has(args, "netops") ? "netops" : "");
+  const convoAgent = persona === "netops" ? "netops" : persona ? "agent" : "claude";
+  const pinnedSkill = explicitSkill ?? (route ? undefined : convoAgent);
   const timeoutMs = parseDuration(str(args, "timeout", "180s"));
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
