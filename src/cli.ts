@@ -38,8 +38,8 @@ import { readFileTool, editFileTool, grepTool } from "./adapters/secondary/fs-to
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
-import { echoSkill, claudeSkill, netopsAgentSkill, personaAgentSkill } from "./composition/builtin-skills.js";
-import { loadAgentSkills, loadClaudeSkills } from "./composition/agent-skill.js";
+import { echoSkill, claudeSkill, netopsAgentSkill, personaAgentSkill, VOICE_SUMMARY_SYSTEM } from "./composition/builtin-skills.js";
+import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
 import { notifyTool } from "./composition/notify-tool.js";
 import { buildGraph, neighbours, type GraphEdge, type KnowledgeGraph, type ReportInput } from "./domain/knowledge-graph.js";
 import { buildBm25, bm25Search, hybridRank, cosine, type Scored } from "./domain/search.js";
@@ -433,7 +433,13 @@ async function assembleSkills(
       : persona
         ? personaAgentSkill("agent", "Custom-persona agent (system prompt set at launch).", llm.make, persona)
         : claudeSkill(llm.make);
-  const skills: Skill[] = [...codeSkills, ...agentSkills, ...claudeSkills, fallback];
+  // Pin-only, NO-TOOLS summarizer for the voice layer: it ingests untrusted result text, so it
+  // must not be able to run tools (prevents prompt-injection → privilege escalation). tools: []
+  // makes makeAgentSkill restrict its worker's tool host to nothing; match: [] = never auto-routes.
+  const voiceSummary: Skill[] = llm
+    ? [makeAgentSkill({ name: "voice-summary", description: "Verbalize a result for TTS (no tools).", prompt: VOICE_SUMMARY_SYSTEM, tools: [], match: [] }, llm.make(VOICE_SUMMARY_SYSTEM))]
+    : [];
+  const skills: Skill[] = [...codeSkills, ...agentSkills, ...claudeSkills, ...voiceSummary, fallback];
 
   const registry = new ToolRegistry();
   for (const s of skills) for (const t of s.tools ?? []) registry.register(t);
@@ -1417,16 +1423,6 @@ function looksRich(t: string): boolean {
   return t.length > 220 || /\d{1,3}(\.\d{1,3}){3}/.test(t) || /[|`#]|\n[-*]\s|\n\s*\n/.test(t);
 }
 
-/** Prompt that turns a detailed network result into a natural SPOKEN reply — the rich answer
- *  carries its own context (e.g. "10.17.0.100 (NY DC host)"), so this just condenses + verbalizes. */
-function voiceSummaryPrompt(answer: string): string {
-  return "You are Forward, a voice NetOps assistant. Rewrite the result below as a brief SPOKEN reply for text-to-speech. " +
-    "Rules: at most two short sentences; conversational; translate IP addresses and device codes into their ROLE and LOCATION " +
-    "(e.g. \"the New York data center host\", \"the London edge router\", \"the S R plane\"); state the outcome plainly; " +
-    "do NOT read raw IP addresses, markdown, tables, code, or hop-by-hop lists; do NOT run any tools — just rewrite using the text given; " +
-    "end by offering one short relevant follow-up.\n\nResult to verbalize:\n" + answer;
-}
-
 /** Offline text-to-speech via macOS `say` (zero new dependency, works offline — matches
  *  weave's ethos). Returns a speaker that voices text (markdown stripped). Two entry points:
  *   • `speak(t)` — interrupting: drops any queued/in-flight speech and says `t` now.
@@ -1605,8 +1601,7 @@ async function cmdVoice(args: Args): Promise<void> {
   const actor = str(args, "agent", `voice-${randomUUID().slice(0, 8)}`);
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
-  // Agent used to verbalize rich answers for speech (the conversational catch-all).
-  const summaryAgent = (str(args, "persona", "") === "netops" || has(args, "netops")) ? "netops" : has(args, "persona") ? "agent" : "claude";
+  const summaryAgent = "voice-summary"; // dedicated NO-TOOLS skill — never the tool-granted agent
   const timeoutMs = parseDuration(str(args, "timeout", "300s"));
   const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
@@ -1816,7 +1811,6 @@ async function cmdVoice(args: Args): Promise<void> {
     turnAbort = null;
     if (cancelled) { speaker.stop(); console.log(`  ${tstamp()} (${answer})\n`); continue; }
     console.log(`${tstamp()} ${ok ? "weave›" : "weave (failed)›"} ${answer}\n`); // screen: full detail
-
     if (!ok) {
       speaker.stop(); // drop any half-streamed prose; speak a clean, listener-friendly failure
       speaker.speak(voiceError(answer));
@@ -1826,12 +1820,13 @@ async function cmdVoice(args: Args): Promise<void> {
       if (streamBuf.trim()) enqueueSpoken(streamBuf);
       lastMore = tail;
     } else {
-      // Speak a contextual summary, not the verbatim markdown/IP dump. The printed answer already
-      // carries the detail, so a quick no-tools rewrite condenses it to a natural spoken reply.
+      // Speak a CONTEXTUAL summary, not the verbatim markdown/IP dump. The detail is already on
+      // screen; a pin-only NO-TOOLS skill (voice-summary) condenses it — untrusted result text
+      // can't escalate because that worker has no tools to call.
       let spoken = answer;
       if (!has(args, "no-speak") && !has(args, "no-voice-summary") && looksRich(answer)) {
-        if (debug) console.error(`  ${tstamp()} [voice] summarizing ${answer.length} chars for speech…`);
-        const s = await chatTurn(weave, newId, actor, voiceSummaryPrompt(answer), summaryAgent, undefined, 60_000, undefined);
+        if (debug) console.error(`  ${tstamp()} [voice] summarizing ${answer.length} chars for speech (no-tools agent)…`);
+        const s = await chatTurn(weave, newId, actor, answer, summaryAgent, undefined, 60_000, undefined);
         if (s.ok && s.answer.trim()) spoken = s.answer.trim();
       }
       // Cap the spoken length so a long reply isn't an unskippable monologue; "continue" reads on.
