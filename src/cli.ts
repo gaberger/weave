@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { spawnSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -380,6 +381,11 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
  *  - fallback: claude (general agent, via SDK or `claude -p` CLI) else echo (offline)
  *  - generic tools: http_fetch, spawn_task, notify. No domain logic in the harness.
  */
+// Package root = parent of the dir holding this module. Resolves to the repo root
+// from both `src/cli.ts` (dev/tsx) and `dist/cli.js` (built) — both sit one level
+// under the root. Used to locate the vendored NetOps skills shipped in `skills/`.
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
 async function assembleSkills(
   args: Args,
   opts: { fake: boolean; model: string; weave?: Substrate; newId?: () => string },
@@ -388,16 +394,26 @@ async function assembleSkills(
   const { skills: codeSkills, errors } = await loadSkills(dir);
   const llm = await pickLlm(args);
   const agentSkills = llm ? loadAgentSkills(dir, llm.make) : [];
-  // Optionally inherit Claude Code skills (<dir>/<name>/SKILL.md). An explicit
-  // --claude-skills-dir scans just that dir; otherwise project .claude/skills then
-  // ~/.claude/skills. Match keywords are derived from each description; dupes by name drop
-  // (project wins). Already-defined weave skill names also take precedence.
-  const claudeDirs = has(args, "claude-skills-dir")
-    ? [str(args, "claude-skills-dir", "")]
-    : [join(process.cwd(), ".claude", "skills"), join(homedir(), ".claude", "skills")];
+  // NetOps preset (`--netops` / WEAVE_NETOPS=1): load ONLY the vendored forward-*
+  // skills shipped in this repo (skills/<name>/SKILL.md) — reproducible, with no
+  // dependency on the user's global ~/.claude/skills. CLAUDE_PLUGIN_ROOT points at the
+  // package root so each skill's `${CLAUDE_PLUGIN_ROOT}/skills/<name>/scripts/...`
+  // path resolves to the vendored copy (the bash tool inherits process.env).
+  const netops = has(args, "netops") || process.env.WEAVE_NETOPS === "1";
+  if (netops) process.env.CLAUDE_PLUGIN_ROOT ??= PACKAGE_ROOT;
+  // Claude Code skill dirs to scan: the vendored NetOps dir (when --netops), searched
+  // FIRST so it wins name-dedup; PLUS the global dirs only when --claude-skills is set
+  // (with --claude-skills-dir overriding which dir). Match keywords come from each
+  // description; weave-native skill names already take precedence.
+  const claudeDirs: string[] = [];
+  if (netops) claudeDirs.push(join(PACKAGE_ROOT, "skills"));
+  if (has(args, "claude-skills"))
+    claudeDirs.push(...(has(args, "claude-skills-dir")
+      ? [str(args, "claude-skills-dir", "")]
+      : [join(process.cwd(), ".claude", "skills"), join(homedir(), ".claude", "skills")]));
   const seen = new Set([...codeSkills, ...agentSkills].map((s) => s.name));
   const claudeSkills: Skill[] = [];
-  if (llm && has(args, "claude-skills")) {
+  if (llm && claudeDirs.length) {
     for (const d of claudeDirs)
       for (const s of loadClaudeSkills(d, llm.make))
         if (!seen.has(s.name)) (seen.add(s.name), claudeSkills.push(s));
