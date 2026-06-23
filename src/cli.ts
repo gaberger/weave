@@ -1612,9 +1612,9 @@ async function cmdVoice(args: Args): Promise<void> {
   const explicitSkill = has(args, "skill") ? str(args, "skill", "") : undefined;
   const pinnedSkill = explicitSkill; // undefined => route (NetOps utterances → forward-*)
   const summaryAgent = "voice-summary"; // dedicated NO-TOOLS skill — never the tool-granted agent
-  // Voice must feel responsive — bound a turn to 60s by default (was 300s). Enough for one focused
-  // NQE query + summarize; raise with --timeout for a known-long analysis.
-  const timeoutMs = parseDuration(str(args, "timeout", "60s"));
+  // Turn timeout: 180s default — enough for the agent to run a query (or two) and summarize without
+  // premature failures. Lower it (e.g. --timeout 45s) if you'd rather fail fast on slow asks.
+  const timeoutMs = parseDuration(str(args, "timeout", "180s"));
   const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
   const carry = !has(args, "no-context");
