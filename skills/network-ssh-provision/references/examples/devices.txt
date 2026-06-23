@@ -1,0 +1,15 @@
+# Device List Example
+# Lines starting with # are comments
+# One device per line (hostname or IP)
+
+# Core routers
+router-core-01.example.com
+router-core-02.example.com
+
+# Distribution switches
+192.168.1.10
+192.168.1.11
+
+# Access switches
+switch-floor1
+switch-floor2

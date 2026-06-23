@@ -1,0 +1,13 @@
+# Ignore backups and audit outputs
+backups/
+audit-*/
+*.cfg
+*.log
+
+# Ignore device lists with credentials
+*-credentials.txt
+*-passwords.txt
+
+# Ignore temporary files
+*.tmp
+/tmp/

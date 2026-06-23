@@ -1,0 +1,74 @@
+{
+  "title": "BGP control-plane hardening — project plan",
+  "summary": "Phased remediation of four control-plane gaps across 3 border routers (US/EU/JP). Phase 1 is additive and same-day; Phase 2 needs a maintenance window. Total effort ~4–6 hours per router across both phases.",
+  "metadata": {"Network": "DC-Global", "Snapshot": "snap-1008", "Owner": "Network Engineering", "Target completion": "2026-05-12"},
+  "sections": [
+    {"title": "Goal",
+      "body": "Close the four control-plane-security gaps (no auth / no max-prefix / no TTL security / no BFD) that share the *trust-boundary-too-generous* root cause. Outcome: peering subnets treated as untrusted, sub-second link-failure convergence, no operability regressions."},
+
+    {"title": "Phases",
+      "blocks": [
+        {"kind": "phase", "id": "P1", "name": "Security baseline (same-day, no maintenance window)",
+          "goal": "Close the three additive control-plane-security gaps without disturbing traffic.",
+          "gating-criteria": "All BGP sessions remain Established after each push; no unexpected flaps in forward-device-intel BGP peerings."},
+
+        {"kind": "action", "id": "P1.1", "title": "Add BGP authentication on every neighbor",
+          "severity": "CRITICAL", "closes": "F-001",
+          "devices": "us-border-1, eu-border-1, jp-border-1",
+          "prereq": "none",
+          "window": "none — additive",
+          "rollback": "`no neighbor X password` on each device (session re-establishes unauthenticated)",
+          "time": "~15 min × 3 routers (synchronized push)",
+          "lang": "cisco",
+          "config": "router bgp 65000.100\n neighbor 10.0.0.6 password 7 <SHARED-SECRET>",
+          "validate": "python3 \"$CLAUDE_PLUGIN_ROOT/skills/forward-device-intel/scripts/get_bgp_peers.py\" --device us-border-1 | grep 10.0.0.6\n# expected: state=Established, no flap",
+          "references": [{"topic": "bgp-auth-tcp-ao", "why": "prefer TCP-AO over MD5 where supported"}]},
+
+        {"kind": "action", "id": "P1.2", "title": "Add maximum-prefix limits per neighbor",
+          "severity": "CRITICAL", "closes": "F-002",
+          "devices": "all 3 border routers",
+          "prereq": "none",
+          "window": "none — additive",
+          "rollback": "`no neighbor X maximum-routes`",
+          "time": "~10 min × 3 routers",
+          "lang": "cisco",
+          "config": "router bgp 65000.100\n neighbor 10.0.0.6 maximum-routes 100 75   ! tear down at 100, warn at 75%\n neighbor <ibgp-peer> maximum-routes 10 warning-only",
+          "validate": "forward-nqe-query — confirm BGP RIB size <= configured cap on each neighbor",
+          "references": [{"topic": "bgp-route-leak-2019"}]},
+
+        {"kind": "action", "id": "P1.3", "title": "Enable TTL security on directly-connected eBGP",
+          "severity": "HIGH", "closes": "F-003",
+          "devices": "us-border-1, eu-border-1, jp-border-1 (eBGP neighbors only)",
+          "prereq": "P1.1 done",
+          "window": "none",
+          "rollback": "`no neighbor X ttl-security hops 1`",
+          "time": "~5 min × 3 routers",
+          "lang": "cisco",
+          "config": "router bgp 65000.100\n neighbor 10.0.0.6 ttl maximum-hops 1\n neighbor 10.0.0.18 ttl maximum-hops 1",
+          "validate": "BGP session re-establishes within ~30s; new packets carry TTL=255",
+          "references": [{"topic": "gtsm"}]},
+
+        {"kind": "phase", "id": "P2", "name": "Convergence + operability (next maintenance window)",
+          "goal": "Reduce link-failure MTTR from 90–180s to ~1s.",
+          "gating-criteria": "Phase 1 stable for at least 24h; both ends of each link confirmed BFD-capable."},
+
+        {"kind": "action", "id": "P2.1", "title": "Enable BFD on eBGP links",
+          "severity": "HIGH", "closes": "F-004",
+          "devices": "us-border-1, eu-border-1, jp-border-1",
+          "prereq": "P1 complete; both ends of each link must support compatible BFD timers",
+          "window": "yes — brief BGP renegotiation possible",
+          "rollback": "`no neighbor X bfd`",
+          "time": "~20 min per link",
+          "lang": "cisco",
+          "config": "router bgp 65000.100\n neighbor 10.0.0.6 bfd\n neighbor 10.0.0.6 bfd interval 300 min-rx 300 multiplier 3",
+          "validate": "Force a link down; convergence < 1s observable in forward-path-analysis",
+          "references": [{"topic": "bfd"}]}
+      ]},
+
+    {"title": "Validation gate",
+      "body": "After both phases complete, all of the following must pass before declaring the project closed:\n- All BGP sessions Established on all 3 border routers (verify via `forward-device-intel` BGP peerings).\n- No new dropped flows between regions (re-run prior `forward-path-analysis` traces against post-change snapshot).\n- forward-compliance-check: F-001 through F-004 transition from FAIL to PASS.\n- Forced link-down test: convergence < 1s with BFD enabled (P2.1 only)."},
+
+    {"title": "Rollback summary",
+      "body": "All changes are additive; rollback is per-action and listed inline above. Order of rollback if a full revert is needed: P2.1 → P1.3 → P1.2 → P1.1. No traffic-affecting rollback steps.\n\nIf any single action causes an unexpected BGP flap that doesn't self-recover within 60s, roll back that action only; the other actions are independent."}
+  ]
+}

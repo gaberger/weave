@@ -1,0 +1,15 @@
+configure terminal
+!
+! Update interface description
+interface GigabitEthernet0/0/0
+ description WAN_UPLINK_TO_ISP
+ no shutdown
+!
+! Add NTP server
+ntp server 192.168.1.1
+!
+! Update SNMP community
+snmp-server community monitoring RO
+!
+end
+write memory
