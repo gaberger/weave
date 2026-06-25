@@ -13,15 +13,46 @@ import { homedir, tmpdir } from "node:os";
 import { spawnSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
+// Terminal colors (ANSI escape codes)
+const colors = {
+  reset: "\x1b[0m",
+  dim: "\x1b[2m",
+  bold: "\x1b[1m",
+  gray: "\x1b[90m",
+  red: "\x1b[91m",
+  green: "\x1b[92m",
+  yellow: "\x1b[93m",
+  blue: "\x1b[94m",
+  magenta: "\x1b[95m",
+  cyan: "\x1b[96m",
+  white: "\x1b[97m",
+};
+
+// Color utility functions
+const dim = (s: string): string => `${colors.dim}${s}${colors.reset}`;
+const bold = (s: string): string => `${colors.bold}${s}${colors.reset}`;
+const green = (s: string): string => `${colors.green}${s}${colors.reset}`;
+const red = (s: string): string => `${colors.red}${s}${colors.reset}`;
+const yellow = (s: string): string => `${colors.yellow}${s}${colors.reset}`;
+const blue = (s: string): string => `${colors.blue}${s}${colors.reset}`;
+const cyan = (s: string): string => `${colors.cyan}${s}${colors.reset}`;
+const gray = (s: string): string => `${colors.gray}${s}${colors.reset}`;
+
+// Check if stdout supports colors (TTY)
+const supportsColor = process.stdout.isTTY;
+
 import type { Substrate } from "./ports/substrate.js";
 import type { Worker } from "./ports/worker.js";
 import type { SealedEvent } from "./domain/event.js";
 import { systemClock } from "./domain/clock.js";
 import { TaskKind, type DeclaredPayload, type ProgressPayload } from "./domain/task.js";
+import { classifyIntent, type Intent } from "./domain/intent.js";
 import { classifyTier, type Tier } from "./domain/model-tier.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
+import { declareQuestion, resolveQuestion } from "./usecases/learning.js";
 import { compactWeave } from "./usecases/compaction.js";
+import { getCachedAnswer, cacheAnswer } from "./usecases/cache.js";
 import { LoopRunner } from "./usecases/loop.js";
 import { checkArchitecture } from "./domain/architecture.js";
 import { createPeer } from "./composition-root.js";
@@ -49,6 +80,36 @@ import type { Embedder } from "./ports/embedder.js";
 import type { ToolDefinition } from "./ports/tool-host.js";
 
 const DEFAULT_DB = ".weave/weave.db";
+const DEFAULT_NETWORK = "default";
+
+/** Network context: each network ID gets its own isolated db, reports, and .env.
+ *  Returns the network ID from args or environment, defaulting to "default". */
+function networkId(args: Args): string {
+  return str(args, "network-id", process.env.WEAVE_NETWORK_ID ?? DEFAULT_NETWORK);
+}
+
+/** Resolve the .weave root for a network: .weave/networks/<id>/ or .weave/ for default. */
+function networkRoot(network: string): string {
+  return network === DEFAULT_NETWORK ? ".weave" : join(".weave", "networks", network);
+}
+
+/** Resolve the db path for a network: <network-root>/weave.db. */
+function dbPathFor(network: string, explicit?: string): string {
+  if (explicit) return explicit; // --db wins
+  return join(networkRoot(network), "weave.db");
+}
+
+/** Resolve the pid file path for a network: <network-root>/weave.pid. */
+function pidPathFor(network: string, explicit?: string): string {
+  if (explicit) return explicit.replace(/\.db$/, "") + ".pid"; // --db: <name>.db → <name>.pid
+  return join(networkRoot(network), "weave.pid");
+}
+
+/** Resolve the log file path for a network: <network-root>/weave.log. */
+function logPathFor(network: string, explicit?: string): string {
+  if (explicit) return explicit.replace(/\.db$/, "") + ".log"; // --db: <name>.db → <name>.log
+  return join(networkRoot(network), "weave.log");
+}
 
 interface Args {
   readonly _: string[];
@@ -148,7 +209,9 @@ type ClosableSubstrate = Substrate & { close(): void };
 
 /** Pick the substrate by runtime so the Bun binary stays native-addon-free (ADR-0010 §4). */
 async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
-  const file = str(args, "db", DEFAULT_DB);
+  const network = networkId(args);
+  const explicitDb = args.flags.get("db") as string | undefined;
+  const file = dbPathFor(network, explicitDb);
   mkdirSync(dirname(file), { recursive: true });
   // Fixed working-memory location for agent skills, guaranteed to exist (sibling of the db). Skills
   // write per-topic <topic-slug>.notes.md here — the harness owns the dir, not a prompt convention.
@@ -170,7 +233,10 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
 /** The durable report bundle root (sibling of the db), guaranteed to exist by openSubstrate.
  *  Laid out as an OKF v0.1 bundle: per-skill subdirs of concept files + index.md / log.md. */
 function reportsDirFor(args: Args): string {
-  return join(dirname(str(args, "db", DEFAULT_DB)), "reports");
+  const network = networkId(args);
+  const explicitDb = args.flags.get("db") as string | undefined;
+  const dbPath = dbPathFor(network, explicitDb);
+  return join(dirname(dbPath), "reports");
 }
 
 /** Embedder for hybrid search: a configured provider (WEAVE_EMBED_KEY) if present, else the offline
@@ -485,10 +551,18 @@ const IS_DAEMON_CHILD = process.env.WEAVE_DAEMONIZED === "1";
 
 /** Default pid/log paths sit next to the db: `.weave/weave.db` → `.weave/weave.{pid,log}`. */
 function pidFileFor(args: Args): string {
-  return str(args, "pid-file", str(args, "db", DEFAULT_DB).replace(/\.db$/, "") + ".pid");
+  const explicitPid = args.flags.get("pid-file") as string | undefined;
+  if (explicitPid) return explicitPid;
+  const network = networkId(args);
+  const explicitDb = args.flags.get("db") as string | undefined;
+  return pidPathFor(network, explicitDb);
 }
 function logFileFor(args: Args): string {
-  return str(args, "log-file", str(args, "db", DEFAULT_DB).replace(/\.db$/, "") + ".log");
+  const explicitLog = args.flags.get("log-file") as string | undefined;
+  if (explicitLog) return explicitLog;
+  const network = networkId(args);
+  const explicitDb = args.flags.get("db") as string | undefined;
+  return logPathFor(network, explicitDb);
 }
 
 /**
@@ -550,8 +624,11 @@ function daemonize(args: Args): void {
   });
   writeFileSync(pidFile, String(child.pid));
   child.unref();
-  console.log(`weave: peer daemonized (pid ${child.pid}) — logs: ${logFile}, pid: ${pidFile}`);
-  console.log(`weave: stop with — weave down${has(args, "db") ? ` --db ${str(args, "db", DEFAULT_DB)}` : ""}`);
+  const net = networkId(args) !== DEFAULT_NETWORK ? ` ${cyan(`[network: ${networkId(args)}]`)}` : "";
+  console.log(`${green("✓")} peer running${net}\n`);
+  console.log(`  ${gray("pid:")}   ${child.pid}`);
+  console.log(`  ${gray("logs:")}  ${logFile}`);
+  console.log(`  ${gray("stop:")}  weave down${networkId(args) !== DEFAULT_NETWORK ? ` --network-id ${networkId(args)}` : ""}\n`);
   process.exit(0);
 }
 
@@ -586,7 +663,12 @@ async function cmdUp(args: Args): Promise<void> {
     newId: () => randomUUID(),
   });
 
-  console.log(`weave: peer "${agentId}" up on ${str(args, "db", DEFAULT_DB)} [llm: ${backend}] — skills: ${skills.map((s) => s.name).join(", ")}`);
+  const net = networkId(args);
+  const netBadge = net !== DEFAULT_NETWORK ? ` ${cyan(`[${net}]`)}` : "";
+  console.log(`${green("✓")} peer "${agentId}" running${netBadge}`);
+  console.log(`  ${gray("db:")}    ${dbPathFor(net, args.flags.get("db") as string | undefined)}`);
+  console.log(`  ${gray("llm:")}   ${backend}`);
+  console.log(`  ${gray("skills:")} ${skills.map((s) => s.name).join(", ")}\n`);
   weave.subscribe(0, (e) => console.log(fmt(e)));
 
   const ac = new AbortController();
@@ -622,14 +704,16 @@ async function cmdUp(args: Args): Promise<void> {
 
 /** Stop a daemonized peer: read its pidfile, SIGTERM it, wait for it to exit. */
 async function cmdDown(args: Args): Promise<void> {
+  const net = networkId(args);
   const pidFile = pidFileFor(args);
   if (!existsSync(pidFile)) {
-    console.log(`weave: no pidfile at ${pidFile} — nothing to stop`);
+    const netMsg = net !== DEFAULT_NETWORK ? ` for ${cyan(net)}` : "";
+    console.log(`${gray("─")} no peer running${netMsg}`);
     return;
   }
   const pid = Number(readFileSync(pidFile, "utf8").trim());
   if (!Number.isInteger(pid) || pid <= 0) {
-    console.error(`weave: garbage pidfile ${pidFile}; removing`);
+    console.error(`${red("✗")} garbage pidfile; removing`);
     rmSync(pidFile, { force: true });
     process.exitCode = 1;
     return;
@@ -637,8 +721,8 @@ async function cmdDown(args: Args): Promise<void> {
   try {
     process.kill(pid, "SIGTERM"); // ask the peer to shut down (it removes its own pidfile)
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ESRCH") {
-      console.log(`weave: pid ${pid} already gone — clearing stale ${pidFile}`);
+    if ((e as { code?: string }).code === "ESRCH") {
+      console.log(`${yellow("ℹ")} pid ${pid} already gone — clearing stale file`);
       rmSync(pidFile, { force: true });
       return;
     }
@@ -647,9 +731,9 @@ async function cmdDown(args: Args): Promise<void> {
   // Wait up to ~3s for graceful exit, polling liveness with signal 0.
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 100));
-    try { process.kill(pid, 0); } catch { console.log(`weave: stopped peer (pid ${pid})`); return; }
+    try { process.kill(pid, 0); } catch { console.log(`${green("✓")} stopped (pid ${pid})`); return; }
   }
-  console.error(`weave: pid ${pid} did not exit after SIGTERM; try: kill -9 ${pid}`);
+  console.error(`${red("✗")} pid ${pid} did not exit; try: ${gray("kill -9")} ${pid}`);
   process.exitCode = 1;
 }
 
@@ -667,36 +751,60 @@ function pidCommand(pid: number): string {
 /**
  * List daemonized weave peers/pools by scanning the pidfiles that live next to the db
  * (`weave up` / `pool` / `loop --daemon` write `<dir>/<name>.pid` and remove it on graceful
- * shutdown). Read-only: probes liveness with signal 0 and never opens the substrate or mutates a
- * pidfile — `weave down` owns stale-pidfile cleanup, `ps` only reports it. A leftover file whose
- * process is gone shows as "stale"; a recycled, non-ours pid shows as "foreign".
+ * shutdown). With network context, scans all networks. Read-only: probes liveness with signal 0.
  */
 function cmdPs(args: Args): void {
-  const dir = dirname(str(args, "db", DEFAULT_DB));
-  let pidFiles: string[];
-  try {
-    pidFiles = readdirSync(dir).filter((f) => f.endsWith(".pid")).sort();
-  } catch {
-    pidFiles = []; // no .weave dir yet → nothing running
+  const allRows: Array<{ network: string; pidfile: string; pid: string; status: string; cmd: string }> = [];
+
+  // Scan default network (.weave/weave.pid)
+  const defaultPid = pidFileFor(args);
+  if (existsSync(defaultPid)) {
+    const raw = readFileSync(defaultPid, "utf8").trim();
+    const pid = Number(raw);
+    const status = Number.isInteger(pid) && pid > 0 ? pidLiveness(pid) : "invalid";
+    allRows.push({
+      network: "default",
+      pidfile: "weave.pid",
+      pid: Number.isInteger(pid) && pid > 0 ? String(pid) : raw || "?",
+      status,
+      cmd: status === "alive" ? pidCommand(pid) : "",
+    });
   }
-  if (pidFiles.length === 0) {
-    console.log(`weave: no peers running (no *.pid files in ${dir}/)`);
+
+  // Scan all networks (.weave/networks/*/weave.pid)
+  const networksDir = join(".weave", "networks");
+  try {
+    const networkDirs = readdirSync(networksDir, { withFileTypes: true }).filter((d) => d.isDirectory());
+    for (const nd of networkDirs) {
+      const netPid = join(networksDir, nd.name, "weave.pid");
+      if (existsSync(netPid)) {
+        const raw = readFileSync(netPid, "utf8").trim();
+        const pid = Number(raw);
+        const status = Number.isInteger(pid) && pid > 0 ? pidLiveness(pid) : "invalid";
+        allRows.push({
+          network: nd.name,
+          pidfile: "weave.pid",
+          pid: Number.isInteger(pid) && pid > 0 ? String(pid) : raw || "?",
+          status,
+          cmd: status === "alive" ? pidCommand(pid) : "",
+        });
+      }
+    }
+  } catch { /* no networks dir yet */ }
+
+  if (allRows.length === 0) {
+    console.log(`${gray("─")} no peers running`);
     return;
   }
-  const rows = pidFiles.map((f) => {
-    const raw = readFileSync(join(dir, f), "utf8").trim();
-    const pid = Number(raw);
-    if (!Number.isInteger(pid) || pid <= 0) return { f, pid: raw || "?", status: "invalid", cmd: "" };
-    const status = pidLiveness(pid);
-    return { f, pid: String(pid), status, cmd: status === "alive" ? pidCommand(pid) : "" };
-  });
-  const wF = Math.max(8, ...rows.map((r) => r.f.length));
-  const wP = Math.max(3, ...rows.map((r) => r.pid.length));
-  const alive = rows.filter((r) => r.status === "alive").length;
-  console.log(`weave: ${alive} running, ${rows.length - alive} stale/other — pidfiles in ${dir}/`);
-  console.log(`  ${"PIDFILE".padEnd(wF)}  ${"PID".padStart(wP)}  STATUS   COMMAND`);
-  for (const r of rows) {
-    console.log(`  ${r.f.padEnd(wF)}  ${r.pid.padStart(wP)}  ${r.status.padEnd(7)}  ${r.cmd}`);
+
+  const wN = Math.max(7, ...allRows.map((r) => r.network.length));
+  const wP = Math.max(3, ...allRows.map((r) => r.pid.length));
+  const alive = allRows.filter((r) => r.status === "alive").length;
+  console.log(`${green("─")} ${alive} running${alive < allRows.length ? `, ${allRows.length - alive} stale` : ""}\n`);
+  console.log(`  ${cyan("NETWORK".padEnd(wN))}  ${cyan("PID".padStart(wP))}  STATUS   COMMAND`);
+  for (const r of allRows) {
+    const statusColor = r.status === "alive" ? green : red;
+    console.log(`  ${r.network.padEnd(wN)}  ${r.pid.padStart(wP)}  ${statusColor(r.status.padEnd(7))}  ${gray(r.cmd || "")}`);
   }
 }
 
@@ -1303,8 +1411,10 @@ interface ChatTurn {
  * it trades follow-up quality against prompt growth and mis-routing risk. The defaults keep the last
  * few turns within a character budget; tune `maxTurns`/`maxChars` to taste.
  */
-function buildChatGoal(utterance: string, history: readonly ChatTurn[], maxTurns = 4, maxChars = 1500): string {
-  if (history.length === 0) return utterance;
+function buildChatGoal(utterance: string, history: readonly ChatTurn[], networkContext?: string, maxTurns = 4, maxChars = 1500): string {
+  let goal = utterance;
+  if (networkContext) goal = `[Network context: ${networkContext}] ${goal}`;
+  if (history.length === 0) return goal;
   let ctx = "";
   for (const turn of history.slice(-maxTurns)) {
     const a = turn.a.length > 400 ? `${turn.a.slice(0, 397)}…` : turn.a;
@@ -1312,8 +1422,8 @@ function buildChatGoal(utterance: string, history: readonly ChatTurn[], maxTurns
     if (ctx.length + block.length > maxChars) break;
     ctx += block;
   }
-  if (!ctx) return utterance;
-  return `${utterance}\n\n--- Earlier in this conversation (context only; answer the request above) ---\n\n${ctx.trimEnd()}`;
+  if (!ctx) return goal;
+  return `${goal}\n\n--- Earlier in this conversation (context only; answer the request above) ---\n\n${ctx.trimEnd()}`;
 }
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -1330,6 +1440,8 @@ function chatTurn(
   timeoutMs: number,
   signal: AbortSignal | undefined,
   onProgress?: (note: string) => void, // streamed answer text / status notes (voice TTS streaming)
+  utterance?: string, // original user utterance (for learning tracking)
+  networkId?: string, // network context (for learning tracking)
 ): Promise<{ answer: string; ok: boolean; cancelled: boolean }> {
   return new Promise((resolve) => {
     const id = `chat-${randomUUID().slice(0, 8)}`;
@@ -1337,11 +1449,27 @@ function chatTurn(
     if (pinnedSkill) spec.skill = pinnedSkill;
     if (model) spec.model = model; // ADR-0022: per-turn tier (cheap for chat, escalates on hard asks)
 
+    // Extract original utterance for learning (strip network context prefix like "[Network context: network 111]")
+    const rawUtterance = utterance?.replace(/^\[Network context: network \d+\]\s*/, "") ?? goal.split("\n")[0] ?? goal;
+    const qStartTime = systemClock.now();
+
+    // Learning: track the question
+    if (utterance && networkId) {
+      const intent = classifyIntent(rawUtterance);
+      const persona = pinnedSkill === "netops" ? "netops" : "general";
+      void declareQuestion(weave, newId, actor, id, rawUtterance, intent, networkId, persona);
+    }
+
     let detail = "thinking";
     let claimed = false;
     let frame = 0;
     let done = false;
     let subscription: { unsubscribe(): void } | undefined;
+    let seenProgress = new Map<string, number>(); // track count per note
+    let lastProgressLine = ""; // track last progress note to avoid reprinting
+    let lastProgressTime = 0; // track when we last printed a progress note
+    const PROGRESS_DEBOUNCE_MS = 1000; // don't reprint identical notes more often than this
+    const MAX_NOTE_REPEATS = 3; // stop showing a note after N repeats
     const t0 = systemClock.now();
 
     // Animate a "thinking" line (with elapsed seconds, so a slow real-LLM turn doesn't look hung)
@@ -1363,7 +1491,25 @@ function chatTurn(
       clearTimeout(hint);
       signal?.removeEventListener("abort", onAbort);
       subscription?.unsubscribe();
-      if (tty) process.stdout.write("\r\x1b[K"); // wipe the spinner line
+
+      // Learning: record resolution outcome
+      if (utterance && networkId && !cancelled) {
+        const durationMs = systemClock.now() - qStartTime;
+        // Count follow-ups: if this is in history and the previous turn was the same question
+        // (simplified: just mark as resolved for now, follow-up counting would need history passed in)
+        const followUps = 0; // TODO: track if user asks follow-up questions
+        const resolved = ok;
+        const skill = pinnedSkill ?? "unknown";
+        void resolveQuestion(weave, newId, actor, id, durationMs, followUps, resolved, skill);
+      }
+
+      if (tty) {
+        process.stdout.write("\r\x1b[K"); // wipe the spinner line
+        if (lastProgressLine) {
+          // reprint last progress line in dim color so it persists
+          process.stdout.write(`${dim("  ── " + lastProgressLine)}\n`);
+        }
+      }
       resolve({ answer, ok, cancelled });
     };
 
@@ -1384,14 +1530,25 @@ function chatTurn(
     const hint = setTimeout(() => {
       if (!claimed && !done) detail = "waiting for a peer to pick this up (is `weave up` running?)";
     }, 8000);
-    const timer = setTimeout(() => {
-      finish(
-        claimed
-          ? "the task didn't finish in time — try a simpler ask, or raise --timeout."
-          : "no peer answered. Start one in another terminal: `weave up` (or `weave up --daemon`).",
-        false,
-      );
-    }, timeoutMs);
+    let timer: NodeJS.Timeout | undefined;
+    const timerStart = systemClock.now();
+
+    function resetTimer(): void {
+      if (timer) clearTimeout(timer);
+      const elapsed = systemClock.now() - timerStart;
+      const remaining = timeoutMs - elapsed;
+      if (remaining > 5000) { // only reset if meaningful time remains
+        timer = setTimeout(() => {
+          finish(
+            claimed
+              ? "the task didn't finish in time — try a simpler ask, or raise --timeout."
+              : "no peer answered. Start one in another terminal: `weave up` (or `weave up --daemon`).",
+            false,
+          );
+        }, remaining);
+      }
+    }
+    resetTimer(); // initial timeout
 
     // Subscribe from head+1 BEFORE declaring, so an instant completion can't slip past the listener.
     void weave.head().then((head) => {
@@ -1401,12 +1558,36 @@ function chatTurn(
         switch (e.kind) {
           case TaskKind.Claimed:
             claimed = true;
-            detail = `working (${e.actor})`;
+            const skillName = e.actor.replace(/^(chat-|voice-|peer-)/, "");
+            detail = skillName ? `skill: ${skillName}` : `working (${e.actor})`;
+            if (tty) {
+              process.stdout.write(`\r\x1b[K  ${dim(`→ ${skillName}`)}\n`); // show which skill claimed
+              draw();
+            }
             break;
           case TaskKind.Progress: {
             const note = (e.payload as ProgressPayload).note;
             detail = note;
             onProgress?.(note); // feed the live answer stream to a voice speaker, if any
+            // Reset timeout on each progress note (incremental progress gets more time)
+            resetTimer();
+            // Print progress notes on their own line (TTY only), keep last for finish()
+            // Dedupe: skip if we've seen this note too many times, or printed very recently
+            const now = systemClock.now();
+            const count = (seenProgress.get(note) ?? 0) + 1;
+            seenProgress.set(note, count);
+            const tooSoon = now - lastProgressTime < PROGRESS_DEBOUNCE_MS;
+            const tooManyRepeats = count > MAX_NOTE_REPEATS;
+            if (tty && !tooSoon && !tooManyRepeats) {
+              process.stdout.write(`\r\x1b[K  ${cyan(note)}\n`); // clear spinner, print note
+              lastProgressLine = note;
+              lastProgressTime = now;
+              draw(); // restore spinner
+            } else if (tty && tooManyRepeats && count === MAX_NOTE_REPEATS + 1) {
+              // Warn once when we start suppressing repeats
+              process.stdout.write(`\r\x1b[K  ${dim("(suppressing repeated progress notes)")}\n`);
+              draw();
+            }
             break;
           }
           case TaskKind.Completed:
@@ -1887,7 +2068,8 @@ async function cmdVoice(args: Args): Promise<void> {
       flushSentences();
     };
 
-    const goal = carry ? buildChatGoal(utterance, history) : utterance;
+    const netCtx = networkId(args) !== DEFAULT_NETWORK ? `network ${networkId(args)}` : undefined;
+    const goal = carry ? buildChatGoal(utterance, history, netCtx) : utterance;
     // Voice biases to cheap/fast models — the forward scripts do the heavy lifting; the LLM mostly
     // picks a query and summarizes. Hard ("frontier") asks get Sonnet, everything else Haiku; NEVER
     // Opus. --model pins one; --no-tier defers to the peer default.
@@ -2019,11 +2201,14 @@ async function cmdChat(args: Args): Promise<void> {
   const timeoutMs = parseDuration(str(args, "timeout", "180s"));
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
-
+  const net = networkId(args);
+  const netBadge = net !== DEFAULT_NETWORK ? `${cyan(`[${net}]`)} ` : "";
   const mode = explicitSkill ? `skill: ${explicitSkill}` : route ? "routing by skill" : "conversational (general agent)";
-  console.log("weave chat — talk to your weave. Just type and press enter; ask follow-ups naturally.");
-  console.log(`  /help  /status  /reset  /quit   ·   ${mode}${carry ? "" : "   ·   context off"}`);
-  console.log("  (thin client: a `weave up` peer answers; Ctrl-C cancels a turn, again at the prompt exits)\n");
+
+  console.log(`${green("weave chat")}${netBadge}— talk to your weave. Just type and press enter.\n`);
+  console.log(`  ${gray("mode:")}   ${mode}`);
+  console.log(`  ${gray("cmds:")}   /help  /status  /reset  /quit${carry ? "" : "  /no-context"}`);
+  console.log();
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
@@ -2044,7 +2229,7 @@ async function cmdChat(args: Args): Promise<void> {
     queue.length > 0 ? Promise.resolve(queue.shift()!) : closed ? Promise.resolve(null) : new Promise((res) => { pending = res; });
 
   for (;;) {
-    process.stdout.write("you› ");
+    process.stdout.write(`${blue("›")} `);
     const raw = await nextLine();
     if (raw === null) break; // input drained (Ctrl-D / EOF) or interrupted (Ctrl-C)
     const line = raw.trim();
@@ -2078,16 +2263,37 @@ async function cmdChat(args: Args): Promise<void> {
       continue;
     }
 
-    const goal = carry ? buildChatGoal(line, history) : line;
+    const netCtx = networkId(args) !== DEFAULT_NETWORK ? `network ${networkId(args)}` : undefined;
+    const goal = carry ? buildChatGoal(line, history, netCtx) : line;
+
+    // Cache check: use cached answer for hot queries
+    const cached = getCachedAnswer(line);
+    if (cached) {
+      console.log(`${dim("→")} cached ${yellow(`(${cached.hits} hit${cached.hits === 1 ? "" : "s"})`)}\n`);
+      console.log(`${green("weave›")} ${cached.answer}\n`);
+      speaker.speak(cached.answer);
+      history.push({ q: line, a: cached.answer });
+      continue;
+    }
+
     // Classify on the raw utterance (not the context-carried goal): conversational turns → Haiku,
     // hard asks ("design…", "audit…") escalate to Opus. --no-tier leaves it to the peer's default.
     const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, line);
     turnAbort = new AbortController();
-    const { answer, ok, cancelled } = await chatTurn(weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal);
+    const { answer, ok, cancelled } = await chatTurn(
+      weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal,
+      undefined, line, net // utterance, networkId for learning
+    );
     turnAbort = null;
-    if (cancelled) { console.log(`  (${answer})\n`); continue; } // don't pollute context with a cancel
-    console.log(`${ok ? "weave›" : "weave (failed)›"} ${answer}\n`);
+    if (cancelled) { console.log(`${gray("(cancelled)")} ${answer}\n`); continue; } // don't pollute context with a cancel
+    console.log(`${ok ? green("✓") : red("✗")} ${answer}\n`);
     speaker.speak(answer); // --speak: voice the response (offline, interruptible)
+
+    // Cache successful answers for hot queries
+    if (ok) {
+      cacheAnswer(line, answer);
+    }
+
     history.push({ q: line, a: answer });
   }
 
@@ -2134,83 +2340,114 @@ function usage(): void {
   console.log(`weave — a domain-agnostic cooperative agent harness
 
 usage:
-  weave up        [--db <path>] [--agent <id>] [--model <m>] [--fake]
+  weave up        [--network-id <id>] [--db <path>] [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
                   [--daemon] [--pid-file <path>] [--log-file <path>]
                   start a peer: claim tasks + route them to skills
+                  (--network-id isolates db, reports, .env to .weave/networks/<id>/)
                   (--daemon detaches to the background; logs + pid default next to --db)
                   [--bash [--bash-allow prog1,prog2] [--bash-timeout-ms N]]
                   (--bash grants shell access: denylist always on, blocks rm -rf/sudo/etc.)
                   [--read-only]  (claude-cli backend grants Write/Edit/Glob by default —
                   durable working memory + serialize deliverables to disk; --read-only revokes them)
-  weave pool      [--workers N] [--db <path>] [--model <m>] [--fake] [--concurrency N]
-                  [--daemon] [--pid-file <path>] [--log-file <path>] [--bash ...]
+  weave pool      [--network-id <id>] [--workers N] [--db <path>] [--model <m>] [--fake]
+                  [--concurrency N] [--daemon] [--pid-file <path>] [--log-file <path>] [--bash ...]
                   supervise N lightweight peer processes (default 4) that claim work from
                   the shared weave; restarts crashed workers; stop the pool with weave down
-  weave down      [--db <path>] [--pid-file <path>]   stop a daemonized peer or pool (SIGTERM)
-  weave ps        [--db <path>]   list daemonized peers/pools (pidfiles next to --db) + liveness
-  weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>] [--model m | --no-tier]
+  weave down      [--network-id <id>] [--db <path>] [--pid-file <path>]
+                  stop a daemonized peer or pool (SIGTERM)
+  weave ps        list all daemonized peers/pools across networks + liveness
+  weave task <goal...>   [--network-id <id>] [--skill <name>] [--db <path>] [--id <taskId>]
+                  [--model m | --no-tier]
                   (by default the goal is classified to a model tier — ADR-0022 — Haiku/Sonnet/Opus;
                   --model pins one, --no-tier leaves the choice to the claiming peer's default)
-  weave loop --skill <name> [--interval 6h] [--once] [--notify ch] [goal...]
-                  [--daemon] [--pid-file <path>] [--log-file <path>]
+  weave loop --skill <name> [--network-id <id>] [--interval 6h] [--once] [--notify ch]
+                  [goal...] [--daemon] [--pid-file <path>] [--log-file <path>]
                   re-declare a task routed to <skill> each tick (a skill = a use-case)
                   (--daemon detaches to the background; stop with weave down)
   weave skills    [--skills-dir <dir>] [--claude-skills [--claude-skills-dir <dir>]] [--fake]
                   list code + declarative skills (--claude-skills inherits Claude SKILL.md)
   weave notify <text...> [--to slack,telegram,email] [--title T]
-  weave compact   [--db <path>]   fold settled tasks into a snapshot + prune the log
-  weave report    [--db <path>] [--full]   print completed task results (the actual output)
-  weave index     [--db <path>] [--no-embed]   build the knowledge graph + search index over reports
+  weave compact   [--network-id <id>] [--db <path>]
+                  fold settled tasks into a snapshot + prune the log
+  weave report    [--network-id <id>] [--db <path>] [--full]
+                  print completed task results (the actual output)
+  weave index     [--network-id <id>] [--db <path>] [--no-embed]
+                  build the knowledge graph + search index over reports
                   (graph.json/graph.md + inline forward/backlinks; warms embeddings if configured)
-  weave search    <query...> [--db <path>] [--limit N] [--no-embed]
+  weave search    <query...> [--network-id <id>] [--db <path>] [--limit N] [--no-embed]
                   hybrid (BM25 + optional embeddings) search over accumulated knowledge
-  weave chat      [--db <path>] [--route] [--skill <name>] [--timeout 180s] [--no-context]
-                  [--model m | --no-tier]
+  weave chat      [--network-id <id>] [--db <path>] [--route] [--skill <name>]
+                  [--timeout 180s] [--no-context] [--model m | --no-tier]
                   conversational REPL: each line is answered by the general agent (Ctrl-C cancels a
                   turn), follow-ups keep context; --route picks skills by keyword, --skill X pins one.
                   by default each turn is tiered by complexity (chat → Haiku, hard asks → Opus).
                   thin client — start a peer with 'weave up' to do the work
-  weave status    [--db <path>]
-  weave log       [--db <path>] [--follow]
+  weave voice     [--network-id <id>] [--netops] [options]
+                  voice REPL: wake word + whisper STT → routed weave turn → TTS answer
+                  (macOS-only: requires whisper.cpp model; see README for setup)
+  weave status    [--network-id <id>] [--db <path>]
+  weave log       [--network-id <id>] [--db <path>] [--follow]
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
   weave help
 
+Network isolation:
+  --network-id <id> isolates each network to .weave/networks/<id>/{weave.db,.env,reports/}.
+  Each network gets its own event log, knowledge bundle, and environment (e.g., FORWARD_*).
+  Omit --network-id (or use "default") for .weave/ (backward compatible).
+
 Domain use-cases are SKILLS, not harness code: drop a .ts (code skill) or .md (declarative
-agent skill: prompt + tools) into .weave/skills/. default db: ${DEFAULT_DB}`);
+agent skill: prompt + tools) into .weave/skills/. default db: .weave/weave.db`);
 }
 
-/** Load `.env` (cwd, walking up) into process.env WITHOUT overriding existing shell vars — so
+/** Load `.env` from a specific path into process.env WITHOUT overriding existing shell vars — so
  *  `weave` picks up ANTHROPIC_API_KEY / FORWARD_* from the project `.env` like the python skills do.
  *  Stdlib only (no dotenv dependency). Shell env always wins.
  *
  *  Security: consume ONLY an explicit allow-list of keys, so a stray/hostile `.env` (e.g. in a
  *  shared parent directory the walk reaches) cannot inject process-altering vars like NODE_OPTIONS,
- *  LD_PRELOAD, PATH, CLAUDE_PLUGIN_ROOT, or WEAVE_PID_FILE. The loaded path is logged to stderr. */
-function loadDotenv(): void {
+ *  LD_PRELOAD, PATH, CLAUDE_PLUGIN_ROOT, or WEAVE_PID_FILE. Returns number of vars loaded. */
+function loadDotenvFile(path: string): number {
   const allowed = (k: string): boolean =>
     k === "ANTHROPIC_API_KEY" || k === "OPENAI_API_KEY" ||
     k === "WEAVE_EMBED_KEY" || k === "WEAVE_EMBED_URL" || k === "WEAVE_EMBED_MODEL" ||
     k.startsWith("FORWARD_"); // Forward API creds (FORWARD_API_BASE_URL/KEY/SECRET/CA_BUNDLE/…)
+  let loaded = 0;
+  try {
+    for (const raw of readFileSync(path, "utf8").split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+      const k = m?.[1];
+      if (!k || !allowed(k)) continue; // ignore anything not on the allow-list
+      let v = (m[2] ?? "").trim();
+      if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) v = v.slice(1, -1);
+      if (process.env[k] === undefined) { process.env[k] = v; loaded++; }
+    }
+  } catch { return 0; /* unreadable .env — ignore */ }
+  return loaded;
+}
+
+/** Load `.env` files in priority order: network-specific → cwd (walking up).
+ *  Network-specific .env is at `.weave/networks/<id>/.env` for non-default networks.
+ *  Always loads from cwd .env as fallback for shared config. */
+function loadDotenv(networkId: string): void {
+  // Load network-specific .env first (for non-default networks)
+  if (networkId !== DEFAULT_NETWORK) {
+    const networkEnv = join(networkRoot(networkId), ".env");
+    if (existsSync(networkEnv)) {
+      const loaded = loadDotenvFile(networkEnv);
+      if (loaded > 0) process.stderr.write(`weave: loaded ${loaded} var(s) from ${networkEnv} (network: ${networkId})\n`);
+    }
+  }
+  // Load from cwd .env as fallback (shared config, wins if already set by network .env)
   let dir = process.cwd();
   for (let i = 0; i < 8; i++) {
     const f = join(dir, ".env");
     if (existsSync(f)) {
-      let loaded = 0;
-      try {
-        for (const raw of readFileSync(f, "utf8").split("\n")) {
-          const line = raw.trim();
-          if (!line || line.startsWith("#")) continue;
-          const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-          const k = m?.[1];
-          if (!k || !allowed(k)) continue; // ignore anything not on the allow-list
-          let v = (m[2] ?? "").trim();
-          if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) v = v.slice(1, -1);
-          if (process.env[k] === undefined) { process.env[k] = v; loaded++; }
-        }
-      } catch { return; /* unreadable .env — ignore */ }
-      if (loaded > 0) process.stderr.write(`weave: loaded ${loaded} allow-listed var(s) from ${f}\n`);
-      return;
+      const loaded = loadDotenvFile(f);
+      if (loaded > 0) process.stderr.write(`weave: loaded ${loaded} var(s) from ${f}\n`);
+      break;
     }
     const parent = dirname(dir);
     if (parent === dir) break;
@@ -2219,9 +2456,10 @@ function loadDotenv(): void {
 }
 
 async function main(): Promise<void> {
-  loadDotenv(); // pick up ANTHROPIC_API_KEY / FORWARD_* from .env before backend/skill selection
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
+  const net = networkId(args);
+  loadDotenv(net); // pick up ANTHROPIC_API_KEY / FORWARD_* from .env (network-specific first) before backend/skill selection
   switch (cmd) {
     case "up":
       return cmdUp(args);

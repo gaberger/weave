@@ -30,6 +30,10 @@ export const TaskKind = {
    *  never re-claimed, and observed by the holding peer to abort its running worker (ADR-0002 §3). */
   Cancel: "task.cancel",
   ToolInvoked: "tool.invoked",
+  /** Learning: a user question was asked (for self-learning analytics). */
+  QuestionAsked: "learning.question.asked",
+  /** Learning: a user question was resolved (for self-learning analytics). */
+  QuestionResolved: "learning.question.resolved",
 } as const;
 
 export type TaskKindValue = (typeof TaskKind)[keyof typeof TaskKind];
@@ -57,4 +61,20 @@ export interface ReleasePayload {
 export interface CancelPayload {
   /** Why it was cancelled (e.g. "user-stop") — for logs/audit; doesn't affect the protocol. */
   readonly reason?: string;
+}
+
+/** Learning analytics: track user questions and outcomes. */
+export interface QuestionAskedPayload {
+  readonly utterance: string;
+  readonly intent: string;
+  readonly networkId: string;
+  readonly persona: string;
+}
+
+export interface QuestionResolvedPayload {
+  readonly questionId: string;
+  readonly durationMs: number;
+  readonly followUps: number;
+  readonly resolved: boolean;
+  readonly skill: string;
 }
