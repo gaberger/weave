@@ -7,7 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { spawnSync, spawn } from "node:child_process";
@@ -28,18 +28,22 @@ const colors = {
   white: "\x1b[97m",
 };
 
-// Color utility functions
-const dim = (s: string): string => `${colors.dim}${s}${colors.reset}`;
-const bold = (s: string): string => `${colors.bold}${s}${colors.reset}`;
-const green = (s: string): string => `${colors.green}${s}${colors.reset}`;
-const red = (s: string): string => `${colors.red}${s}${colors.reset}`;
-const yellow = (s: string): string => `${colors.yellow}${s}${colors.reset}`;
-const blue = (s: string): string => `${colors.blue}${s}${colors.reset}`;
-const cyan = (s: string): string => `${colors.cyan}${s}${colors.reset}`;
-const gray = (s: string): string => `${colors.gray}${s}${colors.reset}`;
+// Color is gated on TTY + NO_COLOR (https://no-color.org) so ANSI escapes never leak into pipes,
+// redirects, or daemon log files (the operator's main inspection surface). `--no-color` forces it
+// off via setColorEnabled() in main(); a non-TTY stdout (piped/daemon) disables it automatically.
+let colorEnabled = process.stdout.isTTY === true && !process.env["NO_COLOR"];
+const setColorEnabled = (on: boolean): void => { colorEnabled = on; };
+const paint = (code: string, s: string): string => (colorEnabled ? `${code}${s}${colors.reset}` : s);
 
-// Check if stdout supports colors (TTY)
-const supportsColor = process.stdout.isTTY;
+// Color utility functions
+const dim = (s: string): string => paint(colors.dim, s);
+const bold = (s: string): string => paint(colors.bold, s);
+const green = (s: string): string => paint(colors.green, s);
+const red = (s: string): string => paint(colors.red, s);
+const yellow = (s: string): string => paint(colors.yellow, s);
+const blue = (s: string): string => paint(colors.blue, s);
+const cyan = (s: string): string => paint(colors.cyan, s);
+const gray = (s: string): string => paint(colors.gray, s);
 
 import type { Substrate } from "./ports/substrate.js";
 import type { Worker } from "./ports/worker.js";
@@ -82,6 +86,34 @@ import type { ToolDefinition } from "./ports/tool-host.js";
 const DEFAULT_DB = ".weave/weave.db";
 const DEFAULT_NETWORK = "default";
 
+/** True when `root` is the weave engine source tree (package.json name === "weave" + src/cli.ts).
+ *  Weave operates *inside a project*; rooting a workspace at the engine repo would point the agent's
+ *  file tools (read/grep/edit, cli.ts:531-533) and all runtime state (.weave/) at framework source —
+ *  letting a worker rewrite the harness it runs on. This is the only directory that satisfies both. */
+function isEngineRepo(root: string): boolean {
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { name?: string };
+    return pkg.name === "weave" && existsSync(join(root, "src", "cli.ts"));
+  } catch {
+    return false; // no/unreadable package.json — not the engine repo
+  }
+}
+
+/** Resolve the workspace root — where weave reads/writes ALL project state (.weave/ db+reports+memory)
+ *  and roots its file tools. Override cwd with `--workspace <dir>` or WEAVE_HOME. Refuses the engine
+ *  repo (ADR-0016: the harness is domain-agnostic; a project must not live inside it). */
+function resolveWorkspace(args: Args): string {
+  const root = resolve(str(args, "workspace", process.env.WEAVE_HOME ?? process.cwd()));
+  if (isEngineRepo(root)) {
+    throw new Error(
+      `refusing to use the weave engine repo as a workspace:\n  ${root}\n` +
+        `weave runs inside a project, not its own source tree. ` +
+        `cd into a project directory (e.g. ~/networks/<name>/) or pass --workspace <dir>.`,
+    );
+  }
+  return root;
+}
+
 /** Network context: each network ID gets its own isolated db, reports, and .env.
  *  Returns the network ID from args or environment, defaulting to "default". */
 function networkId(args: Args): string {
@@ -117,7 +149,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "write", "read-only", "no-embed", "no-context", "route", "no-tier"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "read-only", "no-embed", "no-context", "route", "no-tier", "no-color"]);
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -535,8 +567,23 @@ async function assembleSkills(
   return { skills, registry, backend: llm?.kind ?? "none", errors };
 }
 
-const fmt = (e: SealedEvent): string =>
-  `#${String(e.seq).padStart(4)} ${e.kind.padEnd(15)} ${e.actor.padEnd(12)} ${e.subject}`;
+/** Human-readable backend label. `backend === "none"` has two very different meanings — an
+ *  intentional offline run (`--fake`) vs. no LLM found at all — and conflating them as "none"
+ *  hides a costly first-run trap (the echo worker reports success for a no-op). Split them. */
+const llmLabel = (backend: string, fake: boolean): string =>
+  backend !== "none"
+    ? backend
+    : fake
+      ? "echo (offline — --fake, no LLM)"
+      : "echo (offline — NO BACKEND found; set ANTHROPIC_API_KEY or install the claude CLI)";
+
+const fmt = (e: SealedEvent): string => {
+  const base = `#${String(e.seq).padStart(4)} ${e.kind.padEnd(15)} ${e.actor.padEnd(12)} ${e.subject}`;
+  // Surface progress notes in the live feed (up/log) — otherwise the feed shows *that* a worker made
+  // progress but never *what* it did, dropping the most useful payload in a long-running turn.
+  const note = (e.payload as Partial<ProgressPayload> | undefined)?.note;
+  return e.kind === TaskKind.Progress && note ? `${base} — ${note}` : base;
+};
 
 async function readAll(weave: Substrate): Promise<SealedEvent[]> {
   const out: SealedEvent[] = [];
@@ -667,8 +714,13 @@ async function cmdUp(args: Args): Promise<void> {
   const netBadge = net !== DEFAULT_NETWORK ? ` ${cyan(`[${net}]`)}` : "";
   console.log(`${green("✓")} peer "${agentId}" running${netBadge}`);
   console.log(`  ${gray("db:")}    ${dbPathFor(net, args.flags.get("db") as string | undefined)}`);
-  console.log(`  ${gray("llm:")}   ${backend}`);
+  console.log(`  ${gray("llm:")}   ${llmLabel(backend, has(args, "fake"))}`);
   console.log(`  ${gray("skills:")} ${skills.map((s) => s.name).join(", ")}\n`);
+  // Loud about the silent no-op: with no real backend (and no --fake) every task is echoed, not run.
+  if (backend === "none" && !has(args, "fake")) {
+    console.error(yellow("weave: no LLM backend — tasks will be ECHOED, not actually run."));
+    console.error(yellow("  → set ANTHROPIC_API_KEY, install Claude Code (`claude` on PATH), or pass --fake to acknowledge offline mode."));
+  }
   weave.subscribe(0, (e) => console.log(fmt(e)));
 
   const ac = new AbortController();
@@ -923,6 +975,14 @@ async function cmdTask(args: Args): Promise<void> {
   if (!has(args, "no-tier")) spec.model = modelForGoal(args, goal); // ADR-0022: route by complexity
   await declareTask(weave, () => randomUUID(), "cli", taskId, spec);
   console.log(`weave: declared ${taskId}${spec.skill ? ` [skill:${spec.skill}]` : ""}${spec.model ? ` [model:${spec.model}]` : ""} — ${goal}`);
+  // A declared task sits `free` forever until a peer claims it. If none is running for this network,
+  // the task silently does nothing — so nudge the user toward starting one (mirrors the daemon hints).
+  const pf = pidFileFor(args);
+  const peerAlive = existsSync(pf) && pidLiveness(Number(readFileSync(pf, "utf8").trim())) === "alive";
+  if (!peerAlive) {
+    const netArg = has(args, "network-id") ? ` --network-id ${networkId(args)}` : "";
+    console.log(gray(`  → no peer running for this network; start one:  weave up${netArg}  (add --fake to run offline)`));
+  }
   weave.close();
 }
 
@@ -1028,7 +1088,7 @@ async function cmdSkills(args: Args): Promise<void> {
     model: str(args, "model", "claude-sonnet-4-6"),
   });
   for (const e of errors) console.error(`  ! ${e.file}: ${e.error}`);
-  console.log(`weave skills (${skills.length}) [llm: ${backend}] — from .weave/skills/ + built-in:`);
+  console.log(`weave skills (${skills.length}) [llm: ${llmLabel(backend, has(args, "fake"))}] — from .weave/skills/ + built-in:`);
   for (const s of skills) {
     const tools = (s.tools ?? []).map((t) => t.name).join(", ");
     console.log(`  ${s.name.padEnd(14)} ${s.description}${tools ? `  [tools: ${tools}]` : ""}`);
@@ -2339,6 +2399,18 @@ async function cmdLog(args: Args): Promise<void> {
 function usage(): void {
   console.log(`weave — a domain-agnostic cooperative agent harness
 
+concepts:
+  peer     an autonomous worker that claims tasks and routes them to skills (weave up)
+  task     a unit of work declared into the shared log; claimed exactly once by one peer
+  skill    a use-case (a prompt+tools, or code) dropped into .weave/skills/ — what a task runs
+  the log  the shared event log every peer reads/writes; coordination happens here, not via a boss
+
+quickstart:
+  npm install                       # once
+  weave up --fake                   # start a peer (offline, no API key) — leave it running
+  weave task "summarize the README" # in another terminal: declare work
+  weave status                      # watch it go free → held → done   (weave report = the output)
+
 usage:
   weave up        [--network-id <id>] [--db <path>] [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
@@ -2361,9 +2433,11 @@ usage:
                   [--model m | --no-tier]
                   (by default the goal is classified to a model tier — ADR-0022 — Haiku/Sonnet/Opus;
                   --model pins one, --no-tier leaves the choice to the claiming peer's default)
-  weave loop --skill <name> [--network-id <id>] [--interval 6h] [--once] [--notify ch]
-                  [goal...] [--daemon] [--pid-file <path>] [--log-file <path>]
+  weave loop --skill <name> [--network-id <id>] [--interval 6h] [--once]
+                  [--notify [--to slack,telegram,email]] [goal...]
+                  [--daemon] [--pid-file <path>] [--log-file <path>]
                   re-declare a task routed to <skill> each tick (a skill = a use-case)
+                  (--notify alerts on completed results; pick channels with --to, same as 'weave notify')
                   (--daemon detaches to the background; stop with weave down)
   weave skills    [--skills-dir <dir>] [--claude-skills [--claude-skills-dir <dir>]] [--fake]
                   list code + declarative skills (--claude-skills inherits Claude SKILL.md)
@@ -2379,17 +2453,26 @@ usage:
                   hybrid (BM25 + optional embeddings) search over accumulated knowledge
   weave chat      [--network-id <id>] [--db <path>] [--route] [--skill <name>]
                   [--timeout 180s] [--no-context] [--model m | --no-tier]
+                  [--netops | --persona <name>] [--speak]
                   conversational REPL: each line is answered by the general agent (Ctrl-C cancels a
                   turn), follow-ups keep context; --route picks skills by keyword, --skill X pins one.
+                  --netops grounds the agent in the vendored Forward NetOps skills; --persona <name>
+                  sets a custom system prompt; --speak reads answers aloud (macOS 'say').
                   by default each turn is tiered by complexity (chat → Haiku, hard asks → Opus).
                   thin client — start a peer with 'weave up' to do the work
   weave voice     [--network-id <id>] [--netops] [options]
                   voice REPL: wake word + whisper STT → routed weave turn → TTS answer
-                  (macOS-only: requires whisper.cpp model; see README for setup)
+                  (macOS-only: requires whisper.cpp model; run 'weave voice --help' / see README for the
+                  full flag set: --whisper-model, --mic, --wake, --no-speak, --timeout, …)
   weave status    [--network-id <id>] [--db <path>]
   weave log       [--network-id <id>] [--db <path>] [--follow]
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
   weave help
+
+Workspace:
+  weave runs *inside a project*. All state (.weave/ db+reports+memory) and the agent's file
+  tools are rooted at the workspace — your cwd, or --workspace <dir> / WEAVE_HOME. weave refuses
+  to use its own engine repo as a workspace, so keep projects in their own dirs (e.g. ~/networks/<name>/).
 
 Network isolation:
   --network-id <id> isolates each network to .weave/networks/<id>/{weave.db,.env,reports/}.
@@ -2458,6 +2541,16 @@ function loadDotenv(networkId: string): void {
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
+  if (has(args, "no-color")) setColorEnabled(false);
+  // Per-command help: `weave <cmd> --help` must print usage, NOT run the command. Without this,
+  // `weave up --help` / `pool --help` / `loop --help` start a daemon instead of showing help.
+  if (cmd !== undefined && !["help", "--help", "-h"].includes(cmd) && has(args, "help")) return usage();
+  // Enter the workspace before anything reads/writes the filesystem (.env, db, reports, file tools).
+  // help/usage need no workspace, so skip the guard for them.
+  if (cmd !== undefined && !["help", "--help", "-h"].includes(cmd)) {
+    const ws = resolveWorkspace(args);
+    if (ws !== process.cwd()) process.chdir(ws);
+  }
   const net = networkId(args);
   loadDotenv(net); // pick up ANTHROPIC_API_KEY / FORWARD_* from .env (network-specific first) before backend/skill selection
   switch (cmd) {
