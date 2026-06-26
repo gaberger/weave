@@ -1,6 +1,7 @@
 # ADR-0004: ToolHost capability & effect model
 
 - **Status:** Accepted
+- **Implementation:** Partial — capability/effect model + grant gate in place; §5 audit (`tool.invoked`) emission deferred to ADR-0005, spec doc absent _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** tools, permissions, security, ports

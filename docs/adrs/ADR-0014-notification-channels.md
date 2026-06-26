@@ -1,6 +1,7 @@
 # ADR-0014: Communication channels (email / Slack / Telegram)
 
 - **Status:** Accepted
+- **Implementation:** Complete — channel.ts, channels.ts, notify-tool.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** channels, notifications, ports, security

@@ -1,6 +1,7 @@
 # ADR-0019: File-I/O tools (read_file / edit_file) — the missing self-maintenance primitive
 
 - **Status:** Accepted
+- **Implementation:** Complete — fs-tools.ts, fs-tools.test.ts, adr-audit-skill.test.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** tools, capability, self-maintenance, skills

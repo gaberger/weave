@@ -1,6 +1,7 @@
 # ADR-0017: Self-authored skills + the execution sandbox (the learning loop)
 
 - **Status:** Accepted
+- **Implementation:** Complete — write-skill-tool.ts, mutable-skill-set.ts, skill.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** self-improvement, skills, sandbox, capability, learning, foundational

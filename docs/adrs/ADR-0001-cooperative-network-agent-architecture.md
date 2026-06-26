@@ -1,6 +1,7 @@
 # ADR-0001: Cooperative-network agent architecture
 
 - **Status:** Proposed
+- **Implementation:** Complete — substrate.ts, in-process-substrate.ts, sqlite-substrate.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** architecture, coordination, foundational

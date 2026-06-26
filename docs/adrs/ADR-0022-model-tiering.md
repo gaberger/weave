@@ -1,6 +1,7 @@
 # ADR-0022: Per-task model tiering
 
 - **Status:** Accepted
+- **Implementation:** Complete — model-tier.ts, model-tier.test.ts, task.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** models, routing, cost, latency, worker, tasks

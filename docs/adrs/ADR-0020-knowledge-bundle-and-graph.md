@@ -1,6 +1,7 @@
 # ADR-0020: Durable knowledge bundle (OKF) + knowledge graph
 
 - **Status:** Accepted
+- **Implementation:** Complete — knowledge-graph.ts, knowledge-graph.test.ts, cli.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** memory, knowledge, persistence, graph, okf

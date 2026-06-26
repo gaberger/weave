@@ -1,6 +1,7 @@
 # ADR-0018: Container sandbox — OS-level confinement behind the Worker port
 
 - **Status:** Accepted
+- **Implementation:** Complete — docker-skill-runner.ts, docker-skill-runner.test.ts, Dockerfile _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** sandbox, security, capability, isolation, docker

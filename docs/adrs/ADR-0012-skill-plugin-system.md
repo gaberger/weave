@@ -1,6 +1,7 @@
 # ADR-0012: Skills — the plugin/extension system
 
 - **Status:** Accepted
+- **Implementation:** Complete — skill.ts, skill-router-worker.ts, skill-loader.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** extensibility, plugins, routing, ports, foundational
