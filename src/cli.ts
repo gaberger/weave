@@ -812,7 +812,14 @@ async function cmdUp(args: Args): Promise<void> {
     const pidFile = process.env.WEAVE_PID_FILE;
     if (pidFile) try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
     ac.abort();
-    void peer.stop().then(() => {
+    // peer.stop() drains in-flight workers (each appends Released/Failed so no task is left
+    // "held by <dead agent>" until lease expiry). Bound the wait so a misbehaving worker can't hang
+    // shutdown forever — the use-case stays timer-pure, the wall-clock bound lives here.
+    const drainBound = new Promise<void>((r) => {
+      const t = setTimeout(() => { console.error("weave: drain timed out — closing anyway"); r(); }, 5_000);
+      if (typeof t.unref === "function") t.unref();
+    });
+    void Promise.race([peer.stop(), drainBound]).then(() => {
       weave.close();
       process.exit(0);
     });

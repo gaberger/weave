@@ -162,6 +162,65 @@ test("lease loss mid-task: another peer reclaims and completes", async () => {
   ac.abort();
 });
 
+test("graceful stop drains an in-flight worker: Released lands before stop() resolves", async () => {
+  const clock = new FakeClock(0);
+  const weave = new InProcessSubstrate(clock);
+  let n = 0;
+  const newId = () => `id-${++n}`;
+  const ran: string[] = [];
+
+  // A worker that blocks until its abort signal fires, then reports aborted — i.e. a task still
+  // running when the peer is asked to shut down.
+  const draining = (agentId: string): Worker => ({
+    async run(_a, ctx) {
+      ran.push(agentId);
+      await new Promise<void>((res) => {
+        if (ctx.signal.aborted) return res();
+        ctx.signal.addEventListener("abort", () => res());
+      });
+      return { status: "aborted", summary: "drained on shutdown", reason: "cancelled" };
+    },
+  });
+
+  const peer = createPeer({
+    weave,
+    cfg: { agentId: "agent-a", grant: GRANT, leaseMs: 1000, maxConcurrent: 1, tickMs: 100 },
+    newWorker: () => draining("agent-a"),
+    clock,
+    timer: new ManualTimer(),
+    newId,
+  });
+
+  const ac = new AbortController();
+  void peer.start(ac.signal);
+  await weave.append({
+    id: newId(),
+    kind: TaskKind.Declared,
+    actor: "client",
+    subject: "task-1",
+    payload: { spec: { goal: "long job" } },
+  });
+  await settle();
+  assert.equal(ran.length, 1, "peer started the task");
+  assert.equal(
+    (await collect(weave)).some((e) => e.subject === "task-1" && e.kind === TaskKind.Released),
+    false,
+    "no Released yet while the worker is mid-flight",
+  );
+
+  // The contract under test: stop() must DRAIN — it resolves only after the aborted worker has
+  // appended its Released, so a caller that closes the substrate next won't strand the task as
+  // "held by <dead agent>" until lease expiry.
+  await peer.stop();
+
+  const events = await collect(weave);
+  const released = events.filter(
+    (e) => e.kind === TaskKind.Released && e.subject === "task-1" && e.actor === "agent-a",
+  );
+  assert.equal(released.length, 1, "stop() drained the worker → exactly one Released on the log");
+  assert.equal(currentHolder(events, "task-1", clock.now()), null, "task is no longer held after a graceful stop");
+});
+
 test("task.cancel aborts the running worker and is terminal (no reclaim)", async () => {
   const clock = new FakeClock(0);
   const weave = new InProcessSubstrate(clock);
