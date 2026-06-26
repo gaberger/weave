@@ -6,6 +6,12 @@ cd "$(dirname "$0")/.."
 
 DB="${WEAVE_DEMO_DB:-/tmp/weave-demo/w.db}"
 rm -rf "$(dirname "$DB")"
+mkdir -p "$(dirname "$DB")"
+
+# Run inside a throwaway project dir, NOT the engine repo: weave refuses to use its own source tree
+# as a workspace (the engine-repo guard). Without this, running the demo from source (node+tsx, i.e.
+# no pre-built ./weave binary) aborts with "refusing to use the weave engine repo as a workspace".
+export WEAVE_HOME="$(dirname "$DB")"
 
 # Prefer the compiled binary; fall back to node+tsx.
 if [ -x ./weave ]; then RUN=(./weave); else RUN=(node --import tsx src/cli.ts); fi

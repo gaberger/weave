@@ -35,6 +35,22 @@ npm run weave -- report              # see the actual result
 `ANTHROPIC_API_KEY` or have the `claude` CLI on your PATH, then drop `--fake`. See
 [LLM backends](#llm-backends-api-key-optional).
 
+### Capability demos
+
+Nine demos of the headline capabilities — swarm exactly-once, skill routing, loops, pool resilience,
+compaction, federated convergence, knowledge search, the architecture gate, and Docker sandbox
+isolation. The first eight are offline (no API key); the last needs Docker and skips cleanly without
+it. Each one **asserts its result** and ends in a `PASS` / `FAIL` / `SKIP` verdict, and `run.sh all`
+prints a scorecard (and exits non-zero on any failure):
+
+```bash
+npm run demos            # interactive menu
+npm run demos -- all     # run them all, then print a scorecard
+npm run demos -- 9       # Docker sandbox: --network none isolation, granted tool still works
+```
+
+See [`demos/`](demos/README.md).
+
 ## Principles
 
 1. **Peers, not hierarchy.** No mandatory central coordinator. Agents cooperate through shared state.

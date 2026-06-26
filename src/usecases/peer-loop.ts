@@ -39,6 +39,9 @@ export interface PeerDeps {
 interface ActiveTask {
   readonly lease: LeaseGuard;
   readonly abort: AbortController;
+  /** The in-flight run() promise. stop() awaits these so a graceful shutdown drains active work —
+   *  each aborted worker appends its terminal/Released event before the caller closes the substrate. */
+  run?: Promise<void>;
 }
 
 /**
@@ -55,6 +58,7 @@ export class PeerLoop {
   private subscription?: Subscription;
   private cancelTick?: Cancel;
   private stopping = false;
+  private stopPromise?: Promise<void>; // shared so every stop() caller awaits the SAME drain
   private scheduling = false;
   private pending = false;
   private onStopped?: () => void;
@@ -79,12 +83,24 @@ export class PeerLoop {
     });
   }
 
-  async stop(): Promise<void> {
-    if (this.stopping) return;
+  /** Idempotent: every caller (the abort-signal listener AND an explicit cmdUp shutdown) awaits the
+   *  SAME drain promise, so the substrate isn't closed until in-flight work has released. */
+  stop(): Promise<void> {
+    return (this.stopPromise ??= this.doStop());
+  }
+
+  private async doStop(): Promise<void> {
     this.stopping = true;
     this.cancelTick?.();
     this.subscription?.unsubscribe();
+    // Abort in-flight workers, then WAIT for each run() to append its terminal/Released event before
+    // resolving. Otherwise a Ctrl-C'd task reads "held by <dead agent>" until its lease expires
+    // (ADR-0002) — the abort raced the publishResult append. Workers honor the abort signal; the CLI
+    // wraps this in a wall-clock bound so a misbehaving worker can't hang shutdown (this use-case
+    // stays timer-pure per ADR-0005 §4).
+    const inflight = [...this.active.values()].map((t) => t.run).filter((p): p is Promise<void> => !!p);
     for (const { abort } of this.active.values()) abort.abort();
+    await Promise.allSettled(inflight);
     this.onStopped?.();
   }
 
@@ -173,8 +189,11 @@ export class PeerLoop {
 
     const lease = this.deps.newLease(taskId, claim.seq);
     const abort = new AbortController();
-    this.active.set(taskId, { lease, abort });
-    void this.run(taskId, spec, lease, abort);
+    const entry: ActiveTask = { lease, abort };
+    this.active.set(taskId, entry);
+    // Keep the run() handle so stop() can drain it. run() suspends at its first await before deleting
+    // itself from `active`, so the assignment lands before the entry can be removed.
+    entry.run = this.run(taskId, spec, lease, abort);
   }
 
   private async run(

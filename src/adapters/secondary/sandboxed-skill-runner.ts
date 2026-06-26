@@ -48,20 +48,37 @@ export class SandboxedSkillRunner implements Worker {
       });
     }
 
-    // Worker entry sits beside this module; match its runtime extension (.ts under tsx, .js in
-    // dist) so the same code path works in tests and compiled.
-    const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
+    // Worker entry sits beside this module; match its runtime extension (.ts under tsx, .js in dist).
+    const underTsx = import.meta.url.endsWith(".ts");
+    const ext = underTsx ? ".ts" : ".js";
     const entry = new URL(`./sandboxed-skill-entry${ext}`, import.meta.url);
 
+    // The thread must be able to import the entry. In dist it's a plain .js — load the file directly.
+    // Under tsx (dev/test) the entry is .ts, so the thread needs the TS loader — but `--import tsx` in
+    // the worker's execArgv registers it only on Node 22, not Node 20 (where the loader never reaches a
+    // worker spawned from a test-runner subprocess → `Unknown file extension ".ts"`). The robust path is
+    // to register tsx *inside* the worker via its programmatic API before importing the .ts entry; a
+    // tiny eval bootstrap does exactly that, in-thread, independent of how flags propagate.
+    const bootstrap = `import('tsx/esm/api').then(function (m) { m.register(); return import(${JSON.stringify(entry.href)}); })`;
+
     return new Promise<WorkerResult>((resolve) => {
-      const thread = new ThreadWorker(entry, {
-        workerData: { skillFile, task: assignment },
-        execArgv: process.execArgv, // inherit the tsx loader under test; plain node in dist
-        resourceLimits:
-          this.limits.maxOldGenerationSizeMb !== undefined
-            ? { maxOldGenerationSizeMb: this.limits.maxOldGenerationSizeMb }
-            : undefined,
-      });
+      const thread = underTsx
+        ? new ThreadWorker(bootstrap, {
+            eval: true,
+            workerData: { skillFile, task: assignment },
+            resourceLimits:
+              this.limits.maxOldGenerationSizeMb !== undefined
+                ? { maxOldGenerationSizeMb: this.limits.maxOldGenerationSizeMb }
+                : undefined,
+          })
+        : new ThreadWorker(entry, {
+            workerData: { skillFile, task: assignment },
+            execArgv: process.execArgv,
+            resourceLimits:
+              this.limits.maxOldGenerationSizeMb !== undefined
+                ? { maxOldGenerationSizeMb: this.limits.maxOldGenerationSizeMb }
+                : undefined,
+          });
 
       let settled = false;
       const finish = (result: WorkerResult): void => {
