@@ -22,27 +22,53 @@ DEMOS=(
   "6|Federated — partition → heal → deterministic convergence|06-federated.sh|0"
   "7|Knowledge graph + hybrid search|07-knowledge.sh|0"
   "8|Architecture gate — hex boundaries as a build gate|08-architecture.sh|0"
+  "9|Container sandbox — Docker isolation (needs Docker)|09-sandbox.sh|0"
 )
 
+RESULTS=()   # collected as "id|STATUS|title"; STATUS ∈ PASS/FAIL/SKIP
+
+# Run one demo and record its verdict from the exit code (0 pass / 2 skip / other fail). Each demo
+# ends in pass()/fail()/skip() (see lib.sh), so the launcher never has to guess whether it worked.
 run_one() {
-  local n="$1" entry
+  local n="$1" entry id title script needs_pool status rc=0
   for entry in "${DEMOS[@]}"; do
     IFS='|' read -r id title script needs_pool <<<"$entry"
-    if [ "$id" = "$n" ]; then
-      if [ "$needs_pool" = "1" ] && [ "$POOL_OK" != "1" ]; then
-        note "demo $id needs the compiled ./weave binary (Bun not found to build it) — skipping."
-        return 0
-      fi
-      printf '\n'; hr "demo $id — $title"; printf '\n'
-      bash "$HERE/$script"
-      printf '\n'; ok "demo $id complete"
-      return 0
+    [ "$id" = "$n" ] || continue
+    printf '\n'; hr "demo $id — $title"; printf '\n'
+    if [ "$needs_pool" = "1" ] && [ "$POOL_OK" != "1" ]; then
+      printf '  %s SKIP %s %sneeds the compiled ./weave binary (Bun not found to build it)%s\n' \
+        "$C_SKIP" "$C_RESET" "$C_DIM" "$C_RESET"
+      status="SKIP"
+    else
+      bash "$HERE/$script" || rc=$?
+      case "$rc" in 0) status="PASS";; 2) status="SKIP";; *) status="FAIL";; esac
     fi
+    RESULTS+=("$id|$status|$title")
+    return 0
   done
   note "no demo '$n'"
 }
 
-run_all() { local entry id; for entry in "${DEMOS[@]}"; do IFS='|' read -r id _ _ _ <<<"$entry"; run_one "$id"; done; }
+summary() {
+  printf '\n'; hr "scorecard"
+  local r id status title npass=0 nfail=0 nskip=0 badge
+  for r in "${RESULTS[@]}"; do
+    IFS='|' read -r id status title <<<"$r"
+    case "$status" in
+      PASS) badge="$C_PASS PASS $C_RESET"; npass=$((npass+1));;
+      FAIL) badge="$C_FAIL FAIL $C_RESET"; nfail=$((nfail+1));;
+      *)    badge="$C_SKIP SKIP $C_RESET"; nskip=$((nskip+1));;
+    esac
+    printf '   %s  %s%s)%s %s\n' "$badge" "$C_CYAN" "$id" "$C_RESET" "$title"
+  done
+  printf '\n   %s%s passed%s · %s failed · %s%s skipped%s\n' \
+    "$C_GREEN" "$npass" "$C_RESET" "$nfail" "$C_DIM" "$nskip" "$C_RESET"
+}
+
+# Did anything fail? (drives the exit code for scripting/CI)
+overall() { local r; for r in "${RESULTS[@]}"; do case "$r" in *'|FAIL|'*) return 1;; esac; done; return 0; }
+
+run_all() { RESULTS=(); local entry id; for entry in "${DEMOS[@]}"; do IFS='|' read -r id _ _ _ <<<"$entry"; run_one "$id"; done; summary; }
 
 menu() {
   printf '\n%sweave — capability demos%s  %s(offline, no API key)%s\n\n' "$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET"
@@ -54,10 +80,10 @@ menu() {
   printf '  %sa)%s run all    %sq)%s quit\n\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
 }
 
-# Non-interactive: `run.sh 1` / `run.sh all`
+# Non-interactive: `run.sh 1` / `run.sh all`. Exit non-zero if any demo FAILED (CI-friendly).
 if [ "$#" -ge 1 ]; then
   case "$1" in all|a) run_all ;; *) run_one "$1" ;; esac
-  exit 0
+  overall; exit $?
 fi
 
 # Interactive menu loop.

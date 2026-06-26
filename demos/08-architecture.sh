@@ -11,5 +11,10 @@ cat <<'EOF'
      (inner layers never import outward; adapters import only ports + domain)
 EOF
 printf '\n'; hr "weave doctor — strict (fails on ANY boundary violation)"
-run "${RUN[@]}" doctor | sed 's/^/   /'
-ok "the architecture is verified mechanically — drift can't merge"
+printf '%s$ weave doctor%s\n' "$C_BOLD" "$C_RESET"
+DOUT="$DEMO_TMP/doctor.out"; mkdir -p "$DEMO_TMP"
+if "${RUN[@]}" doctor >"$DOUT" 2>&1; then DOK=1; else DOK=0; fi
+sed 's/^/   /' "$DOUT"
+[ "$DOK" = 1 ] \
+  && pass "architecture verified mechanically — boundary drift can't merge" \
+  || fail "weave doctor reported a boundary violation"

@@ -6,5 +6,9 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 say "two replicated hosts, a network partition, concurrent claims, then a heal:"
 printf '\n'
-node --import tsx "$HERE/federated.mts"
-printf '\n'; ok "partition-tolerant: same code, replicated log, deterministic convergence"
+# federated.mts exits non-zero if the two replicas don't converge to identical state after the heal.
+if node --import tsx "$HERE/federated.mts"; then
+  pass "partition-tolerant: same code, replicated log, deterministic convergence after heal"
+else
+  fail "replicas did not converge after the partition healed"
+fi

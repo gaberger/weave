@@ -23,5 +23,11 @@ sleep 3
 printf '\n'; hr "routing decisions (task.progress notes name the chosen skill)"
 "${RUN[@]}" log | awk '$3=="task.progress"{ $1=$2=$3=$4=""; print "   "$0 }' | sed 's/—/→/'
 printf '\n'; hr "results"
-"${RUN[@]}" report | sed 's/^/   /'
-ok "each task was dispatched to the matching skill — no core changes, just plugins"
+REPORT="$("${RUN[@]}" report)"
+printf '%s\n' "$REPORT" | sed 's/^/   /'
+# Proof of routing: the greeter and calc skills each stamp their name into their result summary.
+if printf '%s' "$REPORT" | grep -qi 'skill: greeter' && printf '%s' "$REPORT" | grep -qi 'skill: calc'; then
+  pass "each task dispatched to its matching skill (greeter + calc fired, echo caught the rest)"
+else
+  fail "expected both greeter and calc to have handled a task"
+fi

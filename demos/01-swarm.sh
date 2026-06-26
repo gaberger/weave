@@ -26,5 +26,7 @@ printf '\n'; hr "task states"
 printf '\n'; hr "work split (completions per peer)"
 "${RUN[@]}" log | awk '$3=="task.completed"{c[$4]++} END{for(p in c) print "   "p": "c[p]}'
 printf '\n'; hr "exactly-once check"
-"${RUN[@]}" log | awk '$3=="task.completed"{n++} END{print "   "n+0" completions for 6 tasks"}'
-ok "every task ran exactly once, split across both peers — no coordinator involved"
+DONE=$("${RUN[@]}" log | awk '$3=="task.completed"{n++} END{print n+0}')
+printf '   %s completions for 6 tasks\n' "$DONE"
+[ "$DONE" -eq 6 ] && pass "all 6 tasks ran exactly once, split across both peers — no coordinator" \
+                  || fail "expected 6 completions, got $DONE"

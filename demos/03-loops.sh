@@ -11,6 +11,10 @@ say "one pass of a loop bound to the 'calc' skill (--once exits when it settles)
 run "${RUN[@]}" loop --skill calc --once "sum 10 20 30 40" 2>&1 | grep -vE '^\s*#|claimed|progress' | sed 's/^/   /'
 
 printf '\n'; hr "result"
-"${RUN[@]}" report | sed 's/^/   /'
+REPORT="$("${RUN[@]}" report)"
+printf '%s\n' "$REPORT" | sed 's/^/   /'
 say "for a real monitor you'd write e.g.:  weave loop --skill monitor --interval 30s \"https://api…\""
-ok "the loop declared → routed → ran → settled, all in one command"
+# calc sums the numbers in the goal: 10 + 20 + 30 + 40 = 100. Its presence proves declare→route→run→settle.
+printf '%s' "$REPORT" | grep -q '= 100' \
+  && pass "the loop declared → routed → ran → settled in one command (calc returned 100)" \
+  || fail "expected the loop's calc result (= 100) in the report"
