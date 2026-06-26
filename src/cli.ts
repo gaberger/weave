@@ -2531,13 +2531,12 @@ concepts:
   the log  the shared event log every peer reads/writes; coordination happens here, not via a boss
 
 quickstart:
-  npm install                       # once
   weave up --fake                   # start a peer (offline, no API key) — leave it running
   weave task "summarize the README" # in another terminal: declare work
   weave status                      # watch it go free → held → done   (weave report = the output)
 
 usage:
-  weave up        [--db <path>] [--agent <id>] [--model <m>] [--fake]
+  weave up        [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
                   [--daemon] [--pid-file <path>] [--log-file <path>]
                   start a peer: claim tasks + route them to skills
@@ -2546,14 +2545,14 @@ usage:
                   (--bash grants shell access: denylist always on, blocks rm -rf/sudo/etc.)
                   [--read-only]  (claude-cli backend grants Write/Edit/Glob by default —
                   durable working memory + serialize deliverables to disk; --read-only revokes them)
-  weave pool      [--workers N] [--db <path>] [--model <m>] [--fake]
+  weave pool      [--workers N] [--model <m>] [--fake]
                   [--concurrency N] [--daemon] [--pid-file <path>] [--log-file <path>] [--bash ...]
                   supervise N lightweight peer processes (default 4) that claim work from
                   the shared weave; restarts crashed workers; stop the pool with weave down
-  weave down      [--db <path>] [--pid-file <path>]
+  weave down      [--pid-file <path>]
                   stop a daemonized peer or pool (SIGTERM)
   weave ps        list all daemonized peers/pools across networks + liveness
-  weave task <goal...>   [--skill <name>] [--db <path>] [--id <taskId>]
+  weave task <goal...>   [--skill <name>] [--id <taskId>]
                   [--model m | --no-tier]
                   (by default the goal is classified to a model tier — ADR-0022 — Haiku/Sonnet/Opus;
                   --model pins one, --no-tier leaves the choice to the claiming peer's default)
@@ -2566,16 +2565,15 @@ usage:
   weave skills    [--skills-dir <dir>] [--claude-skills [--claude-skills-dir <dir>]] [--fake]
                   list code + declarative skills (--claude-skills inherits Claude SKILL.md)
   weave notify <text...> [--to slack,telegram,email] [--title T]
-  weave compact   [--db <path>]
-                  fold settled tasks into a snapshot + prune the log
-  weave report    [--db <path>] [--full]
+  weave compact   fold settled tasks into a snapshot + prune the log
+  weave report    [--full]
                   print completed task results (the actual output)
-  weave index     [--db <path>] [--no-embed]
+  weave index     [--no-embed]
                   build the knowledge graph + search index over reports
                   (graph.json/graph.md + inline forward/backlinks; warms embeddings if configured)
-  weave search    <query...> [--db <path>] [--limit N] [--no-embed]
+  weave search    <query...> [--limit N] [--no-embed]
                   hybrid (BM25 + optional embeddings) search over accumulated knowledge
-  weave chat      [--db <path>] [--route] [--skill <name>]
+  weave chat      [--route] [--skill <name>]
                   [--timeout 180s] [--no-context] [--model m | --no-tier]
                   [--netops | --persona <name>] [--speak]
                   conversational REPL: each line is answered by the general agent (Ctrl-C cancels a
@@ -2588,8 +2586,8 @@ usage:
                   voice REPL: wake word + whisper STT → routed weave turn → TTS answer
                   (macOS-only: requires whisper.cpp model; run 'weave voice --help' / see README for the
                   full flag set: --whisper-model, --mic, --wake, --no-speak, --timeout, …)
-  weave status    [--db <path>]
-  weave log       [--db <path>] [--follow]
+  weave status    show task states (free / held / done)
+  weave log       [--follow]
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
   weave help
 
@@ -2598,14 +2596,14 @@ Workspace:
   tools are rooted at the workspace — your cwd, or --workspace <dir> / WEAVE_HOME. weave refuses
   to use its own engine repo as a workspace, so keep projects in their own dirs (e.g. ~/networks/<name>/).
 
-Network isolation (optional — most users never need it):
-  --network-id <id> isolates a named network to .weave/networks/<id>/{weave.db,.env,reports/} —
-  its own event log, knowledge bundle, and environment (e.g., FORWARD_*). Accepted by every
-  stateful command (up/pool/down/task/loop/compact/report/index/search/chat/voice/status/log);
-  left off the per-command lines above for brevity. Omit it (or use "default") for plain .weave/.
+Common flags (accepted by every stateful command — left off the lines above for brevity):
+  --db <path>        use a specific SQLite event store (default: .weave/weave.db)
+  --network-id <id>  isolate a named network → .weave/networks/<id>/{weave.db,.env,reports/}: its own
+                     log, knowledge bundle, and env (e.g. FORWARD_*); omit (or "default") for plain .weave/.
+  (up/pool/down/task/loop/compact/report/index/search/chat/voice/status/log)
 
 Domain use-cases are SKILLS, not harness code: drop a .ts (code skill) or .md (declarative
-agent skill: prompt + tools) into .weave/skills/. default db: .weave/weave.db`);
+agent skill: prompt + tools) into .weave/skills/.`);
 }
 
 /** Load `.env` from a specific path into process.env WITHOUT overriding existing shell vars — so
