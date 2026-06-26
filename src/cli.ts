@@ -796,6 +796,7 @@ async function cmdUp(args: Args): Promise<void> {
     if (typeof compactTimer.unref === "function") compactTimer.unref();
   }
 
+  let orphanWatch: ReturnType<typeof setInterval> | undefined;
   let shuttingDown = false;
   const shutdown = () => {
     // Second Ctrl-C while a graceful stop is already in flight → force-quit. Otherwise a peer wedged
@@ -808,6 +809,7 @@ async function cmdUp(args: Args): Promise<void> {
     console.log("\nweave: shutting down… (Ctrl-C again to force quit)");
     clearInterval(keepAlive);
     if (compactTimer) clearInterval(compactTimer);
+    if (orphanWatch) clearInterval(orphanWatch);
     // If we were daemonized, remove our own pidfile so it doesn't go stale.
     const pidFile = process.env.WEAVE_PID_FILE;
     if (pidFile) try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
@@ -826,6 +828,23 @@ async function cmdUp(args: Args): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  // Pool child: self-terminate if the supervisor dies. A `pool` worker is a plain `weave up` whose
+  // parent is the supervisor (which sets WEAVE_POOL_PARENT). If the supervisor is SIGKILL'd it can't
+  // SIGTERM its children, so they'd orphan to init (ppid → 1) and keep claiming tasks / holding leases
+  // forever, invisible to `weave ps`/`down`. Watch process.ppid and shut down gracefully on reparent —
+  // the drain above then releases our leases so the work returns to the pool instead of hanging.
+  const poolParent = Number(process.env.WEAVE_POOL_PARENT ?? 0);
+  if (Number.isInteger(poolParent) && poolParent > 0) {
+    orphanWatch = setInterval(() => {
+      if (process.ppid !== poolParent) {
+        console.error("weave: pool supervisor gone — shutting down (orphaned)");
+        shutdown();
+      }
+    }, 1_000);
+    if (typeof orphanWatch.unref === "function") orphanWatch.unref();
+  }
+
   await peer.start(ac.signal);
 }
 
@@ -984,6 +1003,7 @@ async function cmdPool(args: Args): Promise<void> {
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   delete childEnv.WEAVE_DAEMONIZED; // children are managed, not detached
   delete childEnv.WEAVE_PID_FILE; // so a child's shutdown never deletes the pool's pidfile
+  childEnv.WEAVE_POOL_PARENT = String(process.pid); // child self-terminates if this supervisor dies
 
   const upArgs = (agentId: string): string[] => {
     const out = ["up", "--agent", agentId];
