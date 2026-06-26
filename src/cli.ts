@@ -658,9 +658,14 @@ async function assembleSkills(
       }),
     );
   }
-  registry.register(readFileTool(process.cwd())); // read repo files (e.g. ADR auditor)
-  registry.register(grepTool(process.cwd())); // scan/discover refs across the tree (read)
-  registry.register(editFileTool(process.cwd())); // edit repo files — irreversible, grant-gated
+  // --target <dir>: root the file tools at an arbitrary directory to INSPECT it (read-only) without
+  // making it the workspace — so weave can analyze any repo (incl. its own engine) without tripping
+  // the engine-repo guard or needing --bash. Read-only: no edit tool in target mode (least-privilege).
+  const target = str(args, "target", "");
+  const fileRoot = target ? resolve(target) : process.cwd();
+  registry.register(readFileTool(fileRoot)); // read repo files (e.g. ADR auditor); rooted at --target if set
+  registry.register(grepTool(fileRoot)); // scan/discover refs across the tree (read)
+  if (!target) registry.register(editFileTool(process.cwd())); // edit — irreversible, grant-gated; off in read-only --target mode
   registry.register(writeSkillTool(dir)); // self-authoring (ADR-0017) — irreversible, grant-gated
   return { skills, registry, backend: llm?.kind ?? "none", errors };
 }
@@ -680,7 +685,14 @@ const fmt = (e: SealedEvent): string => {
   // Surface progress notes in the live feed (up/log) — otherwise the feed shows *that* a worker made
   // progress but never *what* it did, dropping the most useful payload in a long-running turn.
   const note = (e.payload as Partial<ProgressPayload> | undefined)?.note;
-  return e.kind === TaskKind.Progress && note ? `${base} — ${note}` : base;
+  if (e.kind === TaskKind.Progress && note) return `${base} — ${note}`;
+  // Surface the failure cause in the live feed/peer log — otherwise a failed task shows only
+  // "task.failed" with the real error buried in the event payload (invisible without a db dig).
+  if (e.kind === TaskKind.Failed) {
+    const err = (e.payload as { error?: string } | undefined)?.error;
+    if (err) return `${base} — ${err.split("\n")[0]}`;
+  }
+  return base;
 };
 
 async function readAll(weave: Substrate): Promise<SealedEvent[]> {
@@ -812,7 +824,7 @@ async function cmdUp(args: Args): Promise<void> {
   const net = networkId(args);
   const netBadge = net !== DEFAULT_NETWORK ? ` ${cyan(`[${net}]`)}` : "";
   console.log(`${green("✓")} peer "${agentId}" running${netBadge}`);
-  console.log(`  ${gray("db:")}    ${dbPathFor(net, args.flags.get("db") as string | undefined)}`);
+  console.log(`  ${gray("db:")}    ${resolve(dbPathFor(net, args.flags.get("db") as string | undefined))}`);
   console.log(`  ${gray("llm:")}   ${llmLabel(backend, has(args, "fake"))}`);
   console.log(`  ${gray("skills:")} ${skills.map((s) => s.name).join(", ")}\n`);
   // Loud about the silent no-op: with no real backend (and no --fake) every task is echoed, not run.
@@ -1157,26 +1169,36 @@ async function cmdPool(args: Args): Promise<void> {
 }
 
 async function cmdTask(args: Args): Promise<void> {
-  const goal = args._.join(" ").trim();
-  if (!goal) {
-    console.error('weave task: provide a goal, e.g. weave task "research recent LLM papers"');
+  // --file <path>: declare one task per non-blank, non-comment line (batch fan-out). Else a single
+  // goal from the positional args. `-` reads goals from stdin.
+  const file = str(args, "file", "");
+  const goals: string[] = file
+    ? (file === "-" ? readFileSync(0, "utf8") : readFileSync(file, "utf8"))
+        .split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"))
+    : [args._.join(" ").trim()].filter(Boolean);
+  if (!goals.length) {
+    console.error(file ? `weave task: no goals found in ${file}` : 'weave task: provide a goal, e.g. weave task "research recent LLM papers"');
     process.exitCode = 1;
     return;
   }
   const weave = await openSubstrate(args);
-  const taskId = str(args, "id", `task-${randomUUID().slice(0, 8)}`);
-  const spec: { goal: string; skill?: string; model?: string } = { goal };
-  if (has(args, "skill")) spec.skill = str(args, "skill", "");
-  if (!has(args, "no-tier")) spec.model = modelForGoal(args, goal); // ADR-0022: route by complexity
-  await declareTask(weave, () => randomUUID(), "cli", taskId, spec);
-  console.log(`weave: declared ${taskId}${spec.skill ? ` [skill:${spec.skill}]` : ""}${spec.model ? ` [model:${spec.model}]` : ""} — ${goal}`);
-  // A declared task sits `free` forever until a peer claims it. If none is running for this network,
-  // the task silently does nothing — so nudge the user toward starting one (mirrors the daemon hints).
+  const single = goals.length === 1;
+  for (const goal of goals) {
+    const taskId = single ? str(args, "id", `task-${randomUUID().slice(0, 8)}`) : `task-${randomUUID().slice(0, 8)}`;
+    const spec: { goal: string; skill?: string; model?: string } = { goal };
+    if (has(args, "skill")) spec.skill = str(args, "skill", "");
+    if (!has(args, "no-tier")) spec.model = modelForGoal(args, goal); // ADR-0022: route by complexity
+    await declareTask(weave, () => randomUUID(), "cli", taskId, spec);
+    console.log(`weave: declared ${taskId}${spec.skill ? ` [skill:${spec.skill}]` : ""}${spec.model ? ` [model:${spec.model}]` : ""} — ${goal}`);
+  }
+  if (!single) console.log(gray(`  → ${goals.length} tasks declared`));
+  // A declared task sits `free` until a peer claims it. We can only detect *daemonized* peers (those
+  // with a pidfile) — a foreground `weave up` won't show here — so phrase the hint accordingly.
   const pf = pidFileFor(args);
   const peerAlive = existsSync(pf) && pidLiveness(Number(readFileSync(pf, "utf8").trim())) === "alive";
   if (!peerAlive) {
     const netArg = has(args, "network-id") ? ` --network-id ${networkId(args)}` : "";
-    console.log(gray(`  → no peer running for this network; start one:  weave up${netArg}  (add --fake to run offline)`));
+    console.log(gray(`  → no background peer detected; if one isn't already running:  weave up${netArg}  (add --fake to run offline)`));
   }
   weave.close();
 }
@@ -1353,6 +1375,18 @@ async function cmdReport(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   const events = await readAll(weave);
   const full = has(args, "full");
+  // --json: machine-readable results from the live log (subject, actor, status, summary, error).
+  if (has(args, "json")) {
+    const rows = events
+      .filter((e) => e.kind === TaskKind.Completed || e.kind === TaskKind.Failed)
+      .map((e) => {
+        const p = e.payload as { summary?: string; error?: string };
+        return { taskId: e.subject, actor: e.actor, status: e.kind === TaskKind.Failed ? "failed" : "completed", summary: p.summary ?? "", error: p.error ?? null };
+      });
+    console.log(JSON.stringify(rows, null, 2));
+    weave.close();
+    return;
+  }
   const print = (header: string, text: string): void => {
     console.log(`\n${header}`);
     console.log(full || text.length <= 800 ? text : `${text.slice(0, 800)}\n  …(${text.length} chars; --full for all)`);
@@ -1362,8 +1396,13 @@ async function cmdReport(args: Args): Promise<void> {
   for (const e of events) {
     if (e.kind !== TaskKind.Completed && e.kind !== TaskKind.Failed) continue;
     const p = e.payload as { summary?: string; error?: string };
-    const text = (p.summary ?? p.error ?? "").trim();
+    let text = (p.summary ?? p.error ?? "").trim();
     if (!text) continue;
+    // Surface the real failure cause: a failed task's summary is often generic ("claude worker
+    // errored") while the actual error lives in payload.error — show both (it was invisible before).
+    if (e.kind === TaskKind.Failed && p.error && p.error.trim() && p.error.trim() !== text) {
+      text += `\n  ${red("error:")} ${p.error.trim()}`;
+    }
     shown += 1;
     seen.add(e.subject);
     print(`${e.kind === TaskKind.Failed ? "✗" : "✓"} ${e.subject} (${e.actor})`, text);
@@ -2635,10 +2674,11 @@ usage:
                   stop a daemonized peer or pool (SIGTERM)
   weave ps        list all daemonized peers/pools across networks + liveness
   weave networks  list every network under the home (running + idle) + db/report summary
-  weave task <goal...>   [--skill <name>] [--id <taskId>]
+  weave task <goal...>   [--skill <name>] [--id <taskId>] [--file <path>|-]
                   [--model m | --no-tier]
                   (by default the goal is classified to a model tier — ADR-0022 — Haiku/Sonnet/Opus;
                   --model pins one, --no-tier leaves the choice to the claiming peer's default)
+                  (--file declares one task per line — '-' for stdin — for batch fan-out)
   weave loop --skill <name> [--interval 6h] [--once]
                   [--notify [--to slack,telegram,email]] [goal...]
                   [--daemon] [--pid-file <path>] [--log-file <path>]
@@ -2649,8 +2689,9 @@ usage:
                   list code + declarative skills (--claude-skills inherits Claude SKILL.md)
   weave notify <text...> [--to slack,telegram,email] [--title T]
   weave compact   fold settled tasks into a snapshot + prune the log
-  weave report    [--full]
-                  print completed task results (the actual output)
+  weave report    [--full] [--json]
+                  print completed task results — with the failure cause for errored tasks
+                  (--json emits machine-readable {taskId,actor,status,summary,error})
   weave index     [--no-embed]
                   build the knowledge graph + search index over reports
                   (graph.json/graph.md + inline forward/backlinks; warms embeddings if configured)
@@ -2684,6 +2725,8 @@ Common flags (accepted by every stateful command — left off the lines above fo
   --network-id <id>  isolate a named network → <home>/networks/<id>/{weave.db,.env,reports/}: its own
                      log, knowledge bundle, and env (e.g. FORWARD_*); omit (or "default") for the home root.
   --workspace <dir>  the weave home for this run (default ~/.weave, or WEAVE_HOME) — see Weave home above
+  --target <dir>     root the agent's read/grep file tools at <dir> to INSPECT it read-only, without
+                     making it the workspace (analyze any repo, incl. the engine, no guard trip/--bash)
   (up/pool/down/task/loop/compact/report/index/search/chat/voice/status/log)
 
 Packs (domain grounding):

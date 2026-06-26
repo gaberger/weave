@@ -1,6 +1,7 @@
 # ADR-0015: Enforce hexagonal architecture
 
 - **Status:** Accepted
+- **Implementation:** Complete — architecture.ts, source-scan.ts, architecture.test.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** architecture, enforcement, ci, tooling

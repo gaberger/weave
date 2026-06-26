@@ -1,6 +1,7 @@
 # ADR-0016: weave is a domain-agnostic harness; use-cases are skills
 
 - **Status:** Accepted
+- **Implementation:** Complete — agent-skill.ts, pack.ts, builtin-skills.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** architecture, harness, skills, foundational

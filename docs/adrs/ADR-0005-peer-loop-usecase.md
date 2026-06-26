@@ -1,6 +1,7 @@
 # ADR-0005: The peer loop (agent runtime use-case)
 
 - **Status:** Accepted
+- **Implementation:** Complete — peer-loop.ts, peer-loop.live.test.ts, composition-root.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** usecases, runtime, coordination

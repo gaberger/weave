@@ -1,6 +1,7 @@
 # ADR-0008: First-class loops + task fan-out (handoff-as-tool-call)
 
 - **Status:** Accepted
+- **Implementation:** Partial — first-class loops + task fan-out in place; §4 arXiv agent moved to example plugins by ADR-0016 _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** loop, scheduler, fan-out, handoff, skills, research-agent

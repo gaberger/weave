@@ -1,6 +1,7 @@
 # ADR-0003: Worker port & Claude Agent SDK adapter
 
 - **Status:** Accepted
+- **Implementation:** Complete — worker.ts, lease.ts, claude-agent-sdk-worker.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** workers, claude, lifecycle, ports

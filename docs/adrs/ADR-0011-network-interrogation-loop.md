@@ -1,6 +1,7 @@
 # ADR-0011: Recurring network interrogation
 
 - **Status:** Superseded by 0016
+- **Implementation:** Superseded by ADR-0016 (domain probe loop removed from core) _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** interrogation, tools, scheduler, usecase

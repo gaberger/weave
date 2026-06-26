@@ -1,6 +1,7 @@
 # ADR-0009: NetworkedSubstrate — replicated log with HLC ordering
 
 - **Status:** Accepted
+- **Implementation:** Complete — hlc.ts, event.ts, claim.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** substrate, distributed, consistency, foundational

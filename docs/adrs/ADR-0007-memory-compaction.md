@@ -1,6 +1,7 @@
 # ADR-0007: Memory — log compaction via snapshot events
 
 - **Status:** Accepted
+- **Implementation:** Complete — snapshot.ts, compaction.ts, compaction.test.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-20
 - **Deciders:** project owner
 - **Tags:** memory, compaction, context-reduction, scalability

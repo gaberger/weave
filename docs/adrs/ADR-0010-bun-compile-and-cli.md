@@ -1,6 +1,7 @@
 # ADR-0010: Bun as compile target + the `weave` CLI
 
 - **Status:** Accepted
+- **Implementation:** Complete — cli.ts, bun-sqlite-substrate.ts, bun-sqlite-substrate.bun-test.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** tooling, cli, distribution, primary-adapter

@@ -1,6 +1,7 @@
 # ADR-0021: Hybrid knowledge search + the recall tool
 
 - **Status:** Accepted
+- **Implementation:** Complete — search.ts, search.test.ts, embedder.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** search, retrieval, embeddings, tools, knowledge

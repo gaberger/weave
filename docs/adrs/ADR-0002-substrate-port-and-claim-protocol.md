@@ -1,6 +1,7 @@
 # ADR-0002: Substrate port & claim/lease protocol
 
 - **Status:** Accepted
+- **Implementation:** Complete — event.ts, substrate.ts, claim.ts _(self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-19
 - **Deciders:** project owner
 - **Tags:** coordination, consistency, ports, foundational
