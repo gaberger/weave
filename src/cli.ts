@@ -7,7 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { spawnSync, spawn } from "node:child_process";
@@ -73,8 +73,9 @@ import { readFileTool, editFileTool, grepTool } from "./adapters/secondary/fs-to
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
-import { echoSkill, claudeSkill, netopsAgentSkill, personaAgentSkill, VOICE_SUMMARY_SYSTEM } from "./composition/builtin-skills.js";
+import { echoSkill, claudeSkill, personaAgentSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
 import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
+import { loadPack, loadPackFile, globToRegExp, type Pack } from "./composition/pack.js";
 import { notifyTool } from "./composition/notify-tool.js";
 import { buildGraph, neighbours, type GraphEdge, type KnowledgeGraph, type ReportInput } from "./domain/knowledge-graph.js";
 import { buildBm25, bm25Search, hybridRank, cosine, type Scored } from "./domain/search.js";
@@ -83,7 +84,6 @@ import { localEmbedder } from "./adapters/secondary/local-embedder.js";
 import type { Embedder } from "./ports/embedder.js";
 import type { ToolDefinition } from "./ports/tool-host.js";
 
-const DEFAULT_DB = ".weave/weave.db";
 const DEFAULT_NETWORK = "default";
 
 /** True when `root` is the weave engine source tree (package.json name === "weave" + src/cli.ts).
@@ -99,19 +99,34 @@ function isEngineRepo(root: string): boolean {
   }
 }
 
-/** Resolve the workspace root — where weave reads/writes ALL project state (.weave/ db+reports+memory)
- *  and roots its file tools. Override cwd with `--workspace <dir>` or WEAVE_HOME. Refuses the engine
- *  repo (ADR-0016: the harness is domain-agnostic; a project must not live inside it). */
+/** The weave home: the workspace root weave reads/writes ALL state under (db, reports, memory) and
+ *  roots its file tools at. Networks nest beneath it as `networks/<id>/` (ADR: --network-id isolation).
+ *  Default `~/.weave` so bare `weave` never pollutes cwd; override with `--workspace <dir>` or WEAVE_HOME. */
+const DEFAULT_HOME = join(homedir(), ".weave");
+
+/** Resolve and validate the weave home for this run. Precedence: --workspace → WEAVE_HOME → ~/.weave.
+ *  Refuses the engine repo (ADR-0016: the harness is domain-agnostic; a project must not live inside it).
+ *  Auto-creates the home unless it was given explicitly via --workspace (where a typo should fail loudly). */
 function resolveWorkspace(args: Args): string {
-  const root = resolve(str(args, "workspace", process.env.WEAVE_HOME ?? process.cwd()));
+  const flag = str(args, "workspace", "");
+  const root = resolve(flag || process.env.WEAVE_HOME || DEFAULT_HOME);
   if (isEngineRepo(root)) {
     throw new Error(
       `refusing to use the weave engine repo as a workspace:\n  ${root}\n` +
         `weave runs inside a project, not its own source tree. ` +
-        `cd into a project directory (e.g. ~/networks/<name>/) or pass --workspace <dir>.`,
+        `pass --workspace <dir> or set WEAVE_HOME (default: ~/.weave).`,
     );
   }
+  if (flag && !existsSync(root)) throw new Error(`--workspace not found: ${root}`);
+  if (!flag && !existsSync(root)) mkdirSync(root, { recursive: true }); // first run: create the home
   return root;
+}
+
+/** The on-disk state dir within the active home. Normally `.weave/`, but when the home is itself named
+ *  `.weave` (the default ~/.weave), state lives directly in it — no redundant `.weave/.weave/` nesting.
+ *  Derived from cwd because we chdir into the home at startup (main). */
+function stateRoot(): string {
+  return basename(process.cwd()) === ".weave" ? "." : ".weave";
 }
 
 /** Network context: each network ID gets its own isolated db, reports, and .env.
@@ -120,9 +135,11 @@ function networkId(args: Args): string {
   return str(args, "network-id", process.env.WEAVE_NETWORK_ID ?? DEFAULT_NETWORK);
 }
 
-/** Resolve the .weave root for a network: .weave/networks/<id>/ or .weave/ for default. */
+/** Resolve the state root for a network: <stateRoot>/networks/<id>/ or <stateRoot>/ for default.
+ *  In the ~/.weave home, stateRoot is "." so this yields networks/<id>/ and the home itself. */
 function networkRoot(network: string): string {
-  return network === DEFAULT_NETWORK ? ".weave" : join(".weave", "networks", network);
+  const base = stateRoot();
+  return network === DEFAULT_NETWORK ? base : join(base, "networks", network);
 }
 
 /** Resolve the db path for a network: <network-root>/weave.db. */
@@ -465,8 +482,9 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
     // it discover existing files (e.g. nqe/*.nqe). `--read-only` opts back out for untrusted goals.
     const allowedTools = ["WebFetch", "WebSearch", "Read"];
     if (!has(args, "read-only")) allowedTools.push("Write", "Edit", "Glob");
-    // NetOps preset needs Bash — every forward-* skill runs `python3 .../scripts/*.py`.
-    if (has(args, "netops") || str(args, "persona", "") === "netops") allowedTools.push("Bash");
+    // A selected pack may declare extra capability grants (e.g. the netops pack needs Bash because
+    // every forward-* skill runs `python3 .../scripts/*.py`). Generic — driven by pack data.
+    for (const tool of selectedPack(args)?.tools ?? []) if (!allowedTools.includes(tool)) allowedTools.push(tool);
     return {
       kind: "claude-cli",
       make: (sp) => new ClaudeCliWorker({ model, ...(sp ? { systemPrompt: sp } : {}), allowedTools }),
@@ -486,58 +504,79 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
 // under the root. Used to locate the vendored NetOps skills shipped in `skills/`.
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
+/** The domain pack selected for this run, or null for the generic assistant. Resolved from the
+ *  generic `--persona <name>` flag (or the `--netops` back-compat alias — the ONLY place the engine
+ *  knows that name). The pack declares its own properties (bundled skills, tool grants, voice-serve)
+ *  in skills/<name>/persona.md; the engine applies them generically — no domain logic here (ADR-0016). */
+function selectedPack(args: Args): Pack | null {
+  const name = packName(args);
+  return name ? loadPack(join(PACKAGE_ROOT, "skills"), name) : null;
+}
+
+/** The requested pack name: generic `--persona <name>` / WEAVE_PERSONA, or the `--netops` /
+ *  WEAVE_NETOPS back-compat alias for "netops" — the ONE spot the engine mentions that name. */
+function packName(args: Args): string {
+  return (
+    str(args, "persona", "") ||
+    process.env.WEAVE_PERSONA ||
+    (has(args, "netops") || process.env.WEAVE_NETOPS === "1" ? "netops" : "")
+  );
+}
+
 async function assembleSkills(
   args: Args,
   opts: { fake: boolean; model: string; weave?: Substrate; newId?: () => string },
 ): Promise<{ skills: Skill[]; registry: ToolRegistry; backend: string; errors: Array<{ file: string; error: string }> }> {
-  const dir = str(args, "skills-dir", ".weave/skills");
+  const dir = str(args, "skills-dir", join(stateRoot(), "skills"));
   const { skills: codeSkills, errors } = await loadSkills(dir);
   const llm = await pickLlm(args);
   const agentSkills = llm ? loadAgentSkills(dir, llm.make) : [];
-  // NetOps preset (`--netops` / WEAVE_NETOPS=1): load ONLY the vendored forward-*
-  // skills shipped in this repo (skills/<name>/SKILL.md) — reproducible, with no
-  // dependency on the user's global ~/.claude/skills. CLAUDE_PLUGIN_ROOT points at the
-  // package root so each skill's `${CLAUDE_PLUGIN_ROOT}/skills/<name>/scripts/...`
-  // path resolves to the vendored copy (the bash tool inherits process.env).
-  // A named agent (`--persona netops`) bundles its skills + grounding: selecting the netops
-  // persona also loads the vendored forward-* skills, so `--persona netops` == `--netops`.
-  const personaArg = str(args, "persona", "");
-  const netops = has(args, "netops") || process.env.WEAVE_NETOPS === "1" || personaArg === "netops";
-  if (netops) process.env.CLAUDE_PLUGIN_ROOT ??= PACKAGE_ROOT;
-  // Claude Code skill dirs to scan: the vendored NetOps dir (when --netops), searched
-  // FIRST so it wins name-dedup; PLUS the global dirs only when --claude-skills is set
-  // (with --claude-skills-dir overriding which dir). Match keywords come from each
-  // description; weave-native skill names already take precedence.
-  const claudeDirs: string[] = [];
-  if (netops) claudeDirs.push(join(PACKAGE_ROOT, "skills"));
-  if (has(args, "claude-skills"))
-    claudeDirs.push(...(has(args, "claude-skills-dir")
-      ? [str(args, "claude-skills-dir", "")]
-      : [join(process.cwd(), ".claude", "skills"), join(homedir(), ".claude", "skills")]));
+  // Domain pack (ADR-0016 Ring 2): `--persona <name>` selects skills/<name>/, whose persona.md
+  // frontmatter DECLARES what to apply — bundled skills, grounding prompt, voice prompt, tool grants.
+  // The engine knows no specific domain; "netops" is just a pack dir. CLAUDE_PLUGIN_ROOT points at the
+  // package root so each vendored skill's `${CLAUDE_PLUGIN_ROOT}/skills/<name>/scripts/...` resolves.
+  const pack = selectedPack(args);
+  if (pack) process.env.CLAUDE_PLUGIN_ROOT ??= PACKAGE_ROOT;
+  if (!pack && packName(args))
+    console.error(`weave: pack '${packName(args)}' not found under ${join(PACKAGE_ROOT, "skills")} — using generic agent`);
   const seen = new Set([...codeSkills, ...agentSkills].map((s) => s.name));
   const claudeSkills: Skill[] = [];
-  if (llm && claudeDirs.length) {
-    for (const d of claudeDirs)
-      for (const s of loadClaudeSkills(d, llm.make))
-        if (!seen.has(s.name)) (seen.add(s.name), claudeSkills.push(s));
+  if (llm) {
+    // Pack-bundled vendored skills, filtered by the pack's `bundles` globs (searched FIRST so they
+    // win name-dedup). Reproducible — no dependency on the user's global ~/.claude/skills.
+    if (pack && pack.bundles.length) {
+      const globs = pack.bundles.map(globToRegExp);
+      for (const s of loadClaudeSkills(join(PACKAGE_ROOT, "skills"), llm.make))
+        if (globs.some((g) => g.test(s.name)) && !seen.has(s.name)) (seen.add(s.name), claudeSkills.push(s));
+    }
+    // The user's global Claude skills (opt-in via --claude-skills / --claude-skills-dir).
+    if (has(args, "claude-skills")) {
+      const dirs = has(args, "claude-skills-dir")
+        ? [str(args, "claude-skills-dir", "")]
+        : [join(process.cwd(), ".claude", "skills"), join(homedir(), ".claude", "skills")];
+      for (const d of dirs)
+        for (const s of loadClaudeSkills(d, llm.make))
+          if (!seen.has(s.name)) (seen.add(s.name), claudeSkills.push(s));
+    }
   }
-  // Persona / grounding: point weave at a specific agent at launch. `--persona netops`
-  // (the default under --netops) makes the catch-all + chat default the Forward NetOps agent
-  // (grounded to the forward-* skills + scripts); any other non-empty --persona value is used
-  // verbatim as that agent's system prompt; empty = the generic assistant.
-  const persona = personaArg || (netops ? "netops" : "");
+  // Catch-all / conversational default agent: the selected pack's grounded persona; else a raw
+  // non-pack `--persona "<prompt>"` used verbatim as the system prompt; else the generic assistant.
+  const rawPersona = str(args, "persona", "");
   const fallback: Skill = !llm
     ? echoSkill
-    : persona === "netops"
-      ? netopsAgentSkill(llm.make)
-      : persona
-        ? personaAgentSkill("agent", "Custom-persona agent (system prompt set at launch).", llm.make, persona)
+    : pack
+      ? personaAgentSkill(pack.name, pack.description, llm.make, pack.prompt)
+      : rawPersona
+        ? personaAgentSkill("agent", "Custom-persona agent (system prompt set at launch).", llm.make, rawPersona)
         : claudeSkill(llm.make);
   // Pin-only, NO-TOOLS summarizer for the voice layer: it ingests untrusted result text, so it
   // must not be able to run tools (prevents prompt-injection → privilege escalation). tools: []
   // makes makeAgentSkill restrict its worker's tool host to nothing; match: [] = never auto-routes.
+  // A pack can override the generic prompt with its declared `voiceSummary` file.
+  const voicePrompt =
+    (pack?.voiceSummary && loadPackFile(join(PACKAGE_ROOT, "skills"), pack.name, pack.voiceSummary)) || GENERIC_VOICE_SUMMARY;
   const voiceSummary: Skill[] = llm
-    ? [makeAgentSkill({ name: "voice-summary", description: "Verbalize a result for TTS (no tools).", prompt: VOICE_SUMMARY_SYSTEM, tools: [], match: [] }, llm.make(VOICE_SUMMARY_SYSTEM))]
+    ? [makeAgentSkill({ name: "voice-summary", description: "Verbalize a result for TTS (no tools).", prompt: voicePrompt, tools: [], match: [] }, llm.make(voicePrompt))]
     : [];
   const skills: Skill[] = [...codeSkills, ...agentSkills, ...claudeSkills, ...voiceSummary, fallback];
 
@@ -548,10 +587,10 @@ async function assembleSkills(
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
   // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0021 §4).
   registry.register(recallTool(reportsDirFor(args), pickEmbedder(args)));
-  if (has(args, "bash") || netops) {
-    // Shell access. Opt-in via --bash, and ALWAYS on under the NetOps preset: every forward-*
-    // skill works by running `python3 .../scripts/*.py`, so without bash the agent can't make a
-    // single Forward API call. Denylist always on; optional allowlist + timeout from flags.
+  if (has(args, "bash") || pack?.tools.includes("Bash")) {
+    // Shell access. Opt-in via --bash, or whenever the selected pack declares it (e.g. the netops
+    // pack: every forward-* skill runs `python3 .../scripts/*.py`, so without bash the agent can't
+    // make a single Forward API call). Denylist always on; optional allowlist + timeout from flags.
     const allow = str(args, "bash-allow", "").split(",").map((s) => s.trim()).filter(Boolean);
     registry.register(
       bashTool({
@@ -824,7 +863,7 @@ function cmdPs(args: Args): void {
   }
 
   // Scan all networks (.weave/networks/*/weave.pid)
-  const networksDir = join(".weave", "networks");
+  const networksDir = join(stateRoot(), "networks");
   try {
     const networkDirs = readdirSync(networksDir, { withFileTypes: true }).filter((d) => d.isDirectory());
     for (const nd of networkDirs) {
@@ -861,6 +900,47 @@ function cmdPs(args: Args): void {
 }
 
 /**
+ * List every network nested under the weave home — the `default` network plus each `networks/<id>/`
+ * subdir — with a quick state summary (running/idle, db present, report count). Unlike `weave ps`
+ * (running peers only), this surfaces idle workspaces so nested projects are discoverable from the CLI.
+ */
+function cmdNetworks(args: Args): void {
+  void args;
+  const base = stateRoot();
+  const rows: Array<{ id: string; root: string }> = [{ id: "default", root: base }];
+  try {
+    for (const d of readdirSync(join(base, "networks"), { withFileTypes: true }))
+      if (d.isDirectory()) rows.push({ id: d.name, root: join(base, "networks", d.name) });
+  } catch { /* no networks/ yet */ }
+
+  const reportCount = (root: string): number => {
+    let n = 0;
+    try {
+      for (const skill of readdirSync(join(root, "reports"), { withFileTypes: true })) {
+        if (!skill.isDirectory()) continue;
+        try { n += readdirSync(join(root, "reports", skill.name)).filter((f) => f.endsWith(".md") && f !== "index.md").length; } catch { /* skip */ }
+      }
+    } catch { /* no reports */ }
+    return n;
+  };
+
+  console.log(`${cyan("─")} weave home: ${process.cwd()}  (${rows.length} network${rows.length === 1 ? "" : "s"})\n`);
+  const wN = Math.max(7, ...rows.map((r) => r.id.length));
+  console.log(`  ${cyan("NETWORK".padEnd(wN))}  STATUS   DB    REPORTS`);
+  for (const r of rows) {
+    const pidFile = join(r.root, "weave.pid");
+    let status = "idle";
+    if (existsSync(pidFile)) {
+      const pid = Number(readFileSync(pidFile, "utf8").trim());
+      status = Number.isInteger(pid) && pid > 0 ? pidLiveness(pid) : "stale";
+    }
+    const statusColor = status === "alive" ? green : status === "idle" ? gray : red;
+    const hasDb = existsSync(join(r.root, "weave.db"));
+    console.log(`  ${r.id.padEnd(wN)}  ${statusColor(status.padEnd(7))}  ${hasDb ? green("yes") : gray("—  ")}  ${reportCount(r.root)}`);
+  }
+}
+
+/**
  * Process-pool supervisor: spawn N lightweight `weave up` peers as managed child processes,
  * restart any that crash (jittered backoff), and fan out SIGTERM on shutdown. The children
  * are autonomous peers that coordinate *work* through the shared weave (lease-based claiming,
@@ -871,7 +951,7 @@ async function cmdPool(args: Args): Promise<void> {
   if (has(args, "daemon") && !IS_DAEMON_CHILD) return daemonize(args);
 
   const workers = Math.max(1, num(args, "workers", 4));
-  const db = str(args, "db", DEFAULT_DB);
+  const db = str(args, "db", dbPathFor(DEFAULT_NETWORK));
 
   // Claim a pidfile so `weave down` can stop the whole pool via the supervisor. When we were
   // daemonized, daemonize() already wrote our pid and passed WEAVE_PID_FILE; else claim it now.
@@ -1516,7 +1596,7 @@ function chatTurn(
     // Learning: track the question
     if (utterance && networkId) {
       const intent = classifyIntent(rawUtterance);
-      const persona = pinnedSkill === "netops" ? "netops" : "general";
+      const persona = pinnedSkill && pinnedSkill !== "claude" ? pinnedSkill : "general";
       void declareQuestion(weave, newId, actor, id, rawUtterance, intent, networkId, persona);
     }
 
@@ -1845,9 +1925,9 @@ async function cmdVoice(args: Args): Promise<void> {
   const vadFilter = has(args, "no-vad") ? "" : `silencedetect=noise=${str(args, "silence-db", "-30")}dB:d=${str(args, "silence-secs", "3.0")}`;
 
   const weave = await openSubstrate(args);
-  // --netops (or --persona netops, which implies it) embeds a peer so this is ONE command;
-  // else rely on an external `weave up` peer. --no-serve forces the thin-client mode.
-  const wantEmbeddedPeer = (has(args, "netops") || str(args, "persona", "") === "netops") && !has(args, "no-serve");
+  // A pack that declares `serveForVoice` embeds a peer so `weave voice` is ONE command; else rely on
+  // an external `weave up` peer. --no-serve forces thin-client mode regardless.
+  const wantEmbeddedPeer = !!selectedPack(args)?.serveForVoice && !has(args, "no-serve");
   const stopPeer = wantEmbeddedPeer ? await startEmbeddedPeer(args, weave) : null;
   const newId = (): string => randomUUID();
   const actor = str(args, "agent", `voice-${randomUUID().slice(0, 8)}`);
@@ -2252,11 +2332,10 @@ async function cmdChat(args: Args): Promise<void> {
   // researcher job). `--route` opts into full skill routing; `--skill X` targets one skill; under
   // `--fake` there's no claude agent, so fall back to routing (the echo skill).
   const route = has(args, "route") || has(args, "fake");
-  // Conversational default = the launch persona's agent (netops / custom / generic), so
-  // `weave chat --netops` talks as the Forward NetOps agent, not the generic assistant.
-  const personaArg = str(args, "persona", "");
-  const persona = personaArg || (has(args, "netops") ? "netops" : "");
-  const convoAgent = persona === "netops" ? "netops" : persona ? "agent" : "claude";
+  // Conversational default = the launch persona's agent (a selected pack / custom prompt / generic),
+  // so `weave chat --persona netops` talks as that pack's agent, not the generic assistant.
+  const pack = selectedPack(args);
+  const convoAgent = pack ? pack.name : str(args, "persona", "") ? "agent" : "claude";
   const pinnedSkill = explicitSkill ?? (route ? undefined : convoAgent);
   const timeoutMs = parseDuration(str(args, "timeout", "180s"));
   const carry = !has(args, "no-context");
@@ -2429,6 +2508,7 @@ usage:
   weave down      [--network-id <id>] [--db <path>] [--pid-file <path>]
                   stop a daemonized peer or pool (SIGTERM)
   weave ps        list all daemonized peers/pools across networks + liveness
+  weave networks  list every network under the home (running + idle) + db/report summary
   weave task <goal...>   [--network-id <id>] [--skill <name>] [--db <path>] [--id <taskId>]
                   [--model m | --no-tier]
                   (by default the goal is classified to a model tier — ADR-0022 — Haiku/Sonnet/Opus;
@@ -2453,14 +2533,14 @@ usage:
                   hybrid (BM25 + optional embeddings) search over accumulated knowledge
   weave chat      [--network-id <id>] [--db <path>] [--route] [--skill <name>]
                   [--timeout 180s] [--no-context] [--model m | --no-tier]
-                  [--netops | --persona <name>] [--speak]
+                  [--persona <name|prompt>] [--speak]
                   conversational REPL: each line is answered by the general agent (Ctrl-C cancels a
                   turn), follow-ups keep context; --route picks skills by keyword, --skill X pins one.
-                  --netops grounds the agent in the vendored Forward NetOps skills; --persona <name>
-                  sets a custom system prompt; --speak reads answers aloud (macOS 'say').
+                  --persona <name> grounds the agent in a pack (see Packs below); a value that isn't a
+                  pack name is used verbatim as the system prompt; --speak reads answers aloud (macOS 'say').
                   by default each turn is tiered by complexity (chat → Haiku, hard asks → Opus).
                   thin client — start a peer with 'weave up' to do the work
-  weave voice     [--network-id <id>] [--netops] [options]
+  weave voice     [--network-id <id>] [--persona <name>] [options]
                   voice REPL: wake word + whisper STT → routed weave turn → TTS answer
                   (macOS-only: requires whisper.cpp model; run 'weave voice --help' / see README for the
                   full flag set: --whisper-model, --mic, --wake, --no-speak, --timeout, …)
@@ -2469,18 +2549,25 @@ usage:
   weave doctor    [--lenient] [--src <dir>]   check hex architecture (strict by default)
   weave help
 
-Workspace:
-  weave runs *inside a project*. All state (.weave/ db+reports+memory) and the agent's file
-  tools are rooted at the workspace — your cwd, or --workspace <dir> / WEAVE_HOME. weave refuses
-  to use its own engine repo as a workspace, so keep projects in their own dirs (e.g. ~/networks/<name>/).
+Weave home:
+  All state (db, reports, memory) and the agent's file tools are rooted at the weave home.
+  Default ~/.weave; override with --workspace <dir> or WEAVE_HOME. weave refuses to use its own
+  engine repo as a home. Each network nests under it (see below); 'weave networks' lists them.
 
 Network isolation:
-  --network-id <id> isolates each network to .weave/networks/<id>/{weave.db,.env,reports/}.
+  --network-id <id> isolates each network to <home>/networks/<id>/{weave.db,.env,reports/}.
   Each network gets its own event log, knowledge bundle, and environment (e.g., FORWARD_*).
-  Omit --network-id (or use "default") for .weave/ (backward compatible).
+  Omit --network-id (or use "default") for the home root itself (backward compatible).
+
+Packs (domain grounding):
+  --persona <name> selects a pack (a dir under the engine's skills/<name>/). Its persona.md
+  frontmatter declares what the generic engine applies — bundled skills, grounding prompt,
+  capability grants, voice behavior. The engine has NO domain logic; "netops" (the Forward
+  NetOps pack) is just one such dir. Add a domain by adding skills/<name>/persona.md.
+  (--netops / WEAVE_NETOPS=1 remain as a back-compat alias for --persona netops.)
 
 Domain use-cases are SKILLS, not harness code: drop a .ts (code skill) or .md (declarative
-agent skill: prompt + tools) into .weave/skills/. default db: .weave/weave.db`);
+agent skill: prompt + tools) into <home>/skills/. default db: <home>/weave.db`);
 }
 
 /** Load `.env` from a specific path into process.env WITHOUT overriding existing shell vars — so
@@ -2546,8 +2633,9 @@ async function main(): Promise<void> {
   // `weave up --help` / `pool --help` / `loop --help` start a daemon instead of showing help.
   if (cmd !== undefined && !["help", "--help", "-h"].includes(cmd) && has(args, "help")) return usage();
   // Enter the workspace before anything reads/writes the filesystem (.env, db, reports, file tools).
-  // help/usage need no workspace, so skip the guard for them.
-  if (cmd !== undefined && !["help", "--help", "-h"].includes(cmd)) {
+  // Skip for commands that need no workspace: help, and `doctor` (a dev command that scans the engine
+  // src/ — it MUST run in the engine repo, which the workspace guard would otherwise refuse).
+  if (cmd !== undefined && !["help", "--help", "-h", "doctor"].includes(cmd)) {
     const ws = resolveWorkspace(args);
     if (ws !== process.cwd()) process.chdir(ws);
   }
@@ -2560,6 +2648,9 @@ async function main(): Promise<void> {
       return cmdDown(args);
     case "ps":
       return cmdPs(args);
+    case "networks":
+    case "nets":
+      return cmdNetworks(args);
     case "pool":
       return cmdPool(args);
     case "loop":

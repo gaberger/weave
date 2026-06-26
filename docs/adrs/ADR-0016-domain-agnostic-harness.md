@@ -67,3 +67,49 @@ agent, so a plugin can't reach beyond its grant (composes with ADR-0004 effects/
 
 - A small set of curated example plugins (research, monitor, triage) under `examples/plugins/`.
 - Optional: a deterministic `http`/scrape code-skill template for users who want pipelines.
+
+## Amendment (2026-06-26): the three-ring model + Forward isolation
+
+Restating the decision concretely after the engine/workspace split. weave is **three rings**, and
+the domain coupling lives strictly in the outer two:
+
+```
+RING 1 — Foundational core (generic, domain-FREE)
+  src/domain · src/ports · src/usecases · substrate
+  peers, lease-claim, compaction, knowledge graph. Runs ANY use-case.
+RING 2 — Adaptation layer (skills + persona; where a domain lives)
+  skills/forward-*  (vendored NetOps pack → Forward Networks API)
+  skills/netops/    (persona.md, voice-summary.md — grounding doctrine as DATA)
+  loaded only under --netops / --persona netops; CLAUDE_PLUGIN_ROOT → engine root
+RING 3 — Workspace (per-network data; the weave home)
+  ~/.weave/networks/<id>/ : weave.db · reports · memory · nqe · remediations
+```
+
+**The core is provably Forward-free.** The only `forward` token in `src/domain` is graph
+*forward-edges*; the only real coupling baked into engine code was the NetOps persona prompt in
+`composition/builtin-skills.ts`. That doctrine is now **pack data**; `builtin-skills.ts` ships only
+the generic `echo`, `claude`, and `personaAgentSkill` machinery plus a domain-neutral voice prompt.
+
+**Packs make the coupling declarative, not hardcoded.** A *pack* is a directory `skills/<name>/`
+whose `persona.md` frontmatter *declares* what the generic engine should apply when it is selected
+(`--persona <name>`):
+
+| Frontmatter key | Engine applies it as |
+|---|---|
+| `bundles: [globs]` | which vendored `skills/*` to load (name-glob filtered) |
+| `tools: [Bash]` | capability grants for the pack's agent (effect-gated, ADR-0004) |
+| `serveForVoice` | embed a peer under `weave voice` |
+| `voiceSummary` | TTS-summary prompt override |
+| body | the agent's grounding system prompt |
+
+`loadPack()` (`composition/pack.ts`) parses it; `selectedPack(args)` is the single resolver. The
+engine no longer contains the literal `"netops"` except in **one** back-compat line mapping the
+legacy `--netops` flag / `WEAVE_NETOPS` to `--persona netops`. No special-cases for Bash grants,
+skill loading, voice-serve, or persona resolution remain.
+
+Consequence: **a new domain = a new `skills/<name>/persona.md`** — no engine recompile, no edit to
+Ring 1. NetOps is "inherently coupled to Forward" only as a *property of the shipped pack*, not of
+weave.
+
+Related: the workspace/home model (`~/.weave`, `weave networks`, the engine-repo guard) keeps Ring 3
+out of the engine repo so a worker's file tools can never reach framework source.
