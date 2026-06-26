@@ -11,7 +11,7 @@ set -euo pipefail
 
 usage() { sed -n '2,12p' "$0"; exit 2; }
 
-MSG=""; TITLE=""; BODY=""; BASE=""; BRANCH=""; MERGE=1; METHOD="--merge"
+MSG=""; TITLE=""; BODY=""; BASE=""; BRANCH=""; MERGE=1; METHOD="--merge"; ALLOW_NO_CI=0
 while [ $# -gt 0 ]; do case "$1" in
   -m) MSG="${2:-}"; shift 2;;
   -t) TITLE="${2:-}"; shift 2;;
@@ -20,6 +20,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --branch) BRANCH="${2:-}"; shift 2;;
   --no-merge) MERGE=0; shift;;
   --squash) METHOD="--squash"; shift;;
+  --allow-no-ci) ALLOW_NO_CI=1; shift;;
   -h|--help) usage;;
   *) echo "ship: unknown arg '$1'" >&2; usage;;
 esac; done
@@ -64,11 +65,27 @@ echo "ship: PR #$PR  ($(gh pr view "$PR" --json url -q .url))"
 
 [ "$MERGE" = 1 ] || { echo "ship: opened PR #$PR (--no-merge) — review and merge it yourself"; exit 0; }
 
-# Watch CI; only merge if every check passes (gh exits non-zero on failure / no-pass).
-echo "ship: watching CI for PR #$PR …"
-if ! gh pr checks "$PR" --watch --interval 15; then
-  echo "ship: CI did not pass for PR #$PR — NOT merging" >&2
-  exit 1
+# CI registers asynchronously: right after PR creation `gh pr checks --watch` errors with "no checks
+# reported" before any check appears (a race). Wait for at least one check to register first.
+echo "ship: waiting for CI checks to register on PR #$PR …"
+for _ in $(seq 1 20); do
+  [ -n "$(gh pr checks "$PR" 2>/dev/null)" ] && break
+  sleep 6
+done
+if [ -z "$(gh pr checks "$PR" 2>/dev/null)" ]; then
+  # No CI configured for this repo/branch.
+  if [ "$ALLOW_NO_CI" = 1 ]; then
+    echo "ship: no CI checks on PR #$PR — merging anyway (--allow-no-ci)"
+  else
+    echo "ship: no CI checks registered on PR #$PR — NOT merging (use --no-merge to open-only, or --allow-no-ci to merge)" >&2
+    exit 1
+  fi
+else
+  echo "ship: watching CI for PR #$PR …"
+  if ! gh pr checks "$PR" --watch --interval 15; then
+    echo "ship: CI did not pass for PR #$PR — NOT merging" >&2
+    exit 1
+  fi
 fi
 
 gh pr merge "$PR" "$METHOD" --delete-branch

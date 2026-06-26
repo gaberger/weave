@@ -27,7 +27,13 @@ bash "${CLAUDE_PLUGIN_ROOT}/skills/git-ship/scripts/ship.sh" -m "<msg>" --no-mer
 
 # Squash-merge instead of a merge commit; or target a non-default base:
 bash "${CLAUDE_PLUGIN_ROOT}/skills/git-ship/scripts/ship.sh" -m "<msg>" --squash --base develop
+
+# Repo with no CI configured — merge without waiting for checks (opt-in):
+bash "${CLAUDE_PLUGIN_ROOT}/skills/git-ship/scripts/ship.sh" -m "<msg>" --allow-no-ci
 ```
+
+The script waits for CI checks to *register* before watching them (they appear a few seconds after PR
+creation), then merges only on green. If no checks ever register it refuses to merge unless `--allow-no-ci`.
 
 ## Rules
 
