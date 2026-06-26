@@ -2671,8 +2671,11 @@ async function main(): Promise<void> {
   // `weave up --help` / `pool --help` / `loop --help` start a daemon instead of showing help.
   if (cmd !== undefined && !["help", "--help", "-h"].includes(cmd) && has(args, "help")) return usage();
   // Enter the workspace before anything reads/writes the filesystem (.env, db, reports, file tools).
-  // help/usage need no workspace, so skip the guard for them.
-  if (cmd !== undefined && !["help", "--help", "-h"].includes(cmd)) {
+  // Workspace-free commands skip the guard: they run no workers (so the "don't let a worker rewrite the
+  // harness" protection is moot) and may legitimately run in the engine repo — `doctor` MUST, since it
+  // analyzes the hex source; `skills`/`help` are read-only listings.
+  const WORKSPACE_FREE = new Set(["help", "--help", "-h", "doctor", "skills"]);
+  if (cmd !== undefined && !WORKSPACE_FREE.has(cmd)) {
     const ws = resolveWorkspace(args);
     if (ws !== process.cwd()) process.chdir(ws);
   }
