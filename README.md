@@ -16,6 +16,25 @@ How far you scale is an **adapter choice**, not a rewrite. That is the core bet,
 
 🌱 Day one. Architecture being recorded as ADRs before code. See [`docs/adrs/`](docs/adrs/INDEX.md).
 
+## Quickstart
+
+Requires **Node ≥ 18.17** (or [Bun](https://bun.sh) for the single-binary build). From a fresh clone:
+
+```bash
+npm install                          # install deps (better-sqlite3, tsx) — do this first
+npm run demo                         # offline two-peer swarm, no API key needed
+
+# or drive the CLI yourself (offline, no key):
+npm run weave -- up --fake           # start a peer; leave it running
+npm run weave -- task "summarize the README"   # in another terminal: declare work
+npm run weave -- status              # watch it go free → held → done
+npm run weave -- report              # see the actual result
+```
+
+`up --fake` runs an offline echo worker (no LLM). To run real Claude workers, set
+`ANTHROPIC_API_KEY` or have the `claude` CLI on your PATH, then drop `--fake`. See
+[LLM backends](#llm-backends-api-key-optional).
+
 ## Principles
 
 1. **Peers, not hierarchy.** No mandatory central coordinator. Agents cooperate through shared state.
@@ -29,9 +48,12 @@ One command — a cooperative swarm of two peers sharing one substrate, tasks cl
 exactly once and split between them (offline, no API key):
 
 ```bash
-npm run build:bin   # optional: compile ./weave (else the demo uses node+tsx)
+npm install   # if you haven't already
 npm run demo
 ```
+
+> Optional — single binary: `npm run build:bin` compiles a self-contained `./weave`
+> (requires [Bun](https://bun.sh)). The demo itself needs only Node + `npm install`.
 
 ```
 ── status ───────────────────────────────────
@@ -51,7 +73,13 @@ deterministic convergence) is proven in `npm test` — see the NetworkedSubstrat
 
 ## CLI
 
-A hex/pi-style command line (ADR-0010). During dev, run via Node:
+A hex/pi-style command line (ADR-0010).
+
+> **Invocation:** examples below are written as `weave …` for brevity. If you haven't built the
+> binary, run them as `npm run weave -- …` (shown here), or build once with `npm run build:bin`
+> and use `./weave …`. Nothing puts a bare `weave` on your PATH unless you install it globally.
+
+During dev, run via Node:
 
 ```bash
 npm run weave -- task "summarize the README"   # declare work (shared SQLite at .weave/weave.db)
