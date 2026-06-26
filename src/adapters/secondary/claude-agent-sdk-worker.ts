@@ -36,6 +36,7 @@ export interface ClaudeRunOptions {
   mcpServers?: Record<string, unknown>;
   canUseTool?: CanUseTool;
   abortController?: AbortController;
+  pathToClaudeCodeExecutable?: string; // override the CLI the SDK drives (set by the composition layer)
 }
 
 /** The SDK's built-in tools — disabled so the agent uses weave's gated MCP tools (e.g. the

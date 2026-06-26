@@ -3,6 +3,8 @@
  * Adapts the SDK to the seam in `claude-agent-sdk-worker.ts` so the worker and its tests stay
  * SDK-free. Requires the package installed and `ANTHROPIC_API_KEY` set at runtime.
  */
+import { spawnSync } from "node:child_process";
+
 import { query as sdkQuery, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
@@ -18,12 +20,39 @@ import {
 
 type SdkQueryParams = Parameters<typeof sdkQuery>[0];
 
+/**
+ * Resolve the Claude Code CLI the SDK should drive. The bun-compiled `weave` binary does NOT bundle
+ * the SDK's native CLI sidecar (it's an optional dep), so under the compiled binary the SDK fails with
+ * "Native CLI binary for <platform> not found". Point it at the user's installed `claude` (or
+ * WEAVE_CLAUDE_EXECUTABLE). Only overridden under bun (the compiled binary) or when explicitly set —
+ * under node+tsx the SDK's bundled binary resolves via node_modules, so we leave it alone. Memoized.
+ */
+let _claudeExec: string | null | undefined;
+function claudeExecutable(): string | null {
+  if (_claudeExec !== undefined) return _claudeExec;
+  const explicit = process.env["WEAVE_CLAUDE_EXECUTABLE"];
+  if (explicit) return (_claudeExec = explicit);
+  if (!(process as { versions?: { bun?: string } }).versions?.bun) return (_claudeExec = null);
+  try {
+    const cmd = process.platform === "win32" ? "where" : "which";
+    const r = spawnSync(cmd, ["claude"], { encoding: "utf8" });
+    const path = (r.stdout ?? "").split("\n")[0]?.trim();
+    _claudeExec = r.status === 0 && path ? path : null;
+  } catch {
+    _claudeExec = null;
+  }
+  return _claudeExec;
+}
+
 /** Adapt the SDK's `query` (which returns an async generator of SDK messages). */
-export const realClaudeQuery: ClaudeQuery = ({ prompt, options }) =>
-  sdkQuery({
+export const realClaudeQuery: ClaudeQuery = ({ prompt, options }) => {
+  const exec = claudeExecutable();
+  const merged = exec ? { ...options, pathToClaudeCodeExecutable: exec } : options;
+  return sdkQuery({
     prompt,
-    options: options as unknown as NonNullable<SdkQueryParams["options"]>,
+    options: merged as unknown as NonNullable<SdkQueryParams["options"]>,
   }) as unknown as AsyncIterable<SdkMessage>;
+};
 
 /**
  * Expose each ToolHost tool to the SDK as an in-process MCP tool whose handler routes
