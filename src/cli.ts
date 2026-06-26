@@ -831,13 +831,16 @@ async function cmdUp(args: Args): Promise<void> {
 
   // Pool child: self-terminate if the supervisor dies. A `pool` worker is a plain `weave up` whose
   // parent is the supervisor (which sets WEAVE_POOL_PARENT). If the supervisor is SIGKILL'd it can't
-  // SIGTERM its children, so they'd orphan to init (ppid → 1) and keep claiming tasks / holding leases
-  // forever, invisible to `weave ps`/`down`. Watch process.ppid and shut down gracefully on reparent —
-  // the drain above then releases our leases so the work returns to the pool instead of hanging.
+  // SIGTERM its children, so without this they'd orphan and keep claiming tasks / holding leases
+  // forever, invisible to `weave ps`/`down`. Poll the supervisor pid's LIVENESS directly (signal 0)
+  // rather than process.ppid — ppid is cached at startup in the Bun binary, so a reparent goes
+  // unnoticed there. On supervisor death we shut down gracefully; the drain releases our leases.
   const poolParent = Number(process.env.WEAVE_POOL_PARENT ?? 0);
   if (Number.isInteger(poolParent) && poolParent > 0) {
     orphanWatch = setInterval(() => {
-      if (process.ppid !== poolParent) {
+      let gone = false;
+      try { process.kill(poolParent, 0); } catch { gone = true; } // ESRCH (dead) or EPERM (recycled)
+      if (gone) {
         console.error("weave: pool supervisor gone — shutting down (orphaned)");
         shutdown();
       }
