@@ -29,9 +29,13 @@ esac; done
 command -v gh >/dev/null || { echo "ship: 'gh' not found on PATH" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "ship: gh not authenticated — run: gh auth login" >&2; exit 1; }
 
-# Default branch: origin/HEAD, else main.
-BASE="${BASE:-$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')}"
-BASE="${BASE:-main}"
+# Default branch: origin/HEAD, else main. The `|| true` matters — under `set -euo pipefail` a repo whose
+# origin/HEAD isn't set locally makes `git symbolic-ref` fail, pipefail propagates it, and the script
+# would abort BEFORE the `:-main` fallback could apply (the fallback was dead code without this guard).
+if [ -z "$BASE" ]; then
+  BASE="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+  BASE="${BASE:-main}"
+fi
 
 slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-48; }
 
