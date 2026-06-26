@@ -26,4 +26,6 @@ printf '\n'; hr "log AFTER compaction"
 printf '   %s events  (the snapshot replaces the pruned history)\n' "$AFTER"
 printf '\n'; hr "status is still correct (projection reads the snapshot)"
 "${RUN[@]}" status | sed 's/^/   /'
-ok "history collapsed from $BEFORE → $AFTER events, reads unchanged — durable + replayable"
+[ "$AFTER" -lt "$BEFORE" ] \
+  && pass "history collapsed $BEFORE → $AFTER events, reads unchanged — durable + replayable" \
+  || fail "expected fewer events after compaction (before=$BEFORE after=$AFTER)"

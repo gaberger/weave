@@ -19,6 +19,9 @@ kill $P 2>/dev/null || true; sleep 0.5
 printf '\n'; hr "build the knowledge graph + search index (offline, --no-embed)"
 run "${RUN[@]}" index --no-embed | sed 's/^/   /'
 
-printf '\n'; hr 'search: "BGP"'
-"${RUN[@]}" search "BGP route leak" --no-embed | sed 's/^/   /'
-ok "results are indexed + searchable — accumulated knowledge, not just an event log"
+printf '\n'; hr 'search: "BGP route leak"'
+HITS="$("${RUN[@]}" search "BGP route leak" --no-embed)"
+printf '%s\n' "$HITS" | sed 's/^/   /'
+printf '%s' "$HITS" | grep -qi BGP \
+  && pass "results indexed + searchable — accumulated knowledge, not just an event log" \
+  || fail "search returned no match for 'BGP'"
