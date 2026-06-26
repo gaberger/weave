@@ -180,7 +180,29 @@ const num = (args: Args, key: string, dflt: number): number => {
   const v = args.flags.get(key);
   return typeof v === "string" ? Number(v) : dflt;
 };
+/** Like num(), but validates a positive-integer flag at the CLI boundary and fails fast. A bad
+ *  numeric flag (NaN/zero/negative) otherwise flows silently into the peer loop — e.g.
+ *  `--concurrency abc` → NaN → the `active.size >= maxConcurrent` guard never trips (every compare
+ *  with NaN is false) → UNBOUNDED task fan-out. Validate the count-style flags (concurrency, workers,
+ *  lease-ms, tick-ms, limit, compact-secs) so a typo can't quietly become a runaway. */
+const numPos = (args: Args, key: string, dflt: number): number => {
+  const v = args.flags.get(key);
+  if (typeof v !== "string") return dflt;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) {
+    console.error(`weave: --${key} expects a positive integer, got "${v}"`);
+    process.exit(1);
+  }
+  return n;
+};
 const has = (args: Args, key: string): boolean => args.flags.has(key);
+
+// A long-running peer command (up/pool/loop/chat/voice) sets this so a transient per-task error —
+// e.g. a substrate I/O hiccup surfacing as a detached promise rejection — is LOGGED and survived
+// instead of silently killing the whole daemon (Node terminates on an unhandled rejection). One-shot
+// commands leave it false, so they still fail fast and non-zero on an unexpected error.
+let resilient = false;
+const setResilient = (): void => { resilient = true; };
 
 // --- model tiering (ADR-0022) ----------------------------------------------
 // Default tier → model id ladder (Haiku/Sonnet/Opus). Overridable per tier via --tierN-model or
@@ -221,9 +243,11 @@ function channelConfig(args: Args): ChannelConfig {
   return cfg;
 }
 
-function parseDuration(s: string): number {
+/** Parse a duration like 30s / 6h / 500ms → milliseconds. Returns null on a malformed value (e.g.
+ *  "6x", "4m5") so callers fail loudly instead of silently collapsing to a default. */
+function parseDuration(s: string): number | null {
   const m = /^(\d+)(ms|s|m|h)?$/.exec(s.trim());
-  if (!m) return 30_000;
+  if (!m) return null;
   const n = Number(m[1]);
   switch (m[2] ?? "s") {
     case "ms":
@@ -237,6 +261,17 @@ function parseDuration(s: string): number {
   }
 }
 
+/** Read a duration flag, exiting with an actionable message if it is present but malformed. */
+function durationFlag(args: Args, key: string, dflt: string): number {
+  const raw = str(args, key, dflt);
+  const ms = parseDuration(raw);
+  if (ms === null) {
+    console.error(`weave: --${key} expects a duration like 30s / 6h / 500ms, got "${raw}"`);
+    process.exit(1);
+  }
+  return ms;
+}
+
 type ClosableSubstrate = Substrate & { close(): void };
 
 /** Pick the substrate by runtime so the Bun binary stays native-addon-free (ADR-0010 §4). */
@@ -244,22 +279,39 @@ async function openSubstrate(args: Args): Promise<ClosableSubstrate> {
   const network = networkId(args);
   const explicitDb = args.flags.get("db") as string | undefined;
   const file = dbPathFor(network, explicitDb);
-  mkdirSync(dirname(file), { recursive: true });
-  // Fixed working-memory location for agent skills, guaranteed to exist (sibling of the db). Skills
-  // write per-topic <topic-slug>.notes.md here — the harness owns the dir, not a prompt convention.
-  mkdirSync(join(dirname(file), "memory"), { recursive: true });
-  // Durable report store: completion summaries live in the event log, which compaction prunes
-  // (ADR-0007). Peers mirror each settled result to <reports>/<taskId>.md so accumulated knowledge
-  // survives compaction. See persistReports().
-  mkdirSync(join(dirname(file), "reports"), { recursive: true });
-  const opts = { filename: file, clock: systemClock };
-  if (typeof Bun !== "undefined") {
-    const { BunSqliteSubstrate } = await import("./adapters/secondary/bun-sqlite-substrate.js");
-    return new BunSqliteSubstrate(opts);
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    // Fixed working-memory location for agent skills, guaranteed to exist (sibling of the db). Skills
+    // write per-topic <topic-slug>.notes.md here — the harness owns the dir, not a prompt convention.
+    mkdirSync(join(dirname(file), "memory"), { recursive: true });
+    // Durable report store: completion summaries live in the event log, which compaction prunes
+    // (ADR-0007). Peers mirror each settled result to <reports>/<taskId>.md so accumulated knowledge
+    // survives compaction. See persistReports().
+    mkdirSync(join(dirname(file), "reports"), { recursive: true });
+    const opts = { filename: file, clock: systemClock };
+    if (typeof Bun !== "undefined") {
+      const { BunSqliteSubstrate } = await import("./adapters/secondary/bun-sqlite-substrate.js");
+      return new BunSqliteSubstrate(opts);
+    }
+    const seg = "sqlite-substrate"; // non-literal so Bun's bundler skips the native path
+    const mod = (await import(`./adapters/secondary/${seg}.js`)) as typeof import("./adapters/secondary/sqlite-substrate.js");
+    return new mod.SqliteSubstrate(opts);
+  } catch (e) {
+    // Turn an opaque native/SQLite failure into an actionable next step. Without this the error is a
+    // context-free `weave: fatal — <msg>` with no db path and no remedy.
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`${red("✗")} weave: cannot open the event store at ${file}`);
+    if (/EACCES|EROFS|permission denied|read-only/i.test(msg))
+      console.error(`  → ${dirname(file)} is not writable — run from a writable project dir, or pass --db <writable-path>`);
+    else if (/NODE_MODULE_VERSION|compiled against|invalid ELF|dlopen|\.node|Could not locate the bindings/i.test(msg))
+      console.error(`  → native module mismatch — run: npm rebuild better-sqlite3   (or use the Bun single binary)`);
+    else if (/malformed|file is not a database|not a database|disk image is malformed/i.test(msg))
+      console.error(`  → the database file looks corrupt — back up and delete ${file}, then retry`);
+    else if (/disk I\/O|SQLITE_BUSY|locked|database is locked/i.test(msg))
+      console.error(`  → db is locked or on a problematic filesystem (e.g. a network drive) — stop other peers, or pass --db <local-path>`);
+    else console.error(`  → ${msg}`);
+    process.exit(1);
   }
-  const seg = "sqlite-substrate"; // non-literal so Bun's bundler skips the native path
-  const mod = (await import(`./adapters/secondary/${seg}.js`)) as typeof import("./adapters/secondary/sqlite-substrate.js");
-  return new mod.SqliteSubstrate(opts);
 }
 
 /** The durable report bundle root (sibling of the db), guaranteed to exist by openSubstrate.
@@ -454,8 +506,15 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
   if (has(args, "fake")) return null;
   const model = str(args, "model", "claude-sonnet-4-6");
   if (process.env["ANTHROPIC_API_KEY"]) {
-    const { createClaudeWorkerFactory } = await import("./composition/claude-sdk.js");
-    return { kind: "claude-sdk", make: (sp) => createClaudeWorkerFactory({ model, ...(sp ? { systemPrompt: sp } : {}) })() };
+    try {
+      const { createClaudeWorkerFactory } = await import("./composition/claude-sdk.js");
+      return { kind: "claude-sdk", make: (sp) => createClaudeWorkerFactory({ model, ...(sp ? { systemPrompt: sp } : {}) })() };
+    } catch (e) {
+      // Key is set but the SDK package isn't installed (or failed to load). Don't hard-crash — warn
+      // and fall through to the claude CLI / offline echo so the user still gets a working peer.
+      console.error(`weave: ANTHROPIC_API_KEY is set but the Claude SDK failed to load — ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`  → run \`npm install\`, or use the claude CLI (unset the key) / --fake for offline echo`);
+    }
   }
   if (claudeCliAvailable()) {
     // The CLI worker uses Claude Code's OWN tools (not weave's ToolHost), so these writes are NOT
@@ -683,6 +742,7 @@ function daemonize(args: Args): void {
 
 async function cmdUp(args: Args): Promise<void> {
   if (has(args, "daemon") && !IS_DAEMON_CHILD) return daemonize(args);
+  setResilient(); // a transient per-task error must not kill the long-lived peer
   const weave = await openSubstrate(args);
   persistReports(weave, reportsDirFor(args), pickEmbedder(args)); // durable mirror + auto-index
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
@@ -700,9 +760,9 @@ async function cmdUp(args: Args): Promise<void> {
     cfg: {
       agentId,
       grant: { tools: "*", maxEffect: "irreversible" },
-      leaseMs: num(args, "lease-ms", 30_000),
-      maxConcurrent: num(args, "concurrency", 2),
-      tickMs: num(args, "tick-ms", 3_000),
+      leaseMs: numPos(args, "lease-ms", 30_000),
+      maxConcurrent: numPos(args, "concurrency", 2),
+      tickMs: numPos(args, "tick-ms", 3_000),
     },
     newWorker: () => router,
     registry,
@@ -725,7 +785,7 @@ async function cmdUp(args: Args): Promise<void> {
 
   const ac = new AbortController();
   const keepAlive = setInterval(() => {}, 1 << 30);
-  const compactSecs = has(args, "compact-secs") ? Math.max(5, num(args, "compact-secs", 60)) : 0;
+  const compactSecs = has(args, "compact-secs") ? Math.max(5, numPos(args, "compact-secs", 60)) : 0;
   let compactTimer: ReturnType<typeof setInterval> | undefined;
   if (compactSecs > 0) {
     compactTimer = setInterval(() => {
@@ -736,8 +796,16 @@ async function cmdUp(args: Args): Promise<void> {
     if (typeof compactTimer.unref === "function") compactTimer.unref();
   }
 
+  let shuttingDown = false;
   const shutdown = () => {
-    console.log("\nweave: shutting down…");
+    // Second Ctrl-C while a graceful stop is already in flight → force-quit. Otherwise a peer wedged
+    // mid-task would ignore repeated SIGINTs and the user would have to reach for `kill -9`.
+    if (shuttingDown) {
+      console.log("\nweave: force quit");
+      process.exit(1);
+    }
+    shuttingDown = true;
+    console.log("\nweave: shutting down… (Ctrl-C again to force quit)");
     clearInterval(keepAlive);
     if (compactTimer) clearInterval(compactTimer);
     // If we were daemonized, remove our own pidfile so it doesn't go stale.
@@ -766,6 +834,22 @@ async function cmdDown(args: Args): Promise<void> {
   const pid = Number(readFileSync(pidFile, "utf8").trim());
   if (!Number.isInteger(pid) || pid <= 0) {
     console.error(`${red("✗")} garbage pidfile; removing`);
+    rmSync(pidFile, { force: true });
+    process.exitCode = 1;
+    return;
+  }
+  // Verify the pid is actually a weave peer before signalling it. A `kill -9` leaves the pidfile
+  // behind; if the OS later recycles that pid for an unrelated process (an editor, another daemon),
+  // a naive SIGTERM would kill the wrong thing. Treat stale/foreign/non-weave pids as a dead pidfile.
+  const live = pidLiveness(pid);
+  if (live === "stale") {
+    console.log(`${yellow("ℹ")} pid ${pid} not running — clearing stale pidfile`);
+    rmSync(pidFile, { force: true });
+    return;
+  }
+  const cmdline = pidCommand(pid); // "" when `ps` is unavailable — then we can't disprove it, so allow
+  if (live === "foreign" || (cmdline && !/weave/i.test(cmdline))) {
+    console.error(`${red("✗")} pid ${pid} is not a weave peer (recycled pid?) — clearing stale pidfile, not signalling`);
     rmSync(pidFile, { force: true });
     process.exitCode = 1;
     return;
@@ -869,8 +953,9 @@ function cmdPs(args: Args): void {
  */
 async function cmdPool(args: Args): Promise<void> {
   if (has(args, "daemon") && !IS_DAEMON_CHILD) return daemonize(args);
+  setResilient(); // supervisor + workers must survive a transient per-task error
 
-  const workers = Math.max(1, num(args, "workers", 4));
+  const workers = numPos(args, "workers", 4);
   const db = str(args, "db", DEFAULT_DB);
 
   // Claim a pidfile so `weave down` can stop the whole pool via the supervisor. When we were
@@ -993,6 +1078,7 @@ async function cmdLoop(args: Args): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  setResilient(); // a transient per-tick error must not kill the loop daemon
   // Validate the invocation in the foreground first, then detach if asked: a bad --skill should
   // fail loudly in the terminal, not silently in a daemon log. The child re-enters here with the
   // daemon marker set and runs the normal loop, orphaned from the terminal (same as `weave up`).
@@ -1003,6 +1089,7 @@ async function cmdLoop(args: Args): Promise<void> {
   const agentId = str(args, "agent", `loop-${randomUUID().slice(0, 8)}`);
   const goal = args._.join(" ").trim() || skill;
   const interval = str(args, "interval", "30s");
+  const intervalMs = durationFlag(args, "interval", "30s"); // validate up front — bad value exits here
   const once = has(args, "once");
 
   const { skills, registry, errors } = await assembleSkills(args, {
@@ -1018,9 +1105,9 @@ async function cmdLoop(args: Args): Promise<void> {
     cfg: {
       agentId,
       grant: { tools: "*", maxEffect: "irreversible" },
-      leaseMs: num(args, "lease-ms", 60_000),
-      maxConcurrent: num(args, "concurrency", 4),
-      tickMs: num(args, "tick-ms", 2_000),
+      leaseMs: numPos(args, "lease-ms", 60_000),
+      maxConcurrent: numPos(args, "concurrency", 4),
+      tickMs: numPos(args, "tick-ms", 2_000),
     },
     newWorker: () => new SkillRouterWorker(skills),
     registry,
@@ -1044,7 +1131,7 @@ async function cmdLoop(args: Args): Promise<void> {
 
   const ac = new AbortController();
   const keepAlive = setInterval(() => {}, 1 << 30);
-  const loop = new LoopRunner(new SystemTimer(), tick, parseDuration(interval), once);
+  const loop = new LoopRunner(new SystemTimer(), tick, intervalMs, once);
   let stopping = false;
   const shutdown = (code = 0, reason = "stopped"): void => {
     if (stopping) return; // idempotent: a signal may race the once-completion
@@ -1128,10 +1215,19 @@ async function cmdNotify(args: Args): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  let channels = channelsFrom(channelConfig(args));
+  const configured = channelsFrom(channelConfig(args));
+  let channels = configured;
   if (has(args, "to")) {
-    const want = new Set(str(args, "to", "").split(",").map((s) => s.trim()));
-    channels = channels.filter((c) => want.has(c.name));
+    const want = str(args, "to", "").split(",").map((s) => s.trim()).filter(Boolean);
+    channels = configured.filter((c) => want.includes(c.name));
+    // Distinguish "nothing configured" from "you asked for a channel that isn't configured/known" —
+    // the old code reported the former for both, hiding a typo like `--to slakc`.
+    if (channels.length === 0 && configured.length > 0) {
+      const available = configured.map((c) => c.name).join(", ") || "(none)";
+      console.error(`weave notify: none of --to "${want.join(", ")}" match a configured channel — available: ${available}`);
+      process.exitCode = 1;
+      return;
+    }
   }
   if (channels.length === 0) {
     console.error("weave notify: no channels configured (--slack-webhook / --telegram-token+--telegram-chat / EMAIL_* env)");
@@ -1412,7 +1508,7 @@ async function cmdSearch(args: Args): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const limit = num(args, "limit", 8);
+  const limit = numPos(args, "limit", 8);
   const embedder = pickEmbedder(args);
   const hits = await searchBundle(reportsDirFor(args), query, embedder, limit);
   if (hits.length === 0) {
@@ -1820,7 +1916,7 @@ async function startEmbeddedPeer(args: Args, weave: Substrate): Promise<() => Pr
   const peer = createPeer({
     weave,
     cfg: { agentId, grant: { tools: "*", maxEffect: "irreversible" },
-      leaseMs: num(args, "lease-ms", 30_000), maxConcurrent: num(args, "concurrency", 2), tickMs: num(args, "tick-ms", 3_000) },
+      leaseMs: numPos(args, "lease-ms", 30_000), maxConcurrent: numPos(args, "concurrency", 2), tickMs: numPos(args, "tick-ms", 3_000) },
     newWorker: () => router, registry, clock: systemClock, newId: () => randomUUID(),
   });
   const ac = new AbortController();
@@ -1835,6 +1931,7 @@ async function startEmbeddedPeer(args: Args, weave: Substrate): Promise<() => Pr
  *  macOS-only (avfoundation mic + `say`). */
 async function cmdVoice(args: Args): Promise<void> {
   if (process.platform !== "darwin") return void console.error("weave voice: needs macOS (avfoundation mic + `say`).");
+  setResilient(); // keep the voice REPL alive across a transient turn error
   const whisper = str(args, "whisper-bin", "whisper-cli");
   const model = str(args, "whisper-model", join(PACKAGE_ROOT, "models", "ggml-base.en.bin"));
   if (!existsSync(model)) return void console.error(`weave voice: whisper model not found at ${model}\n  Download e.g. ggml-base.en.bin from https://huggingface.co/ggerganov/whisper.cpp, or pass --whisper-model <path>.`);
@@ -1856,7 +1953,7 @@ async function cmdVoice(args: Args): Promise<void> {
   const summaryAgent = "voice-summary"; // dedicated NO-TOOLS skill — never the tool-granted agent
   // Turn timeout: 180s default — enough for the agent to run a query (or two) and summarize without
   // premature failures. Lower it (e.g. --timeout 45s) if you'd rather fail fast on slow asks.
-  const timeoutMs = parseDuration(str(args, "timeout", "180s"));
+  const timeoutMs = durationFlag(args, "timeout", "180s");
   const speaker = makeSpeaker(!has(args, "no-speak"), str(args, "voice", "Karen")); // female voice by default
   const debug = has(args, "debug"); // surface each transcript + timing + wake-match decision
   const carry = !has(args, "no-context");
@@ -2242,6 +2339,7 @@ async function cmdVoice(args: Args): Promise<void> {
 }
 
 async function cmdChat(args: Args): Promise<void> {
+  setResilient(); // keep the chat REPL alive across a transient turn error
   const weave = await openSubstrate(args);
   const speaker = makeSpeaker(has(args, "speak"), str(args, "voice", "Karen")); // --speak: voice via offline TTS (female by default)
   const newId = () => randomUUID();
@@ -2258,7 +2356,7 @@ async function cmdChat(args: Args): Promise<void> {
   const persona = personaArg || (has(args, "netops") ? "netops" : "");
   const convoAgent = persona === "netops" ? "netops" : persona ? "agent" : "claude";
   const pinnedSkill = explicitSkill ?? (route ? undefined : convoAgent);
-  const timeoutMs = parseDuration(str(args, "timeout", "180s"));
+  const timeoutMs = durationFlag(args, "timeout", "180s");
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
   const net = networkId(args);
@@ -2599,6 +2697,19 @@ async function main(): Promise<void> {
       process.exitCode = 1;
   }
 }
+
+// A long-running peer must not vanish on a single transient error. Detached promises in the peer
+// loop (`void this.tick()`) have no local catch, so without these handlers an unhandled rejection
+// hard-exits the daemon with a bare stack trace and no task context. Log it; survive if we're a
+// long-running peer (resilient), otherwise fail fast and non-zero like any one-shot command.
+process.on("unhandledRejection", (reason) => {
+  console.error(`weave: unhandled error — ${reason instanceof Error ? reason.message : String(reason)}`);
+  if (!resilient) process.exit(1);
+});
+process.on("uncaughtException", (err) => {
+  console.error(`weave: uncaught error — ${err instanceof Error ? err.message : String(err)}`);
+  if (!resilient) process.exit(1);
+});
 
 main().catch((err) => {
   console.error("weave: fatal —", err instanceof Error ? err.message : err);
