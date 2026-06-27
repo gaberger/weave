@@ -14,7 +14,11 @@ How far you scale is an **adapter choice**, not a rewrite. That is the core bet,
 
 ## Status
 
-🌱 Day one. Architecture being recorded as ADRs before code. See [`docs/adrs/`](docs/adrs/INDEX.md).
+🌿 Working. The coordination core (solo / swarm / federated), the CLI, skills, loops,
+compaction, notifications, and the architecture gate are implemented and tested — `npm test`
+plus the [capability demos](#capability-demos). Decisions are recorded as ADRs first; see
+[`docs/adrs/`](docs/adrs/INDEX.md). Real Claude workers run end-to-end on both backends (SDK and
+`claude -p`), proven by the [field-validation campaign](#field-validation--real-projects-end-to-end).
 
 ## Quickstart
 
@@ -243,6 +247,42 @@ usecases → adapters`, inner layers never import outward, and **adapters import
 domain** (no adapter→adapter). The modules that *wire* adapters into skills/tool-bundles live
 in `composition/` (allowed to import adapters), alongside `composition-root.ts`/`cli.ts`. It
 runs in `npm test`, so a violation fails CI — weave is fully textbook-hex-compliant.
+
+## Field validation — real projects, end to end
+
+Beyond the unit suite (`npm test`) and the [capability demos](#capability-demos), weave is
+**dogfooded** by driving complete software projects through it and fixing the engine wherever a
+real workload broke it. Five project types, each chosen to stress a different coordination mode:
+
+| project | mode exercised | independent verification | result |
+|---|---|---|---|
+| Diffusion-models research report | independent fan-out (many parallel tasks, no deps) | rendered to PDF via the `publish` skill | digests + PDF |
+| Chord DHT (Python) | sequential coding | project's own test suite | 24 / 24 |
+| Language interpreter (TypeScript) | parallel multi-agent coding (spec-first → integrate) | project's own test suite | 148 / 148 |
+| BigInt arbitrary precision (Python) | iterative repair | differential oracle vs Python `int` | 0 disagreements |
+| Regex engine — Thompson NFA (Python) | iterative repair | differential oracle vs Python `re.fullmatch` | 0 disagreements / ~6k cases |
+
+Each run surfaced a real engine gap; all are merged:
+
+- **[#14](https://github.com/gaberger/weave/pull/14)** — build portability (TMPDIR-safe runner,
+  builds anywhere), agent-task **progress streaming** (`--output-format stream-json` surfaces each
+  tool call as a `task.progress` event), the `weave` Claude skill, and the `publish` code-skill
+  (markdown → PDF).
+- **[#15](https://github.com/gaberger/weave/pull/15)** — `write_file` tool (create / overwrite) on
+  the ToolHost.
+- **[#16](https://github.com/gaberger/weave/pull/16)** — no-progress **stall watchdog**: a worker
+  silent past `--stall-ms` is aborted and its task reclaimed; after `--max-stalls` it fails
+  terminally (crash-safe — the lease releases cleanly).
+- **[#17](https://github.com/gaberger/weave/pull/17)** — detach stdin from the `claude -p`
+  subprocess (an inherited but silent stdin pipe hung the whole turn at init).
+
+**Differential oracles.** For the numeric / string engines, correctness is checked against an
+independent ground truth the agent never sees — Python's own `int` and `re` — across thousands of
+randomized inputs plus targeted edge cases. Any single disagreement is a real bug: the regex oracle
+caught an escaped-dot (`\.`) that wrongly matched any character (a transition-label collision
+between the wildcard `.` and a literal dot). The fix was driven back through weave as a fix-task,
+and the re-run is clean across ~6,000 cases. The watchdog (#16) and stdin fix (#17) were both
+exercised live during these builds.
 
 ## Layout
 
