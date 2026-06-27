@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { writeSkillTool } from "./write-skill-tool.js";
-import { loadSkills } from "./skill-loader.js";
-import { MutableSkillSet } from "./mutable-skill-set.js";
+import { loadSkills, skillsDirSignature } from "./skill-loader.js";
+import { ReloadableSkillSet } from "./reloadable-skill-set.js";
 import { SkillRouterWorker } from "./skill-router-worker.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
 import type { WorkerContext } from "../../ports/worker.js";
@@ -61,19 +61,20 @@ test("write_skill is irreversible so the grant ceiling gates self-modification",
 test("self-extension loop: write_skill → reload → router routes to the new skill", async () => {
   const dir = mkdtempSync(join(tmpdir(), "weave-skills-"));
   try {
-    const skills = new MutableSkillSet([]);
+    const scanner = { signature: () => skillsDirSignature(dir), load: (version: number) => loadSkills(dir, { version }) };
+    const skills = new ReloadableSkillSet([], [], scanner);
     const router = new SkillRouterWorker(skills);
 
     // Before authoring: no skill matches → failed.
     const before = await router.run({ taskId: "t1", spec: { goal: "please greet me" } }, ctx());
     assert.equal(before.status, "failed");
 
-    // The agent authors a skill via the tool, then the peer reloads.
+    // The agent authors a skill via the tool; the peer's reload poller does exactly this refresh().
     const write = await writeSkillTool(dir).execute({ filename: "greet.mjs", content: GREET_SKILL });
     assert.equal(write.ok, true);
-    const { skills: loaded, errors } = await loadSkills(dir);
-    assert.deepEqual(errors, [], JSON.stringify(errors));
-    skills.replace(loaded);
+    const r = await skills.refresh();
+    assert.equal(r.changed, true);
+    assert.deepEqual(r.errors, [], JSON.stringify(r.errors));
 
     // After reload: the same router (unchanged) now routes to the self-authored skill.
     const after = await router.run({ taskId: "t2", spec: { goal: "please greet me" } }, ctx());

@@ -156,10 +156,12 @@ weave task --skill researcher "LLM agents"   # route explicitly (rejected up-fro
 weave task "research recent LLM papers"      # or let match keywords route it
 ```
 
-> **Adding a skill to a running peer:** a peer assembles its skill set **once at startup**, so after
-> you drop a new file into `.weave/skills/` you must **restart the peer** for it to pick the skill up
-> (an already-running peer will keep using the fallback). Verify discovery first with `weave skills
-> --workspace <dir>` — it lists exactly what a peer in that workspace would load.
+> **Adding a skill to a running peer — hot-reload (ADR-0017):** drop a new `.mjs`/`.ts` into
+> `.weave/skills/` (or edit one, or let the `write_skill` tool author one) and a running peer picks it
+> up **without a restart** — it re-scans the skills dir every `--reload-secs` (default 3) and logs
+> `skills reloaded — …`; a rewritten file is re-imported fresh (ESM cache busted), and any tools the
+> new skill contributes register live. Pass `--no-reload` to pin the set at startup. Verify discovery
+> with `weave skills --workspace <dir>` — it lists exactly what a peer in that workspace loads.
 
 Generic tools the harness ships for skills to use: `http_fetch` (GET a URL), `spawn_task`
 (fan out a follow-up task — used for "discover → detail per item", deduped by subject),

@@ -1,10 +1,37 @@
-import { readdirSync } from "node:fs";
-import { extname, resolve } from "node:path";
+import { readdirSync, statSync } from "node:fs";
+import { extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { Skill } from "../../ports/skill.js";
 
 const EXTS = new Set([".js", ".mjs", ".ts", ".mts"]);
+
+/**
+ * A cheap content-signature of a skills dir: each skill file with its mtime + size, sorted and
+ * joined. Two scans with the same signature have the same skills on disk — so a reloader can skip
+ * re-importing unless this changes (ADR-0017 hot-reload). A missing dir signs as "" (empty).
+ * Captures adds, edits (mtime/size move), and removes; far cheaper than re-importing to compare.
+ */
+export function skillsDirSignature(dir: string): string {
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return "";
+  }
+  return files
+    .filter((f) => EXTS.has(extname(f)))
+    .map((f) => {
+      try {
+        const st = statSync(join(dir, f));
+        return `${f}:${st.mtimeMs}:${st.size}`;
+      } catch {
+        return `${f}:?`; // vanished between readdir and stat — still a change vs. a present file
+      }
+    })
+    .sort()
+    .join("|");
+}
 
 function isSkill(x: unknown): x is Skill {
   return (
