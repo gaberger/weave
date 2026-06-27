@@ -74,6 +74,7 @@ import { registerInspectTools } from "./composition/inspect-tools.js";
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
+import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
 import { echoSkill, claudeSkill, personaAgentSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
 import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
 import { loadPack, loadPackFile, globToRegExp, type Pack } from "./composition/pack.js";
@@ -523,7 +524,12 @@ function claudeCliAvailable(): boolean {
 async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) => Worker } | null> {
   if (has(args, "fake")) return null;
   const model = str(args, "model", "claude-sonnet-4-6");
+  // Outbound integrations: --mcp-config <file> wires MCP servers (GitHub, Slack, …) so an agent skill
+  // can ACT on them with no per-service weave tool adapter. Resolved against the workspace (we've
+  // already chdir'd there). Currently wired for the claude-cli backend.
+  const mcpPath = has(args, "mcp-config") ? resolve(str(args, "mcp-config", "")) : "";
   if (process.env["ANTHROPIC_API_KEY"]) {
+    if (mcpPath) console.error("weave: --mcp-config is currently wired for the claude-cli backend; the SDK backend ignores it (follow-up).");
     try {
       const { createClaudeWorkerFactory } = await import("./composition/claude-sdk.js");
       return { kind: "claude-sdk", make: (sp) => createClaudeWorkerFactory({ model, ...(sp ? { systemPrompt: sp } : {}) })() };
@@ -545,9 +551,17 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
     // A selected pack may declare extra capability grants (e.g. the netops pack needs Bash because
     // every forward-* skill runs `python3 .../scripts/*.py`). Generic — driven by pack data.
     for (const tool of selectedPack(args)?.tools ?? []) if (!allowedTools.includes(tool)) allowedTools.push(tool);
+    // MCP outbound: grant the declared servers' tools so the non-interactive peer can call them without
+    // a permission prompt. `--mcp-allow a,b` narrows to specific `mcp__server__tool` grants; default is
+    // a whole-server grant per declared server. A bad config throws here → `up` fails fast (intended).
+    if (mcpPath) {
+      const servers = readMcpServers(mcpPath);
+      const explicit = str(args, "mcp-allow", "").split(",").map((s) => s.trim()).filter(Boolean);
+      for (const g of mcpToolGrants(servers, explicit)) if (!allowedTools.includes(g)) allowedTools.push(g);
+    }
     return {
       kind: "claude-cli",
-      make: (sp) => new ClaudeCliWorker({ model, ...(sp ? { systemPrompt: sp } : {}), allowedTools }),
+      make: (sp) => new ClaudeCliWorker({ model, ...(sp ? { systemPrompt: sp } : {}), allowedTools, ...(mcpPath ? { mcpConfig: mcpPath } : {}) }),
     };
   }
   return null;
@@ -1140,7 +1154,7 @@ async function cmdPool(args: Args): Promise<void> {
   const upArgs = (agentId: string): string[] => {
     const out = ["up", "--agent", agentId];
     if (has(args, "db")) out.push("--db", db);
-    for (const k of ["model", "concurrency", "lease-ms", "tick-ms", "stall-ms", "max-stalls", "compact-secs", "reload-secs", "bash-allow", "bash-timeout-ms"]) {
+    for (const k of ["model", "concurrency", "lease-ms", "tick-ms", "stall-ms", "max-stalls", "compact-secs", "reload-secs", "mcp-config", "mcp-allow", "bash-allow", "bash-timeout-ms"]) {
       if (has(args, k)) out.push(`--${k}`, str(args, k, ""));
     }
     for (const k of ["fake", "claude-skills", "bash", "no-reload"]) if (has(args, k)) out.push(`--${k}`);
@@ -2719,8 +2733,11 @@ usage:
   weave up        [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
                   [--reload-secs N | --no-reload] [--daemon] [--pid-file <path>] [--log-file <path>]
+                  [--mcp-config <file> [--mcp-allow mcp__srv__tool,…]]
                   start a peer: claim tasks + route them to skills
                   (hot-reloads .weave/skills/ every --reload-secs (default 3); --no-reload disables)
+                  (--mcp-config wires MCP servers so skills can ACT on them; grants whole servers by
+                   default, --mcp-allow narrows to specific tools; claude-cli backend)
                   (--daemon detaches to the background; logs + pid default next to --db)
                   [--bash [--bash-allow prog1,prog2] [--bash-timeout-ms N]]
                   (--bash grants shell access: denylist always on, blocks rm -rf/sudo/etc.)

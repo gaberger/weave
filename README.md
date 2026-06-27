@@ -167,6 +167,35 @@ Generic tools the harness ships for skills to use: `http_fetch` (GET a URL), `sp
 (fan out a follow-up task — used for "discover → detail per item", deduped by subject),
 `notify` (channels). Per-skill `tools` allowlists restrict what each skill can touch.
 
+## Integrations via MCP (`--mcp-config`)
+
+To let an agent **act on outside services** (GitHub, Slack, Linear, a filesystem, …) without writing
+a weave tool adapter per service, wire in [MCP](https://modelcontextprotocol.io) servers. The
+`claude-cli` backend runs Claude Code, so any MCP server you declare becomes a set of tools the agent
+can call:
+
+```bash
+# .weave/mcp.json — standard .mcp.json shape
+# { "mcpServers": { "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+#                               "env": { "GITHUB_TOKEN": "..." } } } }
+
+weave up --mcp-config .weave/mcp.json          # peer's agents can now use the github MCP tools
+weave task "open a GitHub issue summarizing the failing tests"
+```
+
+How the authority stays bounded: weave reads the declared server names and grants
+`mcp__<server>` for each (a **whole-server** grant), so a non-interactive peer never blocks on a
+permission prompt — but it can only reach the servers **you declared**. `--strict-mcp-config` is
+always passed, so your global Claude Code MCP config is ignored and runs are reproducible. Narrow the
+grant to specific tools with `--mcp-allow`:
+
+```bash
+weave up --mcp-config .weave/mcp.json --mcp-allow mcp__github__create_issue,mcp__github__get_pull_request
+```
+
+A malformed or missing config **fails the peer fast** (rather than silently granting nothing). MCP
+wiring currently targets the `claude-cli` backend; SDK-backend MCP is a follow-up.
+
 ## Loops
 
 A first-class loop (ADR-0008) re-declares a task routed to **any** skill each tick:

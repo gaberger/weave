@@ -31,6 +31,36 @@ test("ClaudeCliWorker builds claude -p args and maps stdout to completed", async
   assert.ok(captured.includes("--allowedTools") && captured.includes("WebFetch"));
 });
 
+test("ClaudeCliWorker wires MCP config: --mcp-config + --strict-mcp-config, before the variadic --allowedTools", async () => {
+  let captured: string[] = [];
+  const runner: ClaudeCliRunner = async (args) => {
+    captured = args;
+    return { code: 0, stdout: "ok\n", stderr: "" };
+  };
+  await new ClaudeCliWorker(
+    { allowedTools: ["mcp__github", "Read"], mcpConfig: "/ws/mcp.json" },
+    runner,
+  ).run(task, ctx());
+
+  const mcpAt = captured.indexOf("--mcp-config");
+  assert.ok(mcpAt >= 0, "should pass --mcp-config");
+  assert.equal(captured[mcpAt + 1], "/ws/mcp.json");
+  assert.ok(captured.includes("--strict-mcp-config"), "should pass --strict-mcp-config (only our servers)");
+  // --allowedTools is variadic and must stay last so it doesn't swallow the mcp flags.
+  assert.ok(mcpAt < captured.indexOf("--allowedTools"), "--mcp-config must precede --allowedTools");
+  assert.ok(captured.includes("mcp__github"), "the MCP server grant rides in allowedTools");
+});
+
+test("ClaudeCliWorker omits MCP flags when no mcpConfig is set", async () => {
+  let captured: string[] = [];
+  const runner: ClaudeCliRunner = async (args) => {
+    captured = args;
+    return { code: 0, stdout: "ok\n", stderr: "" };
+  };
+  await new ClaudeCliWorker({ allowedTools: ["Read"] }, runner).run(task, ctx());
+  assert.ok(!captured.includes("--mcp-config") && !captured.includes("--strict-mcp-config"));
+});
+
 test("ClaudeCliWorker maps a non-zero exit to failed", async () => {
   const runner: ClaudeCliRunner = async () => ({ code: 1, stdout: "", stderr: "boom" });
   const res = await new ClaudeCliWorker({}, runner).run(task, ctx());
