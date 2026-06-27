@@ -1178,6 +1178,20 @@ async function cmdTask(args: Args): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  // Fail fast on an unknown `--skill`: validate against the same skill set a peer would assemble,
+  // rather than declaring a task that only fails at runtime with `no_skill` (discoverable solely via
+  // `report`). Uses the detected backend so declarative/agent skills resolve too (loading ≠ running —
+  // no API call). Best-effort: if a peer runs a different --skills-dir, it stays authoritative.
+  if (has(args, "skill")) {
+    const want = str(args, "skill", "");
+    const { skills } = await assembleSkills(args, { fake: has(args, "fake"), model: str(args, "model", "claude-sonnet-4-6") });
+    if (!skills.some((s) => s.name === want)) {
+      const names = skills.map((s) => s.name).sort().join(", ") || "(none)";
+      console.error(`weave task: no skill named "${want}". Available: ${names}\n  (list them with: weave skills)`);
+      process.exitCode = 1;
+      return;
+    }
+  }
   const weave = await openSubstrate(args);
   const single = goals.length === 1;
   for (const goal of goals) {
@@ -1189,13 +1203,16 @@ async function cmdTask(args: Args): Promise<void> {
     console.log(`weave: declared ${taskId}${spec.skill ? ` [skill:${spec.skill}]` : ""}${spec.model ? ` [model:${spec.model}]` : ""} — ${goal}`);
   }
   if (!single) console.log(gray(`  → ${goals.length} tasks declared`));
-  // A declared task sits `free` until a peer claims it. We can only detect *daemonized* peers (those
-  // with a pidfile) — a foreground `weave up` won't show here — so phrase the hint accordingly.
+  // A declared task sits `free` until a peer claims it. We can only positively detect *daemonized*
+  // peers (those with a pidfile); a foreground `weave up &` — exactly what the quickstart uses — and
+  // an idle peer (which emits nothing to the log) are both invisible here. So when we can't confirm a
+  // peer, phrase the hint CONDITIONALLY ("if none is running") rather than asserting none exists —
+  // the old "no background peer detected" read as an error even when a peer was about to claim the task.
   const pf = pidFileFor(args);
   const peerAlive = existsSync(pf) && pidLiveness(Number(readFileSync(pf, "utf8").trim())) === "alive";
   if (!peerAlive) {
     const netArg = has(args, "network-id") ? ` --network-id ${networkId(args)}` : "";
-    console.log(gray(`  → no background peer detected; if one isn't already running:  weave up${netArg}  (add --fake to run offline)`));
+    console.log(gray(`  → a running peer will pick this up; if none is running, start one:  weave up${netArg}  (add --fake to run offline)`));
   }
   weave.close();
 }
@@ -1306,7 +1323,10 @@ async function cmdSkills(args: Args): Promise<void> {
     model: str(args, "model", "claude-sonnet-4-6"),
   });
   for (const e of errors) console.error(`  ! ${e.file}: ${e.error}`);
-  console.log(`weave skills (${skills.length}) [llm: ${llmLabel(backend, has(args, "fake"))}] — from .weave/skills/ + built-in:`);
+  // Show the dir actually scanned (resolved from the active workspace) so the listing can be trusted —
+  // a hardcoded ".weave/skills/" hid that `--workspace` was being ignored.
+  const skillsDir = resolve(str(args, "skills-dir", join(stateRoot(), "skills")));
+  console.log(`weave skills (${skills.length}) [llm: ${llmLabel(backend, has(args, "fake"))}] — from ${skillsDir} + built-in:`);
   for (const s of skills) {
     const tools = (s.tools ?? []).map((t) => t.name).join(", ");
     console.log(`  ${s.name.padEnd(14)} ${s.description}${tools ? `  [tools: ${tools}]` : ""}`);
@@ -2806,7 +2826,12 @@ async function main(): Promise<void> {
   // harness" protection is moot) and may legitimately run in the engine repo — `doctor` MUST, since it
   // analyzes the hex source; `skills`/`help` are read-only listings.
   const WORKSPACE_FREE = new Set(["help", "--help", "-h", "doctor", "skills"]);
-  if (cmd !== undefined && !WORKSPACE_FREE.has(cmd)) {
+  // `skills` is workspace-free by default (a read-only listing that may run in the engine repo), but
+  // it MUST enter the workspace when one is explicitly named — otherwise `weave skills --workspace X`
+  // resolves the skills dir relative to the engine repo and never shows the skills a peer in X loads,
+  // misreporting a freshly-added skill (the make-or-break "did my extension load?" check).
+  const skillsInWorkspace = cmd === "skills" && (has(args, "workspace") || !!process.env.WEAVE_HOME);
+  if (cmd !== undefined && (!WORKSPACE_FREE.has(cmd) || skillsInWorkspace)) {
     const ws = resolveWorkspace(args);
     if (ws !== process.cwd()) process.chdir(ws);
   }

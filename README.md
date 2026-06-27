@@ -87,6 +87,10 @@ task-c41e978b    [done] write unit tests
    6 completions for 6 tasks
 ```
 
+The exactly-once check is invariant; the **work split is timing-dependent** — whichever peer wins
+each race claims the task, so a run may split 4/2, 5/1, or even 6/0 on a fast machine. What's
+guaranteed is that all 6 tasks complete and each is claimed exactly once.
+
 The event log shows the protocol: when both peers race to claim a task, exactly one wins
 (lowest `seq`); the other's claim stays inert. The **federated** story (partition → heal →
 deterministic convergence) is proven in `npm test` — see the NetworkedSubstrate spec.
@@ -147,10 +151,15 @@ default-export a `Skill` (`{ name, description, match, run, tools? }`). Example
 `http_fetch` tool and returns `completed`/`failed` based on status — full control, deterministic.
 
 ```bash
-weave skills                              # list code + declarative skills
-weave task --skill researcher "LLM agents"   # route explicitly
+weave skills --workspace <dir>            # list the skills a peer in <dir> loads (code + declarative)
+weave task --skill researcher "LLM agents"   # route explicitly (rejected up-front if no such skill)
 weave task "research recent LLM papers"      # or let match keywords route it
 ```
+
+> **Adding a skill to a running peer:** a peer assembles its skill set **once at startup**, so after
+> you drop a new file into `.weave/skills/` you must **restart the peer** for it to pick the skill up
+> (an already-running peer will keep using the fallback). Verify discovery first with `weave skills
+> --workspace <dir>` — it lists exactly what a peer in that workspace would load.
 
 Generic tools the harness ships for skills to use: `http_fetch` (GET a URL), `spawn_task`
 (fan out a follow-up task — used for "discover → detail per item", deduped by subject),

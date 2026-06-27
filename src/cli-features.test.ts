@@ -14,7 +14,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -131,6 +131,57 @@ test("task --file - reads goals from stdin", async () => {
     const r = weave(home, db, ["task", "--file", "-", "--no-tier"], "from stdin one\nfrom stdin two\n");
     assert.equal(r.status, 0, `task --file - should exit 0.\n${r.stderr}`);
     assert.match(r.stdout, /→ 2 tasks declared/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/** Drop a minimal code skill into the workspace's `.weave/skills/` so the CLI loads it like a user's. */
+function writeSkill(home: string, name: string) {
+  const dir = join(home, ".weave", "skills");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${name}.mjs`),
+    `export default { name: ${JSON.stringify(name)}, description: "test skill", ` +
+      `match: (t) => t.spec.goal.includes(${JSON.stringify(name)}), ` +
+      `async run(t) { return { status: "completed", summary: t.spec.goal.toUpperCase() }; } };\n`,
+  );
+}
+
+test("skills --workspace lists a skill in THAT workspace (honors --workspace, not the engine cwd)", async () => {
+  const { home, db } = await seed([]);
+  try {
+    writeSkill(home, "shout");
+    const r = weave(home, db, ["skills", "--fake"]);
+    assert.equal(r.status, 0, `skills should exit 0.\n${r.stderr}`);
+    // The workspace skill must appear, and the header must name the resolved dir (not a hardcoded path).
+    assert.match(stripAnsi(r.stdout), /\bshout\b/);
+    assert.match(stripAnsi(r.stdout), new RegExp(`from ${home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.weave/skills`));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("task --skill rejects an unknown skill at declare-time (fail-fast, lists what's available)", async () => {
+  const { home, db } = await seed([]);
+  try {
+    writeSkill(home, "shout");
+    const r = weave(home, db, ["task", "--fake", "--skill", "nope", "hi"]);
+    assert.equal(r.status, 1, `unknown --skill should exit 1.\n${r.stdout}`);
+    assert.match(stripAnsi(r.stderr), /no skill named "nope"/);
+    assert.match(stripAnsi(r.stderr), /Available:.*shout/); // tells the user the real options
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("task --skill accepts a real workspace skill (declares it)", async () => {
+  const { home, db } = await seed([]);
+  try {
+    writeSkill(home, "shout");
+    const r = weave(home, db, ["task", "--fake", "--no-tier", "--skill", "shout", "shout please"]);
+    assert.equal(r.status, 0, `valid --skill should exit 0.\n${r.stderr}`);
+    assert.match(stripAnsi(r.stdout), /declared .*\[skill:shout\]/);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
