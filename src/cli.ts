@@ -69,7 +69,7 @@ import { loadSkills } from "./adapters/secondary/skill-loader.js";
 import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
 import { bashTool } from "./adapters/secondary/bash-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
-import { readFileTool, editFileTool, grepTool } from "./adapters/secondary/fs-tools.js";
+import { registerInspectTools } from "./composition/inspect-tools.js";
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
@@ -658,14 +658,9 @@ async function assembleSkills(
       }),
     );
   }
-  // --target <dir>: root the file tools at an arbitrary directory to INSPECT it (read-only) without
-  // making it the workspace — so weave can analyze any repo (incl. its own engine) without tripping
-  // the engine-repo guard or needing --bash. Read-only: no edit tool in target mode (least-privilege).
-  const target = str(args, "target", "");
-  const fileRoot = target ? resolve(target) : process.cwd();
-  registry.register(readFileTool(fileRoot)); // read repo files (e.g. ADR auditor); rooted at --target if set
-  registry.register(grepTool(fileRoot)); // scan/discover refs across the tree (read)
-  if (!target) registry.register(editFileTool(process.cwd())); // edit — irreversible, grant-gated; off in read-only --target mode
+  // --target <dir>: inspect an arbitrary tree read-only (rooted there, no edit tool); else edit cwd.
+  // See registerInspectTools — extracted so the least-privilege invariant is unit-tested (inspect-tools.test.ts).
+  registerInspectTools(registry, str(args, "target", ""), process.cwd());
   registry.register(writeSkillTool(dir)); // self-authoring (ADR-0017) — irreversible, grant-gated
   return { skills, registry, backend: llm?.kind ?? "none", errors };
 }
