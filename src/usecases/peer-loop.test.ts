@@ -221,6 +221,75 @@ test("graceful stop drains an in-flight worker: Released lands before stop() res
   assert.equal(currentHolder(events, "task-1", clock.now()), null, "task is no longer held after a graceful stop");
 });
 
+test("stall watchdog aborts a silent worker, retries via reclaim, then fails terminally", async () => {
+  const clock = new FakeClock(0);
+  const weave = new InProcessSubstrate(clock);
+  let n = 0;
+  const newId = () => `id-${++n}`;
+
+  // A worker that emits NO progress and blocks until aborted — i.e. a hung subprocess. Counts runs.
+  let runs = 0;
+  const hung = (): Worker => ({
+    async run(_a, ctx) {
+      runs++;
+      await new Promise<void>((res) => {
+        if (ctx.signal.aborted) return res();
+        ctx.signal.addEventListener("abort", () => res());
+      });
+      return { status: "aborted", summary: "stalled", reason: "cancelled" };
+    },
+  });
+
+  const timer = new ManualTimer();
+  const peer = createPeer({
+    weave,
+    // leaseMs high so the lease never expires — the ONLY thing that can free this task is the
+    // stall watchdog. stallMs=50, maxStalls=1 → one retry, then terminal failure.
+    cfg: { agentId: "agent-a", grant: GRANT, leaseMs: 10_000, maxConcurrent: 1, tickMs: 10, stallMs: 50, maxStalls: 1 },
+    newWorker: () => hung(),
+    clock,
+    timer,
+    newId,
+  });
+
+  const ac = new AbortController();
+  void peer.start(ac.signal);
+  await weave.append({
+    id: newId(),
+    kind: TaskKind.Declared,
+    actor: "client",
+    subject: "task-1",
+    payload: { spec: { goal: "will hang" } },
+  });
+  await settle();
+  assert.equal(runs, 1, "worker started");
+
+  // No progress for > stallMs: the watchdog aborts (attempt 1 ≤ maxStalls) → Released → reclaimed.
+  clock.set(60);
+  timer.fire();
+  await settle();
+  assert.equal(runs, 2, "stalled task was aborted and reclaimed for a retry");
+
+  // Still silent: attempt 2 > maxStalls → the peer gives up and fails it terminally.
+  clock.set(120);
+  timer.fire();
+  await settle();
+
+  const events = await collect(weave);
+  assert.equal(runs, 2, "no further reclaim after terminal failure");
+  assert.equal(isSettled(events, "task-1"), true, "task is terminal after exhausting stall retries");
+  assert.equal(currentHolder(events, "task-1", clock.now()), null, "failed task has no holder");
+  const failed = events.filter((e) => e.kind === TaskKind.Failed && e.subject === "task-1");
+  assert.equal(failed.length, 1, "exactly one terminal Failed from the watchdog");
+  assert.match((failed[0]?.payload as { error: string }).error, /no progress/);
+  assert.ok(
+    events.some((e) => e.kind === TaskKind.Progress && /stall watchdog/.test((e.payload as { note: string }).note)),
+    "a stall-watchdog progress note was emitted",
+  );
+
+  ac.abort();
+});
+
 test("task.cancel aborts the running worker and is terminal (no reclaim)", async () => {
   const clock = new FakeClock(0);
   const weave = new InProcessSubstrate(clock);
