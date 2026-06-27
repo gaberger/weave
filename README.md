@@ -1,8 +1,8 @@
 # weave
 
-> A cooperative-network agent framework — autonomous Claude workers that coordinate as **peers** over a shared substrate.
+> A cooperative-network agent framework — autonomous agent workers that coordinate as **peers** over a shared substrate.
 
-`weave` takes the disciplined parts of [hex](../hex) (hexagonal / ports-and-adapters architecture, ADR-driven design, spec-first development) and trades the rigid central microkernel for a **flexible, peer-oriented coordination model**. Agents are autonomous Claude workers (driven by the [Claude Agent SDK](https://docs.claude.com)) that cooperate by reading from and writing to a shared, replicated event log — the *weave* — rather than reporting to a central kernel.
+`weave` takes the disciplined parts of [hex](../hex) (hexagonal / ports-and-adapters architecture, ADR-driven design, spec-first development) and trades the rigid central microkernel for a **flexible, peer-oriented coordination model**. Agents are autonomous workers behind a single `Worker` port — today Claude-backed (the [Claude Agent SDK](https://docs.claude.com) or the `claude -p` CLI) — that cooperate by reading from and writing to a shared, replicated event log — the *weave* — rather than reporting to a central kernel. *Where* each task runs (in-process, a sandboxed thread, or a container) is a wiring choice behind that same port; see [Execution tiers](#execution-tiers-where-a-task-runs).
 
 The same agent code runs three ways without modification:
 
@@ -14,7 +14,11 @@ How far you scale is an **adapter choice**, not a rewrite. That is the core bet,
 
 ## Status
 
-🌱 Day one. Architecture being recorded as ADRs before code. See [`docs/adrs/`](docs/adrs/INDEX.md).
+🌿 Working. The coordination core (solo / swarm / federated), the CLI, skills, loops,
+compaction, notifications, and the architecture gate are implemented and tested — `npm test`
+plus the [capability demos](#capability-demos). Decisions are recorded as ADRs first; see
+[`docs/adrs/`](docs/adrs/INDEX.md). Real Claude workers run end-to-end on both backends (SDK and
+`claude -p`), proven by the [field-validation campaign](#field-validation--real-projects-end-to-end).
 
 ## Quickstart
 
@@ -205,6 +209,26 @@ weave loop --skill researcher "mixture of experts language models" --once   # us
 `up`/`skills` print the chosen backend (`[llm: claude-cli]`). The `claude -p` worker uses
 Claude Code's own (read-only) tools; the SDK worker uses weave's gated ToolHost.
 
+## Execution tiers (where a task runs)
+
+The backend above decides *what reasons* over a task; this decides *where the task runs*. Both sit
+behind the **same `Worker` port**, so either is a composition wiring (`newWorker`), not a use-case
+change. Three tiers ship:
+
+| tier | mechanism | runs | isolation |
+|---|---|---|---|
+| **in-process** | the peer's event loop | the LLM workers (Claude SDK / `claude -p`) and trusted code skills | none — trusted |
+| **threaded** | `node:worker_threads` (`SandboxedSkillRunner`, [ADR-0017](docs/adrs/ADR-0017-self-authored-skills-and-sandbox.md)) | self-authored **code skills** | fault + resource isolation (wall-clock timeout, V8 old-space cap); tools reachable **only** by RPC back to the parent's grant-filtered ToolHost |
+| **container** | `docker run --network none` (`DockerSkillRunner`, [ADR-0018](docs/adrs/ADR-0018-container-sandbox.md)) | code skills needing real confinement | OS-level — the boundary a thread can't give |
+
+A peer runs up to `maxConcurrent` tasks at once via **cooperative async** on its single event loop;
+scaling past one peer means more **processes** (local swarm / `pool`) or hosts (federated), not
+threads. The threaded and container tiers are the **self-authored-skill sandbox** — implemented and
+tested, with the Docker tier exercised in [demo 9](#capability-demos); the default `weave up` runs
+the in-process worker. A `worker_threads` thread gives fault isolation, resource caps, and the tool
+boundary — but it is explicitly **not** a security boundary (it shares process privileges and can
+touch fs/net directly), which is exactly why the container tier exists (ADR-0018).
+
 ## Running a real Claude worker (SDK)
 
 The coordination core is LLM-free and fully tested with fakes. To run actual Claude
@@ -243,6 +267,42 @@ usecases → adapters`, inner layers never import outward, and **adapters import
 domain** (no adapter→adapter). The modules that *wire* adapters into skills/tool-bundles live
 in `composition/` (allowed to import adapters), alongside `composition-root.ts`/`cli.ts`. It
 runs in `npm test`, so a violation fails CI — weave is fully textbook-hex-compliant.
+
+## Field validation — real projects, end to end
+
+Beyond the unit suite (`npm test`) and the [capability demos](#capability-demos), weave is
+**dogfooded** by driving complete software projects through it and fixing the engine wherever a
+real workload broke it. Five project types, each chosen to stress a different coordination mode:
+
+| project | mode exercised | independent verification | result |
+|---|---|---|---|
+| Diffusion-models research report | independent fan-out (many parallel tasks, no deps) | rendered to PDF via the `publish` skill | digests + PDF |
+| Chord DHT (Python) | sequential coding | project's own test suite | 24 / 24 |
+| Language interpreter (TypeScript) | parallel multi-agent coding (spec-first → integrate) | project's own test suite | 148 / 148 |
+| BigInt arbitrary precision (Python) | iterative repair | differential oracle vs Python `int` | 0 disagreements |
+| Regex engine — Thompson NFA (Python) | iterative repair | differential oracle vs Python `re.fullmatch` | 0 disagreements / ~6k cases |
+
+Each run surfaced a real engine gap; all are merged:
+
+- **[#14](https://github.com/gaberger/weave/pull/14)** — build portability (TMPDIR-safe runner,
+  builds anywhere), agent-task **progress streaming** (`--output-format stream-json` surfaces each
+  tool call as a `task.progress` event), the `weave` Claude skill, and the `publish` code-skill
+  (markdown → PDF).
+- **[#15](https://github.com/gaberger/weave/pull/15)** — `write_file` tool (create / overwrite) on
+  the ToolHost.
+- **[#16](https://github.com/gaberger/weave/pull/16)** — no-progress **stall watchdog**: a worker
+  silent past `--stall-ms` is aborted and its task reclaimed; after `--max-stalls` it fails
+  terminally (crash-safe — the lease releases cleanly).
+- **[#17](https://github.com/gaberger/weave/pull/17)** — detach stdin from the `claude -p`
+  subprocess (an inherited but silent stdin pipe hung the whole turn at init).
+
+**Differential oracles.** For the numeric / string engines, correctness is checked against an
+independent ground truth the agent never sees — Python's own `int` and `re` — across thousands of
+randomized inputs plus targeted edge cases. Any single disagreement is a real bug: the regex oracle
+caught an escaped-dot (`\.`) that wrongly matched any character (a transition-label collision
+between the wildcard `.` and a literal dot). The fix was driven back through weave as a fix-task,
+and the re-run is clean across ~6,000 cases. The watchdog (#16) and stdin fix (#17) were both
+exercised live during these builds.
 
 ## Layout
 
