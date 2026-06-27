@@ -16,7 +16,7 @@
     "build:dist": "bun run scripts/build.ts",
     "build:sandbox": "docker build -t weave-sandbox -f sandbox/Dockerfile sandbox",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test $(find src skills -name '*.test.ts')",
+    "test": "bash scripts/test.sh",
     "test:bun": "bun test ./src/adapters/secondary/bun-sqlite-substrate.bun-test.ts",
     "demo": "bash scripts/demo.sh",
     "weave": "node --import tsx src/cli.ts",
