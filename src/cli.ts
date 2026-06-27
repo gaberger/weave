@@ -809,6 +809,8 @@ async function cmdUp(args: Args): Promise<void> {
       leaseMs: numPos(args, "lease-ms", 30_000),
       maxConcurrent: numPos(args, "concurrency", 2),
       tickMs: numPos(args, "tick-ms", 3_000),
+      stallMs: numPos(args, "stall-ms", 180_000), // abort a worker silent for 3min (0 disables)
+      maxStalls: numPos(args, "max-stalls", 2),
     },
     newWorker: () => router,
     registry,
@@ -1098,7 +1100,7 @@ async function cmdPool(args: Args): Promise<void> {
   const upArgs = (agentId: string): string[] => {
     const out = ["up", "--agent", agentId];
     if (has(args, "db")) out.push("--db", db);
-    for (const k of ["model", "concurrency", "lease-ms", "tick-ms", "compact-secs", "bash-allow", "bash-timeout-ms"]) {
+    for (const k of ["model", "concurrency", "lease-ms", "tick-ms", "stall-ms", "max-stalls", "compact-secs", "bash-allow", "bash-timeout-ms"]) {
       if (has(args, k)) out.push(`--${k}`, str(args, k, ""));
     }
     for (const k of ["fake", "claude-skills", "bash"]) if (has(args, k)) out.push(`--${k}`);
@@ -1235,6 +1237,8 @@ async function cmdLoop(args: Args): Promise<void> {
       leaseMs: numPos(args, "lease-ms", 60_000),
       maxConcurrent: numPos(args, "concurrency", 4),
       tickMs: numPos(args, "tick-ms", 2_000),
+      stallMs: numPos(args, "stall-ms", 180_000), // abort a worker silent for 3min (0 disables)
+      maxStalls: numPos(args, "max-stalls", 2),
     },
     newWorker: () => new SkillRouterWorker(skills),
     registry,

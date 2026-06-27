@@ -22,8 +22,18 @@ export interface PeerConfig {
   /** Heartbeat + sweep cadence (ADR-0005 §4). Should be < leaseMs (e.g. leaseMs/3). The
    *  sweep is what lets a peer notice work freed by *lease expiry*, which emits no event. */
   readonly tickMs: number;
+  /** No-progress watchdog (ADR-0005 §4): if a running worker emits no progress for this long, the
+   *  peer aborts it — otherwise a hung worker subprocess holds its task forever, because lease
+   *  renewal is peer-driven and keeps the claim alive regardless of whether the worker is making
+   *  progress. 0 (the default) disables the watchdog. An aborted task releases and is reclaimed. */
+  readonly stallMs?: number;
+  /** How many times a task may be stall-aborted (and reclaimed for retry) before the peer fails it
+   *  terminally — so a deterministically-hanging task can't be retried forever. Default 2. */
+  readonly maxStalls?: number;
   readonly interests?: readonly string[]; // reserved for ADR-0006
 }
+
+const DEFAULT_MAX_STALLS = 2;
 
 /** Factories the composition root injects so this use-case never imports adapters. */
 export interface PeerDeps {
@@ -39,6 +49,12 @@ export interface PeerDeps {
 interface ActiveTask {
   readonly lease: LeaseGuard;
   readonly abort: AbortController;
+  /** Clock time of the most recent progress note (claim time if none yet). The stall watchdog
+   *  aborts a task whose worker has been silent past `stallMs`. */
+  lastProgressAt: number;
+  /** Set once the watchdog has aborted this task, so a later tick in the drain window doesn't
+   *  double-count the stall. */
+  aborting?: boolean;
   /** The in-flight run() promise. stop() awaits these so a graceful shutdown drains active work —
    *  each aborted worker appends its terminal/Released event before the caller closes the substrate. */
   run?: Promise<void>;
@@ -54,6 +70,7 @@ export class PeerLoop {
   private readonly declared = new Map<TaskId, TaskSpec>();
   private readonly done = new Set<TaskId>(); // terminal (completed/failed) — never re-run
   private readonly active = new Map<TaskId, ActiveTask>();
+  private readonly stalls = new Map<TaskId, number>(); // stall-abort count per task (retry budget)
 
   private subscription?: Subscription;
   private cancelTick?: Cancel;
@@ -119,7 +136,7 @@ export class PeerLoop {
     void this.schedule();
   }
 
-  /** Heartbeat active leases, then sweep for newly-free work (incl. expired leases). */
+  /** Heartbeat active leases, abort any stalled workers, then sweep for newly-free work. */
   private async tick(): Promise<void> {
     if (this.stopping) return;
     for (const { lease } of this.active.values()) {
@@ -129,7 +146,37 @@ export class PeerLoop {
         // Renewal failed; the worker's pre-effect gate will catch the lost lease.
       }
     }
+    this.sweepStalls();
     await this.schedule();
+  }
+
+  /** No-progress watchdog (ADR-0005 §4): abort workers silent past `stallMs` so a hung subprocess
+   *  can't hold a task indefinitely. Abort → the worker reports aborted → Released → reclaimable, so
+   *  the task is retried; once the per-task abort count exceeds `maxStalls` the peer fails it
+   *  terminally so a deterministically-hung task isn't reclaimed forever. */
+  private sweepStalls(): void {
+    const stallMs = this.cfg.stallMs ?? 0;
+    if (stallMs <= 0) return;
+    const now = this.deps.clock.now();
+    const maxStalls = this.cfg.maxStalls ?? DEFAULT_MAX_STALLS;
+    for (const [taskId, entry] of this.active) {
+      if (entry.aborting || now - entry.lastProgressAt < stallMs) continue;
+      entry.aborting = true;
+      const attempts = (this.stalls.get(taskId) ?? 0) + 1;
+      this.stalls.set(taskId, attempts);
+      void this.emit(TaskKind.Progress, taskId, {
+        note: `stall watchdog: no progress for ${stallMs}ms — aborting (attempt ${attempts})`,
+      });
+      entry.abort.abort();
+      if (attempts > maxStalls) {
+        // Give up: the aborted worker's later Released is inert because the task is already settled
+        // (same as the cancel path), so this Failed is the terminal outcome.
+        void this.emit(TaskKind.Failed, taskId, {
+          summary: `aborted by stall watchdog after ${attempts} attempt(s)`,
+          error: `no progress for ${stallMs}ms`,
+        });
+      }
+    }
   }
 
   private async snapshot(): Promise<SealedEvent[]> {
@@ -189,7 +236,7 @@ export class PeerLoop {
 
     const lease = this.deps.newLease(taskId, claim.seq);
     const abort = new AbortController();
-    const entry: ActiveTask = { lease, abort };
+    const entry: ActiveTask = { lease, abort, lastProgressAt: this.deps.clock.now() };
     this.active.set(taskId, entry);
     // Keep the run() handle so stop() can drain it. run() suspends at its first await before deleting
     // itself from `active`, so the assignment lands before the entry can be removed.
@@ -212,6 +259,8 @@ export class PeerLoop {
           tools,
           lease,
           onProgress: (note) => {
+            const e = this.active.get(taskId);
+            if (e) e.lastProgressAt = this.deps.clock.now(); // feed the stall watchdog
             void this.emit(TaskKind.Progress, taskId, { note });
           },
           signal: abort.signal,
