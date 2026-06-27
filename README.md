@@ -1,8 +1,8 @@
 # weave
 
-> A cooperative-network agent framework — autonomous Claude workers that coordinate as **peers** over a shared substrate.
+> A cooperative-network agent framework — autonomous agent workers that coordinate as **peers** over a shared substrate.
 
-`weave` takes the disciplined parts of [hex](../hex) (hexagonal / ports-and-adapters architecture, ADR-driven design, spec-first development) and trades the rigid central microkernel for a **flexible, peer-oriented coordination model**. Agents are autonomous Claude workers (driven by the [Claude Agent SDK](https://docs.claude.com)) that cooperate by reading from and writing to a shared, replicated event log — the *weave* — rather than reporting to a central kernel.
+`weave` takes the disciplined parts of [hex](../hex) (hexagonal / ports-and-adapters architecture, ADR-driven design, spec-first development) and trades the rigid central microkernel for a **flexible, peer-oriented coordination model**. Agents are autonomous workers behind a single `Worker` port — today Claude-backed (the [Claude Agent SDK](https://docs.claude.com) or the `claude -p` CLI) — that cooperate by reading from and writing to a shared, replicated event log — the *weave* — rather than reporting to a central kernel. *Where* each task runs (in-process, a sandboxed thread, or a container) is a wiring choice behind that same port; see [Execution tiers](#execution-tiers-where-a-task-runs).
 
 The same agent code runs three ways without modification:
 
@@ -208,6 +208,26 @@ weave loop --skill researcher "mixture of experts language models" --once   # us
 
 `up`/`skills` print the chosen backend (`[llm: claude-cli]`). The `claude -p` worker uses
 Claude Code's own (read-only) tools; the SDK worker uses weave's gated ToolHost.
+
+## Execution tiers (where a task runs)
+
+The backend above decides *what reasons* over a task; this decides *where the task runs*. Both sit
+behind the **same `Worker` port**, so either is a composition wiring (`newWorker`), not a use-case
+change. Three tiers ship:
+
+| tier | mechanism | runs | isolation |
+|---|---|---|---|
+| **in-process** | the peer's event loop | the LLM workers (Claude SDK / `claude -p`) and trusted code skills | none — trusted |
+| **threaded** | `node:worker_threads` (`SandboxedSkillRunner`, [ADR-0017](docs/adrs/ADR-0017-self-authored-skills-and-sandbox.md)) | self-authored **code skills** | fault + resource isolation (wall-clock timeout, V8 old-space cap); tools reachable **only** by RPC back to the parent's grant-filtered ToolHost |
+| **container** | `docker run --network none` (`DockerSkillRunner`, [ADR-0018](docs/adrs/ADR-0018-container-sandbox.md)) | code skills needing real confinement | OS-level — the boundary a thread can't give |
+
+A peer runs up to `maxConcurrent` tasks at once via **cooperative async** on its single event loop;
+scaling past one peer means more **processes** (local swarm / `pool`) or hosts (federated), not
+threads. The threaded and container tiers are the **self-authored-skill sandbox** — implemented and
+tested, with the Docker tier exercised in [demo 9](#capability-demos); the default `weave up` runs
+the in-process worker. A `worker_threads` thread gives fault isolation, resource caps, and the tool
+boundary — but it is explicitly **not** a security boundary (it shares process privileges and can
+touch fs/net directly), which is exactly why the container tier exists (ADR-0018).
 
 ## Running a real Claude worker (SDK)
 
