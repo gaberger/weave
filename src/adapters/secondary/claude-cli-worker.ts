@@ -19,7 +19,11 @@ export type ClaudeCliRunner = (
 
 export const realClaudeCliRunner: ClaudeCliRunner = (args, signal, onData) =>
   new Promise((resolve) => {
-    const child = spawn("claude", args, { signal });
+    // stdin: "ignore" (= /dev/null). The prompt is passed as an argv arg, so `claude -p` needs no
+    // stdin — but if it inherits an open-but-silent stdin pipe (as it does under a daemonized peer),
+    // it can BLOCK waiting for input and hang the whole turn. Detaching stdin is the fix; the stall
+    // watchdog (ADR-0005 §4) is the safety net. stdout/stderr stay piped so we can stream them.
+    const child = spawn("claude", args, { signal, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout?.on("data", (d) => {
