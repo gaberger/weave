@@ -84,7 +84,9 @@ export function progressFromEvent(e: Record<string, unknown>): { note?: string; 
   }
   if (type === "result") {
     const r = e["result"];
-    return { result: typeof r === "string" ? r : undefined, isError: e["is_error"] === true };
+    const isError = e["is_error"] === true;
+    // Omit `result` rather than set it to undefined (exactOptionalPropertyTypes).
+    return typeof r === "string" ? { result: r, isError } : { isError };
   }
   return {};
 }
