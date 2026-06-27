@@ -63,9 +63,10 @@ import { createPeer } from "./composition-root.js";
 import type { Skill } from "./ports/skill.js";
 import { ToolRegistry } from "./adapters/secondary/in-memory-tool-host.js";
 import { SkillRouterWorker } from "./adapters/secondary/skill-router-worker.js";
+import { ReloadableSkillSet } from "./adapters/secondary/reloadable-skill-set.js";
 import { SystemTimer } from "./adapters/secondary/system-timer.js";
 import { scanSourceFiles } from "./adapters/secondary/source-scan.js";
-import { loadSkills } from "./adapters/secondary/skill-loader.js";
+import { loadSkills, skillsDirSignature } from "./adapters/secondary/skill-loader.js";
 import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
 import { bashTool } from "./adapters/secondary/bash-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
@@ -585,7 +586,15 @@ function packName(args: Args): string {
 async function assembleSkills(
   args: Args,
   opts: { fake: boolean; model: string; weave?: Substrate; newId?: () => string },
-): Promise<{ skills: Skill[]; registry: ToolRegistry; backend: string; errors: Array<{ file: string; error: string }> }> {
+): Promise<{
+  skills: Skill[];
+  registry: ToolRegistry;
+  backend: string;
+  errors: Array<{ file: string; error: string }>;
+  // The pieces a peer needs to hot-reload code skills (ADR-0017): the dir to re-scan, the reloadable
+  // code-skill slice, and the fixed tail (agent/claude/fallback skills that bind an LLM at assembly).
+  reload: { dir: string; codeSkills: Skill[]; tail: Skill[] };
+}> {
   const dir = str(args, "skills-dir", join(stateRoot(), "skills"));
   const { skills: codeSkills, errors } = await loadSkills(dir);
   const llm = await pickLlm(args);
@@ -637,7 +646,10 @@ async function assembleSkills(
   const voiceSummary: Skill[] = llm
     ? [makeAgentSkill({ name: "voice-summary", description: "Verbalize a result for TTS (no tools).", prompt: voicePrompt, tools: [], match: [] }, llm.make(voicePrompt))]
     : [];
-  const skills: Skill[] = [...codeSkills, ...agentSkills, ...claudeSkills, ...voiceSummary, fallback];
+  // `tail` is everything that ISN'T re-scanned from the skills dir — kept separate so a hot-reload
+  // swaps only the code-skill slice and leaves these LLM-bound skills (and the fallback) in place.
+  const tail: Skill[] = [...agentSkills, ...claudeSkills, ...voiceSummary, fallback];
+  const skills: Skill[] = [...codeSkills, ...tail];
 
   const registry = new ToolRegistry();
   for (const s of skills) for (const t of s.tools ?? []) registry.register(t);
@@ -662,7 +674,7 @@ async function assembleSkills(
   // See registerInspectTools — extracted so the least-privilege invariant is unit-tested (inspect-tools.test.ts).
   registerInspectTools(registry, str(args, "target", ""), process.cwd());
   registry.register(writeSkillTool(dir)); // self-authoring (ADR-0017) — irreversible, grant-gated
-  return { skills, registry, backend: llm?.kind ?? "none", errors };
+  return { skills, registry, backend: llm?.kind ?? "none", errors, reload: { dir, codeSkills, tail } };
 }
 
 /** Human-readable backend label. `backend === "none"` has two very different meanings — an
@@ -792,14 +804,25 @@ async function cmdUp(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
   persistReports(weave, reportsDirFor(args), pickEmbedder(args)); // durable mirror + auto-index
   const agentId = str(args, "agent", `peer-${randomUUID().slice(0, 8)}`);
-  const { skills, registry, backend, errors } = await assembleSkills(args, {
+  const { skills, registry, backend, errors, reload } = await assembleSkills(args, {
     fake: has(args, "fake"),
     model: str(args, "model", "claude-sonnet-4-6"),
     weave,
     newId: () => randomUUID(),
   });
   for (const e of errors) console.error(`weave: skill load error in ${e.file}: ${e.error}`);
-  const router = new SkillRouterWorker(skills);
+  // Hot-reload (ADR-0017 §4): the router reads this set live on every dispatch, so re-scanning the
+  // skills dir picks up a dropped/edited `.mjs` — or one authored by `write_skill` — without a
+  // restart. A newly-added skill's tools are registered into the live registry (read live by each
+  // ToolHost). On with a short interval by default; `--no-reload` opts out, `--reload-secs N` tunes it.
+  const skillScanner = {
+    signature: () => skillsDirSignature(reload.dir),
+    load: (version: number) => loadSkills(reload.dir, { version }),
+  };
+  const skillSet = new ReloadableSkillSet(reload.codeSkills, reload.tail, skillScanner, (added) => {
+    for (const s of added) for (const t of s.tools ?? []) registry.register(t);
+  });
+  const router = new SkillRouterWorker(skillSet);
 
   const peer = createPeer({
     weave,
@@ -844,6 +867,22 @@ async function cmdUp(args: Args): Promise<void> {
     if (typeof compactTimer.unref === "function") compactTimer.unref();
   }
 
+  // Skill hot-reload poller (ADR-0017 §4). A signature compare is cheap, so a short interval is fine;
+  // the actual re-import only happens when the dir moves. `--no-reload` disables it entirely.
+  const reloadSecs = has(args, "no-reload") ? 0 : Math.max(1, numPos(args, "reload-secs", 3));
+  let reloadTimer: ReturnType<typeof setInterval> | undefined;
+  if (reloadSecs > 0) {
+    reloadTimer = setInterval(() => {
+      void skillSet.refresh().then((r) => {
+        if (!r.changed) return;
+        for (const e of r.errors) console.error(`weave: skill load error in ${e.file}: ${e.error}`);
+        const addedNote = r.added.length ? ` (+${r.added.map((s) => s.name).join(", ")})` : "";
+        console.log(`weave: skills reloaded — ${r.names.join(", ") || "(none)"}${addedNote}`);
+      }).catch((e) => console.error(`weave: skill reload failed — ${e instanceof Error ? e.message : String(e)}`));
+    }, reloadSecs * 1000);
+    if (typeof reloadTimer.unref === "function") reloadTimer.unref();
+  }
+
   let orphanWatch: ReturnType<typeof setInterval> | undefined;
   let shuttingDown = false;
   const shutdown = () => {
@@ -857,6 +896,7 @@ async function cmdUp(args: Args): Promise<void> {
     console.log("\nweave: shutting down… (Ctrl-C again to force quit)");
     clearInterval(keepAlive);
     if (compactTimer) clearInterval(compactTimer);
+    if (reloadTimer) clearInterval(reloadTimer);
     if (orphanWatch) clearInterval(orphanWatch);
     // If we were daemonized, remove our own pidfile so it doesn't go stale.
     const pidFile = process.env.WEAVE_PID_FILE;
@@ -1100,10 +1140,10 @@ async function cmdPool(args: Args): Promise<void> {
   const upArgs = (agentId: string): string[] => {
     const out = ["up", "--agent", agentId];
     if (has(args, "db")) out.push("--db", db);
-    for (const k of ["model", "concurrency", "lease-ms", "tick-ms", "stall-ms", "max-stalls", "compact-secs", "bash-allow", "bash-timeout-ms"]) {
+    for (const k of ["model", "concurrency", "lease-ms", "tick-ms", "stall-ms", "max-stalls", "compact-secs", "reload-secs", "bash-allow", "bash-timeout-ms"]) {
       if (has(args, k)) out.push(`--${k}`, str(args, k, ""));
     }
-    for (const k of ["fake", "claude-skills", "bash"]) if (has(args, k)) out.push(`--${k}`);
+    for (const k of ["fake", "claude-skills", "bash", "no-reload"]) if (has(args, k)) out.push(`--${k}`);
     return out;
   };
 
@@ -2678,8 +2718,9 @@ quickstart:
 usage:
   weave up        [--agent <id>] [--model <m>] [--fake]
                   [--concurrency N] [--lease-ms N] [--tick-ms N] [--compact-secs N]
-                  [--daemon] [--pid-file <path>] [--log-file <path>]
+                  [--reload-secs N | --no-reload] [--daemon] [--pid-file <path>] [--log-file <path>]
                   start a peer: claim tasks + route them to skills
+                  (hot-reloads .weave/skills/ every --reload-secs (default 3); --no-reload disables)
                   (--daemon detaches to the background; logs + pid default next to --db)
                   [--bash [--bash-allow prog1,prog2] [--bash-timeout-ms N]]
                   (--bash grants shell access: denylist always on, blocks rm -rf/sudo/etc.)

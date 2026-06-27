@@ -1,7 +1,7 @@
 # ADR-0017: Self-authored skills + the execution sandbox (the learning loop)
 
 - **Status:** Accepted
-- **Implementation:** Complete — write-skill-tool.ts, mutable-skill-set.ts, skill.ts _(self-evaluated 2026-06-26 via weave)_
+- **Implementation:** Complete — write-skill-tool.ts, reloadable-skill-set.ts, skill.ts; wired into the `up` peer's reload poller (cli.ts) so a running peer hot-reloads `.weave/skills/` without a restart _(reload wiring added 2026-06-27; self-evaluated 2026-06-26 via weave)_
 - **Date:** 2026-06-21
 - **Deciders:** project owner
 - **Tags:** self-improvement, skills, sandbox, capability, learning, foundational
@@ -39,11 +39,15 @@ capability flag), not a hidden side effect.
 ### 2. Hot-reload behind a `SkillSet` port
 
 The router reads a **`SkillSet`** (ports/skill.ts) live on every dispatch rather than holding a
-frozen array. `MutableSkillSet.replace(skills)` swaps in a freshly-scanned set after authoring,
-so a running peer picks up a self-authored skill **without a restart**. `loadSkills(dir,
-{version})` takes a cache-bust token because `import()` caches by URL — a *new* filename
-reloads for free, but a *rewritten* file needs the version bump. The router neither knows nor
-cares that the set changed: mutability lives behind the port; composition injects the impl.
+frozen array. `ReloadableSkillSet` re-scans the skills dir on `refresh()` and swaps in the
+freshly-loaded code-skill slice (keeping the LLM-bound tail fixed), so a running peer picks up a
+dropped/edited/self-authored skill **without a restart**. The `up` peer drives `refresh()` on a
+`--reload-secs` poller; a cheap dir signature (mtime+size) gates the actual re-import so an
+unchanged dir costs nothing. `loadSkills(dir, {version})` takes a cache-bust token because
+`import()` caches by URL — a *new* filename reloads for free, but a *rewritten* file needs the
+version bump. The router neither knows nor cares that the set changed: mutability lives behind the
+port; composition injects both the impl and its disk-scanning seam (so the adapter imports only
+ports — no adapter→adapter edge, ADR-0015).
 
 ### 3. The reflection skill is itself a (declarative) skill
 
