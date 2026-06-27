@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, mkdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readFileTool, editFileTool, grepTool } from "./fs-tools.js";
+import { readFileTool, editFileTool, writeFileTool, grepTool } from "./fs-tools.js";
 import { ToolRegistry } from "./in-memory-tool-host.js";
 
 test("read_file returns content and is confined to its root", async () => {
@@ -60,6 +60,54 @@ test("edit_file replaces literal text and fails cleanly when absent", async () =
     const miss = await tool.execute({ path: "ADR.md", oldText: "Proposed", newText: "Accepted" });
     assert.equal(miss.ok, false);
     assert.equal((miss.output as { replaced: number }).replaced, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_file creates a new file, makes parent dirs, and overwrites", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "weave-fs-"));
+  try {
+    const tool = writeFileTool(dir);
+
+    // creates a nested file (parent dir did not exist)
+    const made = await tool.execute({ path: "pkg/mod.py", content: "x = 1\n" });
+    assert.equal(made.ok, true);
+    assert.equal(readFileSync(join(dir, "pkg", "mod.py"), "utf8"), "x = 1\n");
+    assert.equal((made.output as { bytes: number }).bytes, 6);
+
+    // overwrites in place
+    const over = await tool.execute({ path: "pkg/mod.py", content: "x = 2\n" });
+    assert.equal(over.ok, true);
+    assert.equal(readFileSync(join(dir, "pkg", "mod.py"), "utf8"), "x = 2\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write_file refuses a path escaping root and oversize content", async () => {
+  const root = mkdtempSync(join(tmpdir(), "weave-fs-root-"));
+  const outside = mkdtempSync(join(tmpdir(), "weave-fs-out-"));
+  try {
+    const tool = writeFileTool(root);
+    const escape = await tool.execute({ path: "../weave-fs-out-x/escaped.txt", content: "no" });
+    assert.equal(escape.ok, false);
+    assert.match((escape.output as { error: string }).error, /escapes root/);
+
+    const big = await tool.execute({ path: "big.txt", content: "a".repeat(512 * 1024 + 1) });
+    assert.equal(big.ok, false);
+    assert.match((big.output as { error: string }).error, /exceeds/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("write_file is irreversible so the grant ceiling gates who may create files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "weave-fs-"));
+  try {
+    const tool = writeFileTool(dir);
+    assert.equal(tool.effect, "irreversible");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

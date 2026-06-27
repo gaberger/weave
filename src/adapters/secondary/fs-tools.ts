@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, openSync, closeSync, constants, type Dirent } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync, openSync, closeSync, mkdirSync, constants, type Dirent } from "node:fs";
 import { resolve, sep, dirname, basename, join } from "node:path";
 
 import type { ToolDefinition } from "../../ports/tool-host.js";
@@ -130,6 +130,45 @@ export function grepTool(root: string): ToolDefinition {
       };
       walk(start);
       return { ok: true, output: { matches, truncated } };
+    },
+  };
+}
+
+/**
+ * `write_file` (ADR-0019): create or overwrite a text file confined to `root`. Effect
+ * `irreversible` — it creates/replaces a tracked file — so the grant ceiling (ADR-0004) gates
+ * which peers may use it. The create primitive weave lacked: `edit_file` can only mutate an
+ * existing file, so without this an agent on weave's own ToolHost could not author a new file
+ * (e.g. scaffold a multi-file project) except by shelling out. Makes missing parent dirs (within
+ * root) so nested paths like `pkg/mod.py` work in one call.
+ */
+export function writeFileTool(root: string): ToolDefinition {
+  return {
+    name: "write_file",
+    description: "Create or overwrite a UTF-8 text file (parent dirs created), path relative to root: { path, content }.",
+    effect: "irreversible",
+    inputSchema: { path: "string (relative to root)", content: "string" },
+    execute: async (args) => {
+      const abs = inRoot(root, String(args["path"] ?? ""));
+      if (abs === null) return { ok: false, output: { error: "path escapes root" } };
+      const content = String(args["content"] ?? "");
+      if (Buffer.byteLength(content, "utf8") > MAX_BYTES) {
+        return { ok: false, output: { error: `content exceeds ${MAX_BYTES} bytes` } };
+      }
+      try {
+        mkdirSync(dirname(abs), { recursive: true }); // within root (inRoot pinned the real parent)
+        // O_CREAT|O_TRUNC to create-or-overwrite; O_NOFOLLOW so a symlinked leaf can't redirect the
+        // write out of root between the inRoot check and the open (same TOCTOU guard as edit_file).
+        const fd = openSync(abs, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o644);
+        try {
+          writeFileSync(fd, content, "utf8");
+        } finally {
+          closeSync(fd);
+        }
+        return { ok: true, output: { path: abs, bytes: Buffer.byteLength(content, "utf8") } };
+      } catch (e) {
+        return { ok: false, output: { error: e instanceof Error ? e.message : String(e) } };
+      }
     },
   };
 }

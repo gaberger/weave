@@ -29,19 +29,20 @@ test("--target mode is read-only: read_file + grep, but NO edit_file", () => {
     assert.ok(names.includes("read_file"), "read_file must be granted");
     assert.ok(names.includes("grep"), "grep must be granted");
     assert.ok(!names.includes("edit_file"), "edit_file must NOT be granted in --target mode");
+    assert.ok(!names.includes("write_file"), "write_file must NOT be granted in --target mode");
     assert.equal(root, dir, "file root must be the resolved target");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("no target: read_file + grep + edit_file, rooted at cwd", () => {
+test("no target: read_file + grep + write_file + edit_file, rooted at cwd", () => {
   const cwd = mkdtempSync(join(tmpdir(), "weave-cwd-"));
   try {
     const reg = new ToolRegistry();
     const root = registerInspectTools(reg, "", cwd);
     const names = toolNames(reg);
-    assert.deepEqual(names, ["edit_file", "grep", "read_file"], "all three tools when not inspecting");
+    assert.deepEqual(names, ["edit_file", "grep", "read_file", "write_file"], "read+grep+write+edit when not inspecting");
     assert.equal(root, cwd, "file root must be cwd when no target");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
