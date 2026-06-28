@@ -14,7 +14,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -155,8 +155,13 @@ test("skills --workspace lists a skill in THAT workspace (honors --workspace, no
     const r = weave(home, db, ["skills", "--fake"]);
     assert.equal(r.status, 0, `skills should exit 0.\n${r.stderr}`);
     // The workspace skill must appear, and the header must name the resolved dir (not a hardcoded path).
+    // Match against the canonical on-disk path: the CLI derives the skills dir from process.cwd()
+    // after chdir-ing into the workspace, and cwd reports the filesystem's true drive-name casing,
+    // which can differ from TMPDIR's on a case-insensitive volume (e.g. /Volumes/SSD vs /SSd).
+    // realpathSync.native() reproduces that canonical casing; plain realpathSync() preserves input.
+    const canonicalHome = realpathSync.native(home);
     assert.match(stripAnsi(r.stdout), /\bshout\b/);
-    assert.match(stripAnsi(r.stdout), new RegExp(`from ${home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.weave/skills`));
+    assert.match(stripAnsi(r.stdout), new RegExp(`from ${canonicalHome.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/\\.weave/skills`));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
