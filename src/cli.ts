@@ -75,6 +75,7 @@ import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
+import { startHttpGateway } from "./adapters/primary/http-gateway.js";
 import { echoSkill, claudeSkill, personaAgentSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
 import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
 import { loadPack, loadPackFile, globToRegExp, type Pack } from "./composition/pack.js";
@@ -1411,6 +1412,81 @@ function cmdDoctor(args: Args): void {
   console.error(`weave doctor: ${violations.length} violation(s) (${mode}):`);
   for (const v of violations) console.error(`  ${v.file} -> ${v.importPath}: ${v.reason}`);
   process.exitCode = 1;
+}
+
+/**
+ * `weave serve` — the inbound event gateway (ADR-0023). Starts an HTTP listener that turns each POST
+ * into a `task.declared`, which any running `weave up` peer then claims and runs. This is the reactive
+ * half of autonomy: external event → task → peer acts (e.g. via MCP) → notify. The gateway holds no
+ * execution authority of its own — declared tasks still run under a peer's grant ceiling (ADR-0004).
+ */
+async function cmdServe(args: Args): Promise<void> {
+  if (has(args, "daemon") && !IS_DAEMON_CHILD) return daemonize(args);
+  setResilient(); // a bad single request must never sink the long-lived listener
+  const weave = await openSubstrate(args);
+  const host = str(args, "host", "127.0.0.1");
+  const port = numPos(args, "port", 8787);
+  const route = str(args, "route", "/hook");
+  const secret = str(args, "secret", "") || process.env.WEAVE_GATEWAY_SECRET || "";
+  const pinnedSkill = str(args, "skill", "");
+
+  // Map an inbound POST to a task spec: a JSON body's `goal`/`skill` fields, else the raw body as the
+  // goal. `--skill` pins routing for every event. Model tiering applies unless `--no-tier`.
+  const onEvent = async (e: { body: string }): Promise<{ taskId: string }> => {
+    let goal = e.body.trim();
+    let skill = pinnedSkill;
+    try {
+      const j = JSON.parse(e.body) as Record<string, unknown>;
+      if (j && typeof j === "object") {
+        if (typeof j["goal"] === "string" && j["goal"].trim()) goal = (j["goal"] as string).trim();
+        if (!skill && typeof j["skill"] === "string") skill = j["skill"] as string;
+      }
+    } catch {
+      /* non-JSON body → use the raw text as the goal */
+    }
+    if (!goal) throw new Error('empty event: send a non-empty body or JSON {"goal":"…"}');
+    const taskId = `task-${randomUUID().slice(0, 8)}`;
+    const spec: { goal: string; skill?: string; model?: string } = { goal };
+    if (skill) spec.skill = skill;
+    if (!has(args, "no-tier")) spec.model = modelForGoal(args, goal);
+    await declareTask(weave, () => randomUUID(), "gateway", taskId, spec);
+    return { taskId };
+  };
+
+  const handle = await startHttpGateway({
+    port,
+    host,
+    route,
+    ...(secret ? { secret } : {}),
+    onEvent,
+    log: (m) => console.log(gray(m)),
+  });
+  const net = networkId(args);
+  const netBadge = net !== DEFAULT_NETWORK ? ` ${cyan(`[${net}]`)}` : "";
+  console.log(`${green("✓")} gateway listening on ${cyan(`http://${host}:${handle.port}${route}`)}${netBadge}`);
+  console.log(`  ${gray("POST")}  a body (or JSON {"goal","skill"}) → declares a task any peer can claim`);
+  console.log(`  ${gray("auth:")} ${secret ? "X-Weave-Secret required" : "none (loopback)"}\n`);
+  if (!secret && host !== "127.0.0.1") {
+    console.error(yellow("weave: serving on a non-loopback host with NO --secret — anyone who can reach this port can declare tasks."));
+    console.error(yellow("  → set --secret <token> (or WEAVE_GATEWAY_SECRET), and put it behind a reverse proxy / TLS."));
+  }
+
+  const keepAlive = setInterval(() => {}, 1 << 30);
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) process.exit(1);
+    shuttingDown = true;
+    console.log("\nweave: stopping gateway…");
+    clearInterval(keepAlive);
+    const pidFile = process.env.WEAVE_PID_FILE;
+    if (pidFile) try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
+    void handle.close().then(() => {
+      weave.close();
+      process.exit(0);
+    });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 async function cmdNotify(args: Args): Promise<void> {
@@ -2762,6 +2838,12 @@ usage:
                   re-declare a task routed to <skill> each tick (a skill = a use-case)
                   (--notify alerts on completed results; pick channels with --to, same as 'weave notify')
                   (--daemon detaches to the background; stop with weave down)
+  weave serve     [--port 8787] [--host 127.0.0.1] [--route /hook] [--skill <name>]
+                  [--secret <token>] [--daemon] [--pid-file <path>] [--log-file <path>]
+                  inbound event gateway (ADR-0023): each POST declares a task any peer claims —
+                  the reactive trigger half of autonomy (webhook → task → peer acts → notify)
+                  (POST a body or JSON {"goal","skill"}; --secret gates via the X-Weave-Secret header;
+                   binds loopback by default — use --host 0.0.0.0 + --secret to expose)
   weave skills    [--skills-dir <dir>] [--claude-skills [--claude-skills-dir <dir>]] [--fake]
                   list code + declarative skills (--claude-skills inherits Claude SKILL.md)
   weave notify <text...> [--to slack,telegram,email] [--title T]
@@ -2909,6 +2991,8 @@ async function main(): Promise<void> {
       return cmdPool(args);
     case "loop":
       return cmdLoop(args);
+    case "serve":
+      return cmdServe(args);
     case "skills":
       return cmdSkills(args);
     case "compact":
