@@ -867,7 +867,10 @@ async function cmdUp(args: Args): Promise<void> {
     console.error(yellow("weave: no LLM backend — tasks will be ECHOED, not actually run."));
     console.error(yellow("  → set ANTHROPIC_API_KEY, install Claude Code (`claude` on PATH), or pass --fake to acknowledge offline mode."));
   }
-  weave.subscribe(0, (e) => console.log(fmt(e)));
+  // Stream only events from here forward -- subscribing at 0 would replay (and print) the ENTIRE
+  // log history on every `weave up`, burying the banner under a wall of past tasks. head()+1 is the
+  // same live-tail pattern used elsewhere (status/chat).
+  weave.subscribe((await weave.head()) + 1, (e) => console.log(fmt(e)));
 
   const ac = new AbortController();
   const keepAlive = setInterval(() => {}, 1 << 30);
