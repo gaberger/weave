@@ -208,6 +208,37 @@ weave loop --skill monitor --interval 30s --notify slack "https://api.example.co
 `--notify` alerts on completed results; `--once` runs a single pass. The researcher/monitor
 are example *plugins* (`examples/plugins/`), not harness code.
 
+## Reactive triggers — the inbound event gateway (`weave serve`, ADR-0023)
+
+Loops are *time*-based triggers; `weave serve` adds *event*-based ones. It's a small HTTP listener
+that turns each inbound `POST` into a `task.declared` — which any running `weave up` peer then claims
+and runs. This is the **reactive half of autonomy**:
+
+```
+external event ──POST──▶ weave serve ──▶ task ──▶ peer claims ──▶ acts (MCP) ──▶ notify
+```
+
+```bash
+weave serve --secret "$HOOK_SECRET"                       # listen on 127.0.0.1:8787/hook
+weave up   --mcp-config .weave/mcp.json --notify --to slack   # peers that act + report
+
+# a GitHub webhook (or anything) fires:
+curl -XPOST localhost:8787/hook -H "X-Weave-Secret: $HOOK_SECRET" \
+  -d '{"goal":"triage the new issue and label it","skill":"triager"}'
+# → 202 {"taskId":"task-…"}  → a peer claims it → acts via MCP → Slacks you the result
+```
+
+The body is either a JSON `{"goal","skill"}` or raw text used as the goal; `--skill` pins routing for
+every event. **Safe by default:** binds loopback unless you pass `--host`, an optional `--secret`
+(or `WEAVE_GATEWAY_SECRET`) gates declaration via the `X-Weave-Secret` header, and bodies are
+size-capped. The gateway holds **no execution authority** — a declared task still runs only under a
+peer's grant ceiling (ADR-0004), so a rogue POST can at most enqueue work the peers were already
+allowed to do. Run it separately from `up` (different process/host — they just share the substrate),
+or `--daemon` it like any peer.
+
+Together, **`serve` (sense) + skills (decide) + MCP (act) + `notify` (report)** are the four parts of
+an autonomous agent — each a wired, swappable adapter rather than a monolith.
+
 ## Notifications (channels, ADR-0014)
 
 ```bash
