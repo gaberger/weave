@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # weave capability demos — interactive launcher.
 #
-#   npm run demos            # menu
-#   npm run demos -- 1       # run demo 1 directly
-#   npm run demos -- all     # run them all in sequence
+#   bun run demos            # menu
+#   bun run demos -- 1       # run demo 1 directly
+#   bun run demos -- all     # run them all in sequence
 #
 # Everything is OFFLINE (no API key). See demos/README.md.
 

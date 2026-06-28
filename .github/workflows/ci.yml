@@ -14,12 +14,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-      - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
       - name: Typecheck
-        run: npm run typecheck
+        run: bun run typecheck
       - name: Tests (node) — includes the strict architecture gate
-        run: npm test
+        run: bun run test
       - name: weave doctor (hex architecture, strict)
         run: node --import tsx src/cli.ts doctor
 
@@ -31,14 +33,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-      - run: npm ci # node_modules needed for `bun build` to bundle deps
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - run: bun install --frozen-lockfile # node_modules needed for `bun build` to bundle deps
       - name: Tests (bun) — bun:sqlite substrate
-        run: npm run test:bun
+        run: bun run test:bun
       - name: Build single binary
-        run: npm run build:bin
+        run: bun run build:bin
       - name: Binary smoke — runs standalone, composition modules bundled
         run: ./weave skills --fake

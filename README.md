@@ -15,7 +15,7 @@ How far you scale is an **adapter choice**, not a rewrite. That is the core bet,
 ## Status
 
 🌿 Working. The coordination core (solo / swarm / federated), the CLI, skills, loops,
-compaction, notifications, and the architecture gate are implemented and tested — `npm test`
+compaction, notifications, and the architecture gate are implemented and tested — `bun run test`
 plus the [capability demos](#capability-demos). Decisions are recorded as ADRs first; see
 [`docs/adrs/`](docs/adrs/INDEX.md). Real Claude workers run end-to-end on both backends (SDK and
 `claude -p`), proven by the [field-validation campaign](#field-validation--real-projects-end-to-end).
@@ -25,14 +25,14 @@ plus the [capability demos](#capability-demos). Decisions are recorded as ADRs f
 Requires **Node ≥ 18.17** (or [Bun](https://bun.sh) for the single-binary build). From a fresh clone:
 
 ```bash
-npm install                          # install deps (better-sqlite3, tsx) — do this first
-npm run demo                         # offline two-peer swarm, no API key needed
+bun install                          # install deps (better-sqlite3, tsx) — do this first
+bun run demo                         # offline two-peer swarm, no API key needed
 
 # or drive the CLI yourself (offline, no key):
-npm run weave -- up --fake           # start a peer; leave it running
-npm run weave -- task "summarize the README"   # in another terminal: declare work
-npm run weave -- status              # watch it go free → held → done
-npm run weave -- report              # see the actual result
+bun run weave -- up --fake           # start a peer; leave it running
+bun run weave -- task "summarize the README"   # in another terminal: declare work
+bun run weave -- status              # watch it go free → held → done
+bun run weave -- report              # see the actual result
 ```
 
 `up --fake` runs an offline echo worker (no LLM). To run real Claude workers, set
@@ -48,9 +48,9 @@ it. Each one **asserts its result** and ends in a `PASS` / `FAIL` / `SKIP` verdi
 prints a scorecard (and exits non-zero on any failure):
 
 ```bash
-npm run demos            # interactive menu
-npm run demos -- all     # run them all, then print a scorecard
-npm run demos -- 9       # Docker sandbox: --network none isolation, granted tool still works
+bun run demos            # interactive menu
+bun run demos -- all     # run them all, then print a scorecard
+bun run demos -- 9       # Docker sandbox: --network none isolation, granted tool still works
 ```
 
 See [`demos/`](demos/README.md).
@@ -68,12 +68,12 @@ One command — a cooperative swarm of two peers sharing one substrate, tasks cl
 exactly once and split between them (offline, no API key):
 
 ```bash
-npm install   # if you haven't already
-npm run demo
+bun install   # if you haven't already
+bun run demo
 ```
 
-> Optional — single binary: `npm run build:bin` compiles a self-contained `./weave`
-> (requires [Bun](https://bun.sh)). The demo itself needs only Node + `npm install`.
+> Optional — single binary: `bun run build:bin` compiles a self-contained `./weave`
+> (requires [Bun](https://bun.sh)). The demo itself needs only Node + `bun install`.
 
 ```
 ── status ───────────────────────────────────
@@ -93,36 +93,36 @@ guaranteed is that all 6 tasks complete and each is claimed exactly once.
 
 The event log shows the protocol: when both peers race to claim a task, exactly one wins
 (lowest `seq`); the other's claim stays inert. The **federated** story (partition → heal →
-deterministic convergence) is proven in `npm test` — see the NetworkedSubstrate spec.
+deterministic convergence) is proven in `bun run test` — see the NetworkedSubstrate spec.
 
 ## CLI
 
 A hex/pi-style command line (ADR-0010).
 
 > **Invocation:** examples below are written as `weave …` for brevity. If you haven't built the
-> binary, run them as `npm run weave -- …` (shown here), or build once with `npm run build:bin`
+> binary, run them as `bun run weave -- …` (shown here), or build once with `bun run build:bin`
 > and use `./weave …`. Nothing puts a bare `weave` on your PATH unless you install it globally.
 
 During dev, run via Node:
 
 ```bash
-npm run weave -- task "summarize the README"   # declare work (shared SQLite at .weave/weave.db)
-npm run weave -- up --fake                      # start a peer; --fake = no API key needed
-npm run weave -- status                         # task states: free / held / done
-npm run weave -- log --follow                   # tail the event log
+bun run weave -- task "summarize the README"   # declare work (shared SQLite at .weave/weave.db)
+bun run weave -- up --fake                      # start a peer; --fake = no API key needed
+bun run weave -- status                         # task states: free / held / done
+bun run weave -- log --follow                   # tail the event log
 ```
 
 `up` defaults to the Claude worker (needs `ANTHROPIC_API_KEY`); `--fake` runs an offline
 no-LLM worker so the loop is demoable. `up` and `task` coordinate across separate terminals
 via the file-backed SQLite substrate.
 
-**Single binary (Bun):** `npm run build:bin` (`bun build src/cli.ts --compile`) produces a
+**Single binary (Bun):** `bun run build:bin` (`bun build src/cli.ts --compile`) produces a
 self-contained `./weave` executable — no Node, no node_modules. Verified end-to-end. Under
 Bun it uses the built-in `bun:sqlite` substrate (zero native addons); under Node it uses
 `better-sqlite3` — selected at runtime behind the `Substrate` port (ADR-0010).
 
 ```bash
-npm run build:bin && ./weave task "ship it" && ./weave up --fake
+bun run build:bin && ./weave task "ship it" && ./weave up --fake
 ```
 
 ## Skills — how you add use-cases (ADR-0012 / ADR-0016)
@@ -337,11 +337,11 @@ weave doctor --lenient  # escape hatch (allows adapter→adapter)
 usecases → adapters`, inner layers never import outward, and **adapters import only ports +
 domain** (no adapter→adapter). The modules that *wire* adapters into skills/tool-bundles live
 in `composition/` (allowed to import adapters), alongside `composition-root.ts`/`cli.ts`. It
-runs in `npm test`, so a violation fails CI — weave is fully textbook-hex-compliant.
+runs in `bun run test`, so a violation fails CI — weave is fully textbook-hex-compliant.
 
 ## Field validation — real projects, end to end
 
-Beyond the unit suite (`npm test`) and the [capability demos](#capability-demos), weave is
+Beyond the unit suite (`bun run test`) and the [capability demos](#capability-demos), weave is
 **dogfooded** by driving complete software projects through it and fixing the engine wherever a
 real workload broke it. Five project types, each chosen to stress a different coordination mode:
 
