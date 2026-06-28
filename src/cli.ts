@@ -6,7 +6,7 @@
  * Runs under `node --import tsx src/cli.ts` and compiles via `bun build --compile`.
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, createWriteStream, renameSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
@@ -2243,12 +2243,92 @@ async function startEmbeddedPeer(args: Args, weave: Substrate): Promise<() => Pr
  *  so NetOps utterances hit the forward-* skills; --skill X pins one. With --netops it embeds its
  *  own peer (single command); otherwise it's a thin client and a `weave up` peer answers.
  *  macOS-only (avfoundation mic + `say`). */
+// whisper.cpp models we know how to fetch. The ggerganov HF repo serves them at a stable path.
+// (Models aren't bundled — they're 75MB–1.5GB — so `weave voice` downloads one on first run.)
+const WHISPER_MODELS: Record<string, { url: string; mb: number }> = {
+  "ggml-tiny.en.bin": { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin", mb: 75 },
+  "ggml-base.en.bin": { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin", mb: 142 },
+  "ggml-small.en.bin": { url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin", mb: 466 },
+};
+
+/** Ask a yes/no on the TTY; resolves true on y/yes. Non-interactive (no TTY) resolves to `dflt`. */
+function confirmTty(question: string, dflt = false): Promise<boolean> {
+  if (!process.stdin.isTTY) return Promise.resolve(dflt);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((res) => rl.question(question, (a) => { rl.close(); res(/^y(es)?$/i.test(a.trim())); }));
+}
+
+/** Stream a URL to `dest` (atomic via a .partial temp + rename), drawing a one-line progress bar.
+ *  Throws on a non-200 or a short read so a corrupt file never lands at `dest`. */
+async function downloadFile(url: string, dest: string, label: string): Promise<void> {
+  mkdirSync(dirname(dest), { recursive: true });
+  const res = await fetch(url, { redirect: "follow" });
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  const total = Number(res.headers.get("content-length")) || 0;
+  const tmp = `${dest}.partial`;
+  const out = createWriteStream(tmp);
+  let got = 0, lastDraw = 0;
+  const tty = process.stdout.isTTY === true;
+  try {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      got += value.length;
+      await new Promise<void>((ok, no) => out.write(value, (e) => (e ? no(e) : ok())));
+      if (tty && got - lastDraw > 1_000_000) { // redraw at most every ~1MB
+        lastDraw = got;
+        const pct = total ? Math.floor((got / total) * 100) : 0;
+        const filled = Math.floor(pct / 5);
+        const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+        process.stdout.write(`\r  ↓ ${label} ${bar} ${pct}%  ${(got / 1e6).toFixed(0)} MB\x1b[K`);
+      }
+    }
+    await new Promise<void>((ok, no) => out.end((e?: Error | null) => (e ? no(e) : ok())));
+    if (total && got < total) throw new Error(`short read: ${got}/${total} bytes`);
+    renameSync(tmp, dest);
+    if (tty) process.stdout.write(`\r  ✓ ${label} saved\x1b[K\n`);
+  } catch (e) {
+    try { out.destroy(); rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
+    throw e;
+  }
+}
+
+/** Resolve the whisper model, offering to download a known one if it's missing. Returns the path to
+ *  a present model, or null if it's absent and we couldn't/​shouldn't fetch it (caller should bail). */
+async function ensureWhisperModel(model: string, args: Args): Promise<string | null> {
+  if (existsSync(model)) return model;
+  const name = basename(model);
+  const known = WHISPER_MODELS[name];
+  if (!known) {
+    // Custom path/name we don't have a download URL for — can't help beyond pointing at the repo.
+    console.error(`weave voice: whisper model not found at ${model}\n  Download it from https://huggingface.co/ggerganov/whisper.cpp, or pass --whisper-model <path>.`);
+    return null;
+  }
+  const yes = has(args, "yes") || has(args, "download-model");
+  console.error(`weave voice: no whisper model found.`);
+  const ok = yes || await confirmTty(`  Download ${name} (${known.mb} MB) to ${model}? [y/N] `);
+  if (!ok) {
+    console.error(`  Skipped. Run again with --download-model, or fetch ${name} yourself from https://huggingface.co/ggerganov/whisper.cpp.`);
+    return null;
+  }
+  try {
+    await downloadFile(known.url, model, `${name} (${known.mb} MB)`);
+    return model;
+  } catch (e) {
+    console.error(`weave voice: download failed — ${e instanceof Error ? e.message : String(e)}\n  Fetch ${name} manually from https://huggingface.co/ggerganov/whisper.cpp, or pass --whisper-model <path>.`);
+    return null;
+  }
+}
+
 async function cmdVoice(args: Args): Promise<void> {
   if (process.platform !== "darwin") return void console.error("weave voice: needs macOS (avfoundation mic + `say`).");
   setResilient(); // keep the voice REPL alive across a transient turn error
   const whisper = str(args, "whisper-bin", "whisper-cli");
-  const model = str(args, "whisper-model", join(PACKAGE_ROOT, "models", "ggml-base.en.bin"));
-  if (!existsSync(model)) return void console.error(`weave voice: whisper model not found at ${model}\n  Download e.g. ggml-base.en.bin from https://huggingface.co/ggerganov/whisper.cpp, or pass --whisper-model <path>.`);
+  // Models live under the weave home (we've chdir'd there), not PACKAGE_ROOT — under the bun-compiled
+  // binary import.meta.url resolves into the read-only /$bunfs, so PACKAGE_ROOT/models can never exist.
+  const model = str(args, "whisper-model", join(process.cwd(), "models", "ggml-base.en.bin"));
+  if (!(await ensureWhisperModel(model, args))) return;
   const micDevice = str(args, "mic", ":0"); // avfoundation audio index (`ffmpeg -f avfoundation -list_devices true -i ""`)
   const maxSecs = num(args, "max-secs", 20);
   // VAD: auto-stop a command recording shortly after you stop talking (ffmpeg silencedetect).
@@ -2881,9 +2961,10 @@ usage:
                   pack name is used verbatim as the system prompt; --speak reads answers aloud (macOS 'say').
                   by default each turn is tiered by complexity (chat → Haiku, hard asks → Opus).
                   thin client — start a peer with 'weave up' to do the work
-  weave voice     [--persona <name>] [options]
+  weave voice     [--persona <name>] [--download-model] [options]
                   voice REPL: wake word + whisper STT → routed weave turn → TTS answer
-                  (macOS-only: requires whisper.cpp model; run 'weave voice --help' / see README for the
+                  (macOS-only. On first run it offers to download a whisper.cpp model to
+                  ~/.weave/models/; --download-model accepts without prompting. See README for the
                   full flag set: --whisper-model, --mic, --wake, --no-speak, --timeout, …)
   weave status    show task states (free / held / done)
   weave log       [--follow]
