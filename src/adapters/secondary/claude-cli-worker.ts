@@ -43,8 +43,16 @@ export interface ClaudeCliConfig {
   readonly systemPrompt?: string;
   /** Claude Code tools to auto-approve in print mode. The CLI uses Claude Code's OWN tools, not
    *  weave's ToolHost, so these bypass the effect-gate (ADR-0003 §6) — the caller decides the set.
-   *  The composition root (cli.ts) grants write tools by default and revokes them under --read-only. */
+   *  The composition root (cli.ts) grants write tools by default and revokes them under --read-only.
+   *  MCP integration tools (`mcp__<server>__<tool>`) are granted here too — composition derives the
+   *  grants from the declared servers, so an autonomous (non-interactive) peer never blocks on a
+   *  permission prompt yet its authority stays bounded to the servers you wired. */
   readonly allowedTools?: readonly string[];
+  /** Path(s) to MCP server config JSON (the `.mcp.json` shape: `{ "mcpServers": { … } }`). Passed to
+   *  `claude -p --mcp-config`, with `--strict-mcp-config` so ONLY these servers load — reproducible,
+   *  independent of the user's global Claude Code MCP config (ADR-0003 §6). This is how an agent skill
+   *  reaches outbound integrations (GitHub, Slack, …) without a per-service weave tool adapter. */
+  readonly mcpConfig?: string;
 }
 
 const trunc = (s: string, n: number): string => {
@@ -121,6 +129,10 @@ export class ClaudeCliWorker implements Worker {
     const model = assignment.spec.model ?? this.cfg.model;
     if (model) args.push("--model", model);
     if (this.cfg.systemPrompt) args.push("--append-system-prompt", this.cfg.systemPrompt);
+    // MCP servers BEFORE allowedTools: --strict-mcp-config loads only our declared servers (ignoring
+    // the user's global config) so runs are reproducible; the grants for these servers' tools were
+    // folded into allowedTools by composition. Kept ahead of the variadic --allowedTools below.
+    if (this.cfg.mcpConfig) args.push("--mcp-config", this.cfg.mcpConfig, "--strict-mcp-config");
     if (this.cfg.allowedTools && this.cfg.allowedTools.length > 0) {
       args.push("--allowedTools", ...this.cfg.allowedTools); // variadic; keep last
     }
