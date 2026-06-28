@@ -1932,7 +1932,15 @@ function chatTurn(
     const draw = () => {
       if (!tty) return;
       const secs = Math.round((systemClock.now() - t0) / 1000);
-      process.stdout.write(`\r  ${SPINNER[frame++ % SPINNER.length]} ${detail}… ${secs}s  (Ctrl-C to cancel)\x1b[K`);
+      // Clip `detail` so the whole spinner stays on ONE terminal row. A note longer than the
+      // terminal wraps, and then `\r` only rewinds the last visual row — every wrapped line is
+      // left behind, smearing the note across the screen each frame. Truncate to fit instead.
+      const suffix = `… ${secs}s  (Ctrl-C to cancel)`;
+      const cols = process.stdout.columns || 80;
+      const budget = Math.max(8, cols - 4 - suffix.length); // 4 = "  X " spinner prefix
+      const one = detail.replace(/\s+/g, " ").trim(); // collapse newlines so they can't break the row
+      const shown = one.length > budget ? one.slice(0, budget) : one; // suffix's "…" doubles as the cut marker
+      process.stdout.write(`\r  ${SPINNER[frame++ % SPINNER.length]} ${shown}${suffix}\x1b[K`);
     };
     const spin = tty ? setInterval(draw, 120) : undefined;
     draw();
@@ -1985,17 +1993,22 @@ function chatTurn(
       if (!claimed && !done) detail = "waiting for a peer to pick this up (is `weave up` running?)";
     }, 8000);
     let timer: NodeJS.Timeout | undefined;
-    const timerStart = systemClock.now();
+    let timerStart = systemClock.now();
 
-    function resetTimer(): void {
+    // Sliding *idle* deadline, not an absolute cap: each progress note pushes `timerStart` to now
+    // so a turn that keeps reporting progress keeps living (long projects no longer die at the
+    // original --timeout). We only give up after `timeoutMs` of silence. Pass `bump` from the
+    // progress handler; the initial call leaves the clock where it is.
+    function resetTimer(bump = false): void {
       if (timer) clearTimeout(timer);
+      if (bump) timerStart = systemClock.now();
       const elapsed = systemClock.now() - timerStart;
       const remaining = timeoutMs - elapsed;
       if (remaining > 5000) { // only reset if meaningful time remains
         timer = setTimeout(() => {
           finish(
             claimed
-              ? "the task didn't finish in time — try a simpler ask, or raise --timeout."
+              ? "the task went quiet — no progress for a while. Try a simpler ask, or raise --timeout."
               : "no peer answered. Start one in another terminal: `weave up` (or `weave up --daemon`).",
             false,
           );
@@ -2023,8 +2036,8 @@ function chatTurn(
             const note = (e.payload as ProgressPayload).note;
             detail = note;
             onProgress?.(note); // feed the live answer stream to a voice speaker, if any
-            // Reset timeout on each progress note (incremental progress gets more time)
-            resetTimer();
+            // Slide the idle deadline forward on each progress note (a working turn never times out)
+            resetTimer(true);
             // Print progress notes on their own line (TTY only), keep last for finish()
             // Dedupe: skip if we've seen this note too many times, or printed very recently
             const now = systemClock.now();
