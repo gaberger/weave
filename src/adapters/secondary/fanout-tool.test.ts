@@ -93,6 +93,26 @@ test("fanout returns partial results with `pending` when the deadline fires befo
   assert.equal(out.results[2]!.status, "pending");
 });
 
+test("fanout coerces stringified args from the MCP bridge (JSON-array goals, numeric-string timeout)", async () => {
+  const weave = new InProcessSubstrate(new FakeClock());
+  const tool = fanoutTool(weave, ids, new ManualTimer());
+
+  // Exactly the shape smaller models send through the z.unknown() bridge: goals as a JSON string,
+  // inputs as a "{}" string, timeoutMs as a numeric string.
+  const run = tool.execute(
+    { goals: '["angle one", "angle two"]', inputs: "{}", timeoutMs: "120000", subjectPrefix: "c" },
+    { taskId: "p" },
+  );
+  await Promise.resolve();
+  await settleChild(weave, "c:0", "completed", "one");
+  await settleChild(weave, "c:1", "completed", "two");
+
+  const out = (await run).output as { complete: boolean; results: Array<{ goal: string; summary: string }> };
+  assert.equal(out.complete, true);
+  assert.deepEqual(out.results.map((r) => r.goal), ["angle one", "angle two"]);
+  assert.deepEqual(out.results.map((r) => r.summary), ["one", "two"]);
+});
+
 test("fanout rejects an empty goals list", async () => {
   const weave = new InProcessSubstrate(new FakeClock());
   const res = await fanoutTool(weave, ids, new ManualTimer()).execute({ goals: [] }, { taskId: "p" });

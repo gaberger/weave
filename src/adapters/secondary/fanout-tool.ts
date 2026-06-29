@@ -6,6 +6,47 @@ import { TaskKind } from "../../domain/task.js";
 
 const DEFAULT_FANOUT_TIMEOUT_MS = 240_000; // 4 min — generous for web-research children
 
+/** weave's MCP bridge types every tool field as `z.unknown()` (claude-sdk.ts), so smaller models
+ *  routinely send arrays/objects/numbers as JSON STRINGS (e.g. goals: "[\"a\",\"b\"]"). Coerce at
+ *  the tool boundary instead of rejecting — the alternative is a "non-empty goals" error and a
+ *  silent fallback to inline work (observed with the Haiku tier). */
+function asGoals(raw: unknown): string[] {
+  const clean = (xs: unknown[]) => xs.map(String).map((s) => s.trim()).filter(Boolean);
+  if (Array.isArray(raw)) return clean(raw);
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (s.startsWith("[")) {
+      try {
+        const a = JSON.parse(s);
+        if (Array.isArray(a)) return clean(a);
+      } catch { /* not JSON — fall through to line/single handling */ }
+    }
+    if (s.includes("\n")) return s.split("\n").map((x) => x.trim()).filter(Boolean);
+    return s ? [s] : [];
+  }
+  return [];
+}
+
+function asPositiveNumber(raw: unknown, dflt: number): number {
+  if (typeof raw === "number" && raw > 0) return raw;
+  if (typeof raw === "string") {
+    const n = Number(raw.trim());
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return dflt;
+}
+
+function asObject(raw: unknown): Record<string, unknown> | undefined {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw === "string" && raw.trim().startsWith("{")) {
+    try {
+      const o = JSON.parse(raw);
+      if (o && typeof o === "object" && !Array.isArray(o)) return o as Record<string, unknown>;
+    } catch { /* not JSON */ }
+  }
+  return undefined;
+}
+
 interface ChildResult {
   readonly subject: string;
   readonly goal: string;
@@ -50,14 +91,14 @@ export function fanoutTool(weave: Substrate, newId: () => string, timer: Timer):
       timeoutMs: "number?",
     },
     execute: async (args, ctx): Promise<ToolResult> => {
-      const goals = Array.isArray(args["goals"]) ? (args["goals"] as unknown[]).map(String).filter((g) => g.trim()) : [];
-      if (goals.length === 0) return { ok: false, output: { error: "fanout: `goals` must be a non-empty string[]" } };
+      const goals = asGoals(args["goals"]);
+      if (goals.length === 0) return { ok: false, output: { error: "fanout: `goals` must be a non-empty string[] (also accepts a JSON-array string or newline-separated string)" } };
 
       const parent = ctx?.taskId;
       const prefix = String(args["subjectPrefix"] ?? parent ?? newId());
-      const timeoutMs = typeof args["timeoutMs"] === "number" && args["timeoutMs"] > 0 ? (args["timeoutMs"] as number) : DEFAULT_FANOUT_TIMEOUT_MS;
-      const skill = typeof args["skill"] === "string" ? (args["skill"] as string) : undefined;
-      const inputs = args["inputs"] && typeof args["inputs"] === "object" ? (args["inputs"] as Record<string, unknown>) : undefined;
+      const timeoutMs = asPositiveNumber(args["timeoutMs"], DEFAULT_FANOUT_TIMEOUT_MS);
+      const skill = typeof args["skill"] === "string" && args["skill"].trim() ? (args["skill"] as string) : undefined;
+      const inputs = asObject(args["inputs"]);
 
       // Stable subjects so weave's isSettled dedup processes each child once (ADR-0008 §3).
       const children = goals.map((goal, i) => ({ subject: `${prefix}:${i}`, goal }));
