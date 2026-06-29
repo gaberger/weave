@@ -4,7 +4,7 @@ import type { Timer } from "../../ports/timer.js";
 import type { SealedEvent } from "../../domain/event.js";
 import { TaskKind } from "../../domain/task.js";
 
-const DEFAULT_FANOUT_TIMEOUT_MS = 240_000; // 4 min — generous for web-research children
+const DEFAULT_FANOUT_TIMEOUT_MS = 420_000; // 7 min — child web-research tasks run many fetches each
 
 /** weave's MCP bridge types every tool field as `z.unknown()` (claude-sdk.ts), so smaller models
  *  routinely send arrays/objects/numbers as JSON STRINGS (e.g. goals: "[\"a\",\"b\"]"). Coerce at

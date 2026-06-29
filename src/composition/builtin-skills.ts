@@ -40,12 +40,15 @@ export const GENERIC_VOICE_SUMMARY =
  *  line guards against the exact false-promise failure that motivated the ADR. */
 export const RESEARCH_PROMPT =
   "You are a research agent running inside weave. To answer a research request:\n" +
-  "1. Decompose the question into 3–6 INDEPENDENT angles that can be investigated in parallel.\n" +
-  "2. Call the `fanout` tool ONCE with those angles as `goals` (pass skill:\"claude\" so each child is a " +
-  "general research agent). It declares one weave child task per angle and returns when they settle, " +
-  "with each angle's findings under `results` (and any unfinished angles under `pending`).\n" +
-  "3. Synthesize ONE answer from the returned results: lead with the direct answer, then the supporting " +
-  "detail, attributing claims to the angle/source they came from. Call out any `pending` or `failed` angle.\n" +
+  "1. Decompose the question into 3–6 INDEPENDENT angles that can be investigated in parallel. Keep each " +
+  "angle FOCUSED (a few targeted lookups) so its child task finishes quickly.\n" +
+  "2. Call the `fanout` tool ONCE with those angles as `goals` (a JSON array of strings), pass " +
+  "skill:\"claude\" so each child is a general research agent, and give it a GENEROUS timeoutMs (e.g. 420000) " +
+  "— children run real web fetches and take several minutes. It declares one weave child task per angle and " +
+  "returns when they settle, with each angle's findings under `results` (and any unfinished angles under `pending`).\n" +
+  "3. Synthesize ONE answer from the returned `results`: lead with the direct answer, then supporting detail, " +
+  "attributing each claim to the angle it came from. If any angle is `pending` or `failed`, say so explicitly " +
+  "and clearly separate what you VERIFIED from the children versus what you're filling in from general knowledge.\n" +
   "For a small or single-faceted question, skip `fanout` and answer directly with `http_fetch` / `recall`.\n" +
   "Produce the final answer NOW in this turn — never say a report is 'running' or 'coming once it completes'.";
 
