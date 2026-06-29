@@ -70,13 +70,14 @@ import { loadSkills, skillsDirSignature } from "./adapters/secondary/skill-loade
 import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
 import { bashTool } from "./adapters/secondary/bash-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
+import { fanoutTool } from "./adapters/secondary/fanout-tool.js";
 import { registerInspectTools } from "./composition/inspect-tools.js";
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
 import { startHttpGateway } from "./adapters/primary/http-gateway.js";
-import { echoSkill, claudeSkill, personaAgentSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
+import { echoSkill, claudeSkill, personaAgentSkill, researchSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
 import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
 import { loadPack, loadPackFile, globToRegExp, type Pack } from "./composition/pack.js";
 import { notifyTool } from "./composition/notify-tool.js";
@@ -661,15 +662,22 @@ async function assembleSkills(
   const voiceSummary: Skill[] = llm
     ? [makeAgentSkill({ name: "voice-summary", description: "Verbalize a result for TTS (no tools).", prompt: voicePrompt, tools: [], match: [] }, llm.make(voicePrompt))]
     : [];
+  // Substrate-native research (ADR-0024 §2): fan-out + join via the `fanout` tool. Built only when
+  // there's an LLM backend AND a substrate (so `fanout` is registered). Placed before the catch-all
+  // so a research-shaped goal routes here, not to the generic `claude` fallback.
+  const research: Skill[] = llm && opts.weave ? [researchSkill(llm.make)] : [];
   // `tail` is everything that ISN'T re-scanned from the skills dir — kept separate so a hot-reload
   // swaps only the code-skill slice and leaves these LLM-bound skills (and the fallback) in place.
-  const tail: Skill[] = [...agentSkills, ...claudeSkills, ...voiceSummary, fallback];
+  const tail: Skill[] = [...agentSkills, ...claudeSkills, ...research, ...voiceSummary, fallback];
   const skills: Skill[] = [...codeSkills, ...tail];
 
   const registry = new ToolRegistry();
   for (const s of skills) for (const t of s.tools ?? []) registry.register(t);
   registry.register(httpFetchTool); // generic HTTP capability
-  if (opts.weave && opts.newId) registry.register(spawnTaskTool(opts.weave, opts.newId)); // fan-out
+  if (opts.weave && opts.newId) {
+    registry.register(spawnTaskTool(opts.weave, opts.newId)); // handoff: fire-and-forget child (ADR-0008)
+    registry.register(fanoutTool(opts.weave, opts.newId, new SystemTimer())); // fan-out + JOIN (ADR-0024 §2)
+  }
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
   // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0021 §4).
   registry.register(recallTool(reportsDirFor(args), pickEmbedder(args)));

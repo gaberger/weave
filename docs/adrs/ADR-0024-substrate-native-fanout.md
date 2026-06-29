@@ -1,7 +1,7 @@
 # ADR-0024: Substrate-native fan-out (deny detached backend orchestration; join over `spawn_task`)
 
 - **Status:** Accepted
-- **Implementation:** Partial — §1 (deny `Workflow`/`Task` in both worker backends) shipped; §2 (the fan-out/join primitive) proposed
+- **Implementation:** Complete — §1 (deny `Workflow`/`Task`/`Skill` in both worker backends) + §2 (the `fanout` tool join primitive + built-in `research` skill) shipped
 - **Date:** 2026-06-29
 - **Deciders:** project owner
 - **Tags:** fan-out, join, worker, watchdog, research-agent, orchestration
@@ -58,23 +58,33 @@ call). Denying `Skill` removes the trigger. weave routes its OWN skills a layer 
 With these gone, a "research" ask degrades to **inline** `WebSearch`/`WebFetch` in a single
 synchronous turn: it answers, feeds the watchdog normally, and never detaches or over-promises.
 
-### 2. Substrate-native fan-out + join _(proposed)_
+### 2. The `fanout` tool — substrate-native fan-out + join _(shipped)_
 
 `spawn_task` gives fan-out + lineage but is **handoff** (fire-and-forget, ADR-0008 §3): the
 parent declares children and completes immediately. Research needs a **join** — fan out N
-sub-tasks, await their settled results, then synthesize one answer. Proposed shape:
+sub-tasks, await their settled results, then synthesize one answer. The `fanout` tool
+(`adapters/secondary/fanout-tool.ts`) is that join:
 
-- A `usecases/` join primitive: declare children via `spawn_task` (stable `subject`s for
-  `isSettled` dedup), then **subscribe to the substrate** for those children's settled events
-  (the data is already there — children settle with results + `causedBy=parent`), resolving
-  when all are in or a deadline elapses. Partial results on timeout, never an indefinite hang.
-- A weave-native research skill built on it: decompose → `spawn_task` per search angle →
-  join → synthesize + cite. Each child is a normal weave task (claimable, observable, on the
-  watchdog), so the failure modes that killed §1's `Workflow` path cannot recur.
-- The parent's progress is the join's progress (children settling), keeping the keepalive fed
-  for the whole fan-out.
+- **Declare** one child weave task per goal (stable `subject = <prefix>:<i>` for `isSettled`
+  dedup; `parent`/`causedBy` lineage from the calling task), then **subscribe** to the
+  substrate from `head()+1` and resolve when every child emits a terminal `task.completed` /
+  `task.failed` (whose `payload.summary`/`error` is the child's result). `reversible` effect —
+  it only declares work, like `spawn_task`.
+- **Bounded:** a one-shot deadline (built from the `Timer` port; default 4 min, `timeoutMs`
+  arg) returns partial results with the unfinished subjects under `pending` — never an
+  indefinite hang.
+- **Liveness:** the calling worker holds an outstanding `fanout` tool_use for the whole wait,
+  so the in-flight keepalive keeps the stall watchdog satisfied. Children run on *other*
+  concurrency slots, so a useful fan-out needs peer concurrency ≥ 2 (the `weave up` default)
+  or a `weave pool`; with a single slot, children can't be claimed while the parent blocks and
+  the call returns `pending` at the deadline.
 
-This generalizes beyond research to any fan-out/gather skill.
+Built on it: a **built-in `research` skill** (`builtin-skills.ts`) that auto-routes
+research-shaped goals — decompose into 3–6 angles → `fanout` (children routed to the `claude`
+agent) → synthesize + attribute. Its prompt explicitly forbids the "report coming later"
+phrasing that §1's denied `deep-research` produced. Each child is a normal weave task
+(claimable, observable in `weave status`, on the watchdog), so §1's `Workflow` failure modes
+cannot recur. The primitive generalizes beyond research to any fan-out/gather skill.
 
 ## Consequences
 
