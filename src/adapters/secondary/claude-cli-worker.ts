@@ -53,6 +53,8 @@ export interface ClaudeCliConfig {
    *  independent of the user's global Claude Code MCP config (ADR-0003 §6). This is how an agent skill
    *  reaches outbound integrations (GitHub, Slack, …) without a per-service weave tool adapter. */
   readonly mcpConfig?: string;
+  /** Keepalive cadence while ≥1 tool is in flight (default 15s). See `inflightDelta`. */
+  readonly heartbeatMs?: number;
 }
 
 const trunc = (s: string, n: number): string => {
@@ -103,6 +105,29 @@ export function progressFromEvent(e: Record<string, unknown>): { note?: string; 
   return {};
 }
 
+/** Net change to the in-flight tool count for one stream event: +1 per `tool_use` the model requests,
+ *  -1 per `tool_result` that flows back. A slow tool (multi-minute bash, nested call, `npm install`)
+ *  emits NO stream events while it runs, so without a keepalive the chat idle-timeout / stall watchdog
+ *  (both fed only by `onProgress`) trip on a turn that's genuinely working. Exposed for testing. */
+export function inflightDelta(e: Record<string, unknown>): number {
+  const msg = (e["message"] as Record<string, unknown>) ?? {};
+  const blocks = Array.isArray(msg["content"]) ? (msg["content"] as Array<Record<string, unknown>>) : [];
+  if (e["type"] === "assistant") return blocks.filter((b) => b["type"] === "tool_use").length;
+  if (e["type"] === "user") return -blocks.filter((b) => b["type"] === "tool_result").length;
+  return 0;
+}
+
+/** Test seam for the in-flight keepalive ticker; defaults to a real (unref'd) interval. */
+export interface CliTimer {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+const realTimer: CliTimer = {
+  set: (fn, ms) => { const h = setInterval(fn, ms); h.unref?.(); return h; },
+  clear: (h) => clearInterval(h as ReturnType<typeof setInterval>),
+};
+const DEFAULT_HEARTBEAT_MS = 15_000;
+
 /**
  * A Worker backed by the `claude -p` CLI (Claude Code in print mode). It uses the local
  * Claude Code login — **no ANTHROPIC_API_KEY needed** — and Claude Code's own tools. It's a
@@ -119,6 +144,7 @@ export class ClaudeCliWorker implements Worker {
   constructor(
     private readonly cfg: ClaudeCliConfig = {},
     private readonly runner: ClaudeCliRunner = realClaudeCliRunner,
+    private readonly timer: CliTimer = realTimer,
   ) {}
 
   async run(assignment: TaskAssignment, ctx: WorkerContext): Promise<WorkerResult> {
@@ -142,6 +168,10 @@ export class ClaudeCliWorker implements Worker {
     let result: string | undefined;
     let isError = false;
     let lastNote = "";
+    // In-flight keepalive: a tool that runs longer than the chat idle-timeout / peer stallMs emits no
+    // stream events while it works, so we tick a heartbeat while ≥1 tool is in flight. When none is
+    // running we stay silent, so a genuinely hung CLI (no tool started) is still caught by the watchdog.
+    let inflight = 0;
     const handleLine = (line: string) => {
       const s = line.trim();
       if (!s) return;
@@ -151,6 +181,7 @@ export class ClaudeCliWorker implements Worker {
       } catch {
         return; // tolerate any non-JSON line (e.g. a buffered-fallback plain string)
       }
+      inflight = Math.max(0, inflight + inflightDelta(e));
       const out = progressFromEvent(e);
       if (out.result !== undefined) result = out.result;
       if (out.isError) isError = true;
@@ -168,7 +199,17 @@ export class ClaudeCliWorker implements Worker {
       }
     };
 
-    const res = await this.runner(args, ctx.signal, onData);
+    // Re-assert the current activity on a timer so the idle-timeout slides while a tool runs. Bypasses
+    // the `lastNote` stream-dedup deliberately — each tick must reach the chat to reset its deadline.
+    const ticker = this.timer.set(() => {
+      if (inflight > 0) ctx.onProgress(lastNote || "· working…");
+    }, this.cfg.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
+    let res: ClaudeCliResult;
+    try {
+      res = await this.runner(args, ctx.signal, onData);
+    } finally {
+      this.timer.clear(ticker);
+    }
     if (buf) handleLine(buf); // flush a final line without a trailing newline
 
     if (ctx.signal.aborted) return { status: "aborted", summary: "cancelled", reason: "cancelled" };

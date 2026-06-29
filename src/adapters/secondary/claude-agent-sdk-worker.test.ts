@@ -47,6 +47,7 @@ const ctxOf = (opts: {
 const fakeQuery = (script: {
   toolCall?: string;
   assistantText?: string[];
+  toolUses?: string[];
   resultSubtype?: string;
 }): ClaudeQuery =>
   async function* ({ options }): AsyncIterable<SdkMessage> {
@@ -60,6 +61,9 @@ const fakeQuery = (script: {
         yield { type: "result", subtype: "error_denied" };
         return;
       }
+    }
+    for (const name of script.toolUses ?? []) {
+      yield { type: "assistant", message: { content: [{ type: "tool_use", name }] } };
     }
     for (const text of script.assistantText ?? []) {
       yield { type: "assistant", message: { content: [{ type: "text", text }] } };
@@ -84,6 +88,43 @@ test("gate allows irreversible tool when lease held -> completed", async () => {
   assert.equal(res.status, "completed");
   assert.match(res.summary, /done/);
   assert.deepEqual(progress, ["working", "done"]);
+});
+
+test("tool_use blocks emit a progress heartbeat (feeds idle/stall watchdogs) without polluting the summary", async () => {
+  const progress: string[] = [];
+  const worker = new ClaudeAgentSdkWorker({
+    query: fakeQuery({ toolUses: ["Bash", "WebFetch"], assistantText: ["done"], resultSubtype: "success" }),
+    bridge: NOOP_BRIDGE,
+  });
+  const res = await worker.run(ASSIGNMENT, ctxOf({ held: true, progress }));
+  assert.equal(res.status, "completed");
+  assert.deepEqual(progress, ["using Bash…", "using WebFetch…", "done"]);
+  assert.match(res.summary, /^done$/); // heartbeats are progress-only, never part of the summary
+});
+
+test("in-flight keepalive ticks only while a tool is awaiting its result (long-tool liveness)", async () => {
+  const progress: string[] = [];
+  const fired: Array<() => void> = []; // captured ticker callbacks; we fire them by hand (no real time)
+  // Generator that interleaves the ticker: tool_use (in flight) → fire×2 → tool_result (done) → fire×1.
+  const query: ClaudeQuery = async function* (): AsyncIterable<SdkMessage> {
+    yield { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash" }] } };
+    fired.forEach((fn) => fn()); // tool in flight → these heartbeat
+    fired.forEach((fn) => fn());
+    yield { type: "user", message: { content: [{ type: "tool_result" }] } };
+    fired.forEach((fn) => fn()); // tool done → inflight back to 0 → silent
+    yield { type: "assistant", message: { content: [{ type: "text", text: "done" }] } };
+    yield { type: "result", subtype: "success" };
+  };
+  const worker = new ClaudeAgentSdkWorker({
+    query,
+    bridge: NOOP_BRIDGE,
+    setInterval: (fn) => { fired.push(fn); return fired.length; },
+    clearInterval: () => {},
+  });
+  const res = await worker.run(ASSIGNMENT, ctxOf({ held: true, progress }));
+  assert.equal(res.status, "completed");
+  assert.deepEqual(progress, ["using Bash…", "still using Bash…", "still using Bash…", "done"]);
+  assert.match(res.summary, /^done$/); // keepalive ticks never reach the summary
 });
 
 test("reversible tool is NOT gated even when lease lost (ADR-0004 effect split)", async () => {

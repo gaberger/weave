@@ -21,6 +21,7 @@ export type CanUseTool = (
 export interface SdkContentBlock {
   type: string;
   text?: string;
+  name?: string; // tool_use blocks carry the tool name (used for progress heartbeats)
 }
 export interface SdkMessage {
   type: string;
@@ -60,14 +61,19 @@ export interface ClaudeWorkerConfig {
   readonly model?: string;
   readonly systemPrompt?: string;
   readonly maxTurns?: number;
+  readonly heartbeatMs?: number; // keepalive cadence while a tool is in flight (default 15s)
 }
 
 export interface ClaudeWorkerDeps {
   readonly query: ClaudeQuery;
   readonly bridge: ToolBridge;
+  // Test seam for the in-flight keepalive ticker; defaults to real (unref'd) setInterval/clearInterval.
+  readonly setInterval?: (fn: () => void, ms: number) => unknown;
+  readonly clearInterval?: (handle: unknown) => void;
 }
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_HEARTBEAT_MS = 15_000;
 const DEFAULT_SYSTEM_PROMPT =
   "You are a weave worker executing one assigned task. Use the provided tools to accomplish the goal, then stop. Be concise.";
 
@@ -135,6 +141,20 @@ export class ClaudeAgentSdkWorker implements Worker {
     const textParts: string[] = [];
     let resultSubtype: string | undefined;
 
+    // In-flight keepalive (ADR-0005). The SDK emits an `assistant` message when it *requests* a tool,
+    // then goes silent until that tool's `tool_result` returns — a single slow tool (nested LLM call,
+    // long bash, big fetch) can exceed the chat's idle-timeout / peer stallMs and look dead. While ≥1
+    // tool is in flight we tick a heartbeat so an actively-working turn never trips a watchdog; when no
+    // tool is running we stay silent, so a genuinely wedged SDK (one that never even starts a tool) is
+    // still caught. A hung *tool* is now bounded only by the lease / maxTurns — the accepted trade-off.
+    let inflight = 0;
+    let lastTool = "a tool";
+    const startTicker = this.deps.setInterval ?? ((fn, ms) => { const h = setInterval(fn, ms); h.unref?.(); return h; });
+    const stopTicker = this.deps.clearInterval ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
+    const ticker = startTicker(() => {
+      if (inflight > 0) ctx.onProgress(`still using ${lastTool}…`);
+    }, this.cfg.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
+
     try {
       for await (const msg of this.deps.query({ prompt, options })) {
         if (msg.type === "assistant") {
@@ -142,7 +162,18 @@ export class ClaudeAgentSdkWorker implements Worker {
             if (block.type === "text" && block.text) {
               textParts.push(block.text);
               ctx.onProgress(block.text);
+            } else if (block.type === "tool_use") {
+              // Heartbeat at tool *request* (the ticker above covers the silent gap until tool_result).
+              // The note is progress-only — never pushed to `textParts`, so it can't pollute the summary.
+              inflight++;
+              lastTool = block.name ?? "a tool";
+              ctx.onProgress(`using ${lastTool}…`);
             }
+          }
+        } else if (msg.type === "user") {
+          // tool_result(s) flowing back: the matching tool(s) finished — wind down the in-flight count.
+          for (const block of msg.message?.content ?? []) {
+            if (block.type === "tool_result" && inflight > 0) inflight--;
           }
         } else if (msg.type === "result") {
           resultSubtype = msg.subtype;
@@ -151,6 +182,8 @@ export class ClaudeAgentSdkWorker implements Worker {
       }
     } catch (err) {
       return this.terminal(leaseLost, ctx, textParts, undefined, err);
+    } finally {
+      stopTicker(ticker);
     }
 
     return this.terminal(leaseLost, ctx, textParts, resultSubtype, undefined);

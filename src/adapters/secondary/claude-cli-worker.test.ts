@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { WorkerContext, TaskAssignment } from "../../ports/worker.js";
-import { ClaudeCliWorker, progressFromEvent, type ClaudeCliRunner } from "./claude-cli-worker.js";
+import { ClaudeCliWorker, progressFromEvent, inflightDelta, type ClaudeCliRunner, type CliTimer } from "./claude-cli-worker.js";
 
 const ctx = (): WorkerContext => ({
   tools: { available: () => [], invoke: async () => ({ ok: true, output: null }) },
@@ -113,6 +113,33 @@ test("ClaudeCliWorker maps a result event with is_error to failed", async () => 
   const res = await new ClaudeCliWorker({}, runner).run(task, ctx());
   assert.equal(res.status, "failed");
   assert.equal(res.status === "failed" ? res.summary : null, "ran out of turns");
+});
+
+test("inflightDelta counts tool_use up and tool_result down (drives the keepalive)", () => {
+  assert.equal(inflightDelta({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash" }, { type: "tool_use", name: "Read" }] } }), 2);
+  assert.equal(inflightDelta({ type: "user", message: { content: [{ type: "tool_result" }] } }), -1);
+  assert.equal(inflightDelta({ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } }), 0);
+  assert.equal(inflightDelta({ type: "result", result: "ok" }), 0);
+});
+
+test("ClaudeCliWorker keepalive ticks only while a tool is in flight (long-tool liveness)", async () => {
+  const notes: string[] = [];
+  const c: WorkerContext = { ...ctx(), onProgress: (n) => notes.push(n) };
+  const fired: Array<() => void> = []; // captured ticker callback(s); fired by hand, no real time
+  const timer: CliTimer = { set: (fn) => { fired.push(fn); return fired.length; }, clear: () => {} };
+  const runner: ClaudeCliRunner = async (_a, _s, onData) => {
+    onData?.(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "sleep 600" } }] } }) + "\n");
+    fired.forEach((fn) => fn()); // tool in flight → heartbeat (re-asserts the last note)
+    fired.forEach((fn) => fn());
+    onData?.(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result" }] } }) + "\n");
+    fired.forEach((fn) => fn()); // tool done → inflight 0 → silent
+    onData?.(JSON.stringify({ type: "result", subtype: "success", result: "done", is_error: false }) + "\n");
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const res = await new ClaudeCliWorker({}, runner, timer).run(task, c);
+  assert.equal(res.status, "completed");
+  // one real tool note, then two keepalive re-assertions of it; nothing after the tool_result.
+  assert.deepEqual(notes, ["→ Bash sleep 600", "→ Bash sleep 600", "→ Bash sleep 600"]);
 });
 
 test("progressFromEvent picks the salient tool argument and ignores noise", () => {
