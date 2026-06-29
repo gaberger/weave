@@ -35,20 +35,28 @@ where fan-out belongs.
 
 ## Decision
 
-### 1. Deny detached-work tools to weave workers _(shipped)_
+### 1. Deny interactive-harness tools to weave workers _(shipped)_
 
-`Workflow` and `Task` are denied in **both** worker backends:
+`Workflow`, `Task`, and `Skill` are denied in **both** worker backends:
 
 - **SDK worker** (`claude-agent-sdk-worker.ts`): added to `SDK_BUILTIN_TOOLS`, which is passed
-  as `disallowedTools`. (`Task` was already present; `Workflow` is new.)
+  as `disallowedTools`. (`Task` was already present; `Workflow` and `Skill` are new.)
 - **CLI worker** (`claude-cli-worker.ts`): `--allowedTools` is only an *auto-approve allowlist*
-  — in print mode `Workflow`/`Task` can still run — so we pass an explicit
-  `--disallowedTools Workflow Task` (the `DENIED_TOOLS` constant), ordered before the variadic
-  `--allowedTools` so the flag name terminates the deny list.
+  — in print mode these can still run — so we pass an explicit
+  `--disallowedTools Workflow Task Skill` (the `DENIED_TOOLS` constant), ordered before the
+  variadic `--allowedTools` so the flag name terminates the deny list.
+
+`Workflow`/`Task` are the detached-orchestration tools (see Context). `Skill` is denied because
+it loads Claude Code's *bundled* skills — e.g. `deep-research`, which narrates "I launched the
+workflow, I'll present the report once it completes" and then fans out via `Workflow`. With
+only `Workflow` denied, the observed result was a **false promise**: the task completed (no
+more hang) but the answer claimed a report was still coming that would never arrive (confirmed
+in the event log: `using Skill…` → workflow narration → `task.completed`, with no `Workflow`
+call). Denying `Skill` removes the trigger. weave routes its OWN skills a layer up (the peer's
+`skill: claude` router), so this only removes Claude Code's bundle, not weave capabilities.
 
 With these gone, a "research" ask degrades to **inline** `WebSearch`/`WebFetch` in a single
-synchronous turn: it answers, feeds the watchdog normally, and never detaches. `Skill` itself
-is left enabled — only the detached-orchestration tools are removed.
+synchronous turn: it answers, feeds the watchdog normally, and never detaches or over-promises.
 
 ### 2. Substrate-native fan-out + join _(proposed)_
 

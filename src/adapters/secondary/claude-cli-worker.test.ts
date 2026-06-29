@@ -41,7 +41,7 @@ test("ClaudeCliWorker hard-denies detached-work tools and keeps --allowedTools l
 
   const denyAt = captured.indexOf("--disallowedTools");
   assert.ok(denyAt >= 0, "should pass --disallowedTools");
-  assert.ok(captured.includes("Workflow") && captured.includes("Task"), "Workflow + Task are denied");
+  assert.ok(captured.includes("Workflow") && captured.includes("Task") && captured.includes("Skill"), "Workflow + Task + Skill are denied");
   // --allowedTools is variadic and must stay last; the deny list precedes it (the flag name terminates it).
   assert.ok(denyAt < captured.indexOf("--allowedTools"), "--disallowedTools must precede --allowedTools");
 });
@@ -53,7 +53,7 @@ test("ClaudeCliWorker denies detached-work tools even with no allowedTools grant
     return { code: 0, stdout: "ok\n", stderr: "" };
   };
   await new ClaudeCliWorker({}, runner).run(task, ctx());
-  assert.ok(captured.includes("--disallowedTools") && captured.includes("Workflow") && captured.includes("Task"));
+  assert.ok(captured.includes("--disallowedTools") && captured.includes("Workflow") && captured.includes("Task") && captured.includes("Skill"));
 });
 
 test("ClaudeCliWorker wires MCP config: --mcp-config + --strict-mcp-config, before the variadic --allowedTools", async () => {

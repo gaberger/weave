@@ -38,10 +38,14 @@ export const realClaudeCliRunner: ClaudeCliRunner = (args, signal, onData) =>
     child.on("error", (e) => resolve({ code: 1, stdout, stderr: stderr + String(e) }));
   });
 
-/** Tools always denied to a weave CLI worker (ADR-0024): they spawn *detached* work that reports
- *  completion out-of-band, which a headless worker can't observe — see the --disallowedTools push
- *  in run(). Fan-out belongs on the substrate via `spawn_task`. */
-const DENIED_TOOLS = ["Workflow", "Task"] as const;
+/** Tools always denied to a weave CLI worker (ADR-0024): Claude Code's interactive-harness
+ *  machinery a headless worker can't drive. `Workflow`/`Task` spawn *detached* work that reports
+ *  completion out-of-band (which the worker never receives → silent → watchdog kill). `Skill`
+ *  loads bundled skills like `deep-research`, which narrate a workflow plan and fan out via
+ *  `Workflow` — so even with Workflow denied the turn ends on a false "report coming" promise.
+ *  The worker researches inline (WebSearch/WebFetch); fan-out belongs on the substrate via
+ *  `spawn_task`. See the --disallowedTools push in run(). */
+const DENIED_TOOLS = ["Workflow", "Task", "Skill"] as const;
 
 export interface ClaudeCliConfig {
   readonly model?: string;

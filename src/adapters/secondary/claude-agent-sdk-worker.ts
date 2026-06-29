@@ -43,14 +43,18 @@ export interface ClaudeRunOptions {
 /** The SDK's built-in tools — disabled so the agent uses weave's gated MCP tools (e.g. the
  *  forward scripts run through weave's `bash`, not the SDK's unsandboxed built-in Bash).
  *
- *  `Task` and `Workflow` are denied for a second reason (ADR-0024): both spawn *detached*
- *  work that signals completion out-of-band (a subagent / a background workflow notifying the
- *  interactive main loop). A headless weave worker is never re-invoked on that notification, so
- *  it can't receive the result — it just goes silent and trips the stall watchdog. Fan-out
- *  belongs on the substrate via `spawn_task`, not in a backend the worker can't observe. */
+ *  `Task`, `Workflow`, and `Skill` are denied for a second reason (ADR-0024): they reach for
+ *  Claude Code's *interactive-harness* machinery that a headless weave worker can't drive.
+ *  `Task`/`Workflow` spawn *detached* work that signals completion out-of-band (a subagent / a
+ *  background workflow notifying the interactive main loop) — a weave worker is never re-invoked
+ *  on that notification, so it goes silent and trips the stall watchdog. `Skill` loads Claude
+ *  Code's bundled skills (e.g. `deep-research`), which narrate "I launched the workflow, I'll
+ *  present the report once it completes" and then fan out via `Workflow` — so even with Workflow
+ *  denied the turn ends on a false promise. weave routes its OWN skills a layer up; the worker
+ *  should research inline (WebSearch/WebFetch) and fan out on the substrate via `spawn_task`. */
 const SDK_BUILTIN_TOOLS = [
   "Bash", "BashOutput", "KillBash", "KillShell", "Read", "Write", "Edit", "MultiEdit",
-  "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "Workflow", "TodoWrite", "ExitPlanMode",
+  "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "Workflow", "Skill", "TodoWrite", "ExitPlanMode",
 ];
 export type ClaudeQuery = (params: {
   prompt: string;
