@@ -171,3 +171,15 @@ test("query throwing -> failed (not completed)", async () => {
   assert.equal(res.status, "failed");
   assert.match(res.status === "failed" ? res.error : "", /network down/);
 });
+
+test("detached-work tools (Workflow/Task) are disallowed (ADR-0024)", async () => {
+  let captured: string[] | undefined;
+  const capture: ClaudeQuery = async function* ({ options }) {
+    captured = options.disallowedTools;
+    yield { type: "result", subtype: "success" };
+  };
+  const worker = new ClaudeAgentSdkWorker({ query: capture, bridge: NOOP_BRIDGE });
+  await worker.run(ASSIGNMENT, ctxOf({ held: true }));
+  assert.ok(captured?.includes("Workflow"), "Workflow must be disallowed (it detaches into a background run)");
+  assert.ok(captured?.includes("Task"), "Task must be disallowed (it spawns an out-of-band subagent)");
+});

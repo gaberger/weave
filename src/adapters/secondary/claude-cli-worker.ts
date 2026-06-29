@@ -38,6 +38,11 @@ export const realClaudeCliRunner: ClaudeCliRunner = (args, signal, onData) =>
     child.on("error", (e) => resolve({ code: 1, stdout, stderr: stderr + String(e) }));
   });
 
+/** Tools always denied to a weave CLI worker (ADR-0024): they spawn *detached* work that reports
+ *  completion out-of-band, which a headless worker can't observe — see the --disallowedTools push
+ *  in run(). Fan-out belongs on the substrate via `spawn_task`. */
+const DENIED_TOOLS = ["Workflow", "Task"] as const;
+
 export interface ClaudeCliConfig {
   readonly model?: string;
   readonly systemPrompt?: string;
@@ -159,6 +164,12 @@ export class ClaudeCliWorker implements Worker {
     // the user's global config) so runs are reproducible; the grants for these servers' tools were
     // folded into allowedTools by composition. Kept ahead of the variadic --allowedTools below.
     if (this.cfg.mcpConfig) args.push("--mcp-config", this.cfg.mcpConfig, "--strict-mcp-config");
+    // Hard-deny detached-work tools (ADR-0024). `--allowedTools` is only an auto-approve allowlist;
+    // in print mode `Workflow`/`Task` can still run, then signal completion out-of-band (a background
+    // workflow / subagent notifying the interactive main loop) — which a headless weave worker never
+    // receives, so it goes silent and the stall watchdog kills it. Fan-out belongs on the substrate
+    // via `spawn_task`. Kept before the variadic --allowedTools (the flag name terminates this list).
+    args.push("--disallowedTools", ...DENIED_TOOLS);
     if (this.cfg.allowedTools && this.cfg.allowedTools.length > 0) {
       args.push("--allowedTools", ...this.cfg.allowedTools); // variadic; keep last
     }

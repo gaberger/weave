@@ -41,10 +41,16 @@ export interface ClaudeRunOptions {
 }
 
 /** The SDK's built-in tools — disabled so the agent uses weave's gated MCP tools (e.g. the
- *  forward scripts run through weave's `bash`, not the SDK's unsandboxed built-in Bash). */
+ *  forward scripts run through weave's `bash`, not the SDK's unsandboxed built-in Bash).
+ *
+ *  `Task` and `Workflow` are denied for a second reason (ADR-0024): both spawn *detached*
+ *  work that signals completion out-of-band (a subagent / a background workflow notifying the
+ *  interactive main loop). A headless weave worker is never re-invoked on that notification, so
+ *  it can't receive the result — it just goes silent and trips the stall watchdog. Fan-out
+ *  belongs on the substrate via `spawn_task`, not in a backend the worker can't observe. */
 const SDK_BUILTIN_TOOLS = [
   "Bash", "BashOutput", "KillBash", "KillShell", "Read", "Write", "Edit", "MultiEdit",
-  "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "TodoWrite", "ExitPlanMode",
+  "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "Workflow", "TodoWrite", "ExitPlanMode",
 ];
 export type ClaudeQuery = (params: {
   prompt: string;
