@@ -1,0 +1,5 @@
+# Generated report artifacts (point-in-time snapshots) — regenerate, don't commit.
+# See README.md for the commands.
+*
+!.gitignore
+!README.md
