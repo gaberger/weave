@@ -78,6 +78,8 @@ import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
 import { startHttpGateway } from "./adapters/primary/http-gateway.js";
 import { echoSkill, claudeSkill, personaAgentSkill, researchSkill, RESEARCH_MATCH, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
+import { forwardVulnerabilitySkill } from "./composition/forward-skills.js";
+import { forwardTools } from "./adapters/secondary/forward-tools.js";
 import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
 import { loadPack, loadPackFile, globToRegExp, type Pack } from "./composition/pack.js";
 import { notifyTool } from "./composition/notify-tool.js";
@@ -636,6 +638,14 @@ async function assembleSkills(
   if (!pack && packName(args))
     console.error(`weave: pack '${packName(args)}' not found under ${join(PACKAGE_ROOT, "skills")} — using generic agent`);
   const seen = new Set([...codeSkills, ...agentSkills].map((s) => s.name));
+  // Forward NetOps pack (Slice 1 of the forward-* conversion; ADR-0012/0016 Ring 2): when the pack
+  // bundles the forward skills, the vulnerability capability ships as a CODE skill that orchestrates
+  // the typed `forward_*` tools — replacing the prose SKILL.md version so the agent never reverse-
+  // engineers NQE / credentials / network ids. Built BEFORE claudeSkills and pre-seeded into `seen`
+  // so the declarative same-named skill is skipped (code skill wins).
+  const packBundlesForward = !!(pack && pack.bundles.some((b) => globToRegExp(b).test("forward-vulnerability")));
+  const forwardPack: Skill[] = llm && packBundlesForward ? [forwardVulnerabilitySkill(llm.make)] : [];
+  for (const s of forwardPack) seen.add(s.name);
   const claudeSkills: Skill[] = [];
   if (llm) {
     // Pack-bundled vendored skills, filtered by the pack's `bundles` globs (searched FIRST so they
@@ -680,7 +690,7 @@ async function assembleSkills(
   const research: Skill[] = llm && opts.weave ? [researchSkill(llm.make)] : [];
   // `tail` is everything that ISN'T re-scanned from the skills dir — kept separate so a hot-reload
   // swaps only the code-skill slice and leaves these LLM-bound skills (and the fallback) in place.
-  const tail: Skill[] = [...agentSkills, ...claudeSkills, ...research, ...voiceSummary, fallback];
+  const tail: Skill[] = [...agentSkills, ...forwardPack, ...claudeSkills, ...research, ...voiceSummary, fallback];
   const skills: Skill[] = [...codeSkills, ...tail];
 
   const registry = new ToolRegistry();
@@ -705,6 +715,10 @@ async function assembleSkills(
       }),
     );
   }
+  // Forward NetOps tools (Slice 1): typed front doors over the forward-* python. Registered only
+  // when the pack bundles them, so the generic engine stays Forward-free (ADR-0016). cwd = where the
+  // Forward `.env` lives (the python auto-loads creds from there).
+  if (packBundlesForward) for (const t of forwardTools({ packageRoot: PACKAGE_ROOT, cwd: process.cwd() })) registry.register(t);
   // --target <dir>: inspect an arbitrary tree read-only (rooted there, no edit tool); else edit cwd.
   // See registerInspectTools — extracted so the least-privilege invariant is unit-tested (inspect-tools.test.ts).
   registerInspectTools(registry, str(args, "target", ""), process.cwd());
