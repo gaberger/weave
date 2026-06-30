@@ -320,7 +320,9 @@ const SPECS: readonly ScriptToolSpec[] = [
       "CVE disposition audit: every CVE Forward evaluated, its disposition (IMPACTED / " +
       "POTENTIALLY_IMPACTED / NOT_IMPACTED / NOT_EVALUATED) and the REASON — including the filtered-" +
       "out (NOT_IMPACTED) CVEs and why. For 'show the CVEs we filtered out and why', coverage, and " +
-      "audit artifacts. Returns a partition summary + per-CVE rows with per-OS evidence.",
+      "audit artifacts. disposition=all (default) returns the full partition summary + COMPACT per-CVE " +
+      "rows (digestible in one call); request a SPECIFIC disposition (e.g. not-impacted) for the full " +
+      "per-OS evidence rows (versions, config analysis, device counts).",
     args: [
       { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
       { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
