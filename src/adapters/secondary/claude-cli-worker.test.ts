@@ -147,24 +147,28 @@ test("inflightDelta counts tool_use up and tool_result down (drives the keepaliv
   assert.equal(inflightDelta({ type: "result", result: "ok" }), 0);
 });
 
-test("ClaudeCliWorker keepalive ticks only while a tool is in flight (long-tool liveness)", async () => {
+test("ClaudeCliWorker keepalive pulses SILENT onActivity while a tool is in flight (no note spam)", async () => {
   const notes: string[] = [];
-  const c: WorkerContext = { ...ctx(), onProgress: (n) => notes.push(n) };
+  let activity = 0;
+  const c: WorkerContext = { ...ctx(), onProgress: (n) => notes.push(n), onActivity: () => activity++ };
   const fired: Array<() => void> = []; // captured ticker callback(s); fired by hand, no real time
   const timer: CliTimer = { set: (fn) => { fired.push(fn); return fired.length; }, clear: () => {} };
   const runner: ClaudeCliRunner = async (_a, _s, onData) => {
     onData?.(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: "sleep 600" } }] } }) + "\n");
-    fired.forEach((fn) => fn()); // tool in flight → heartbeat (re-asserts the last note)
+    fired.forEach((fn) => fn()); // tool in flight → ticker pulses onActivity (silent)
     fired.forEach((fn) => fn());
     onData?.(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result" }] } }) + "\n");
-    fired.forEach((fn) => fn()); // tool done → inflight 0 → silent
+    fired.forEach((fn) => fn()); // tool done → inflight 0 → ticker is a no-op
     onData?.(JSON.stringify({ type: "result", subtype: "success", result: "done", is_error: false }) + "\n");
     return { code: 0, stdout: "", stderr: "" };
   };
   const res = await new ClaudeCliWorker({}, runner, timer).run(task, c);
   assert.equal(res.status, "completed");
-  // one real tool note, then two keepalive re-assertions of it; nothing after the tool_result.
-  assert.deepEqual(notes, ["→ Bash sleep 600", "→ Bash sleep 600", "→ Bash sleep 600"]);
+  // The real tool note is emitted ONCE — the ticker no longer re-asserts it as progress spam.
+  assert.deepEqual(notes, ["→ Bash sleep 600"]);
+  // Liveness is signalled silently instead: onData fires onActivity per chunk (3) + 2 ticker pulses
+  // while the tool is in flight (the 3rd fire is a no-op). So ≥5 — strictly more than the note count.
+  assert.ok(activity >= 5, `expected silent liveness pulses (onData + 2 ticker), got ${activity}`);
 });
 
 test("progressFromEvent picks the salient tool argument and ignores noise", () => {

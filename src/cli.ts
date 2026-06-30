@@ -881,7 +881,8 @@ async function cmdUp(args: Args): Promise<void> {
       leaseMs: numPos(args, "lease-ms", 30_000),
       maxConcurrent: numPos(args, "concurrency", 2),
       tickMs: numPos(args, "tick-ms", 3_000),
-      stallMs: numPos(args, "stall-ms", 180_000), // abort a worker silent for 3min (0 disables)
+      stallMs: numPos(args, "stall-ms", 300_000), // abort a worker that emits NO output for 5min (0 disables).
+      //   Worker output (incl. long tool calls) resets this, so it only catches a truly hung subprocess.
       maxStalls: numPos(args, "max-stalls", 2),
     },
     newWorker: () => router,
@@ -1346,7 +1347,8 @@ async function cmdLoop(args: Args): Promise<void> {
       leaseMs: numPos(args, "lease-ms", 60_000),
       maxConcurrent: numPos(args, "concurrency", 4),
       tickMs: numPos(args, "tick-ms", 2_000),
-      stallMs: numPos(args, "stall-ms", 180_000), // abort a worker silent for 3min (0 disables)
+      stallMs: numPos(args, "stall-ms", 300_000), // abort a worker that emits NO output for 5min (0 disables).
+      //   Worker output (incl. long tool calls) resets this, so it only catches a truly hung subprocess.
       maxStalls: numPos(args, "max-stalls", 2),
     },
     newWorker: () => new SkillRouterWorker(skills),
@@ -2048,7 +2050,7 @@ function chatTurn(
         timer = setTimeout(() => {
           finish(
             claimed
-              ? "the task went quiet — no progress for a while. Try a simpler ask, or raise --timeout."
+              ? "the task went quiet — no progress events for a while. A long single tool call can do this; raise --timeout (or, for a pool, --stall-ms), or split the work into smaller tasks."
               : "no peer answered. Start one in another terminal: `weave up` (or `weave up --daemon`).",
             false,
           );

@@ -36,10 +36,12 @@ const ctxOf = (opts: {
   toolEffect?: "read" | "reversible" | "irreversible";
   signal?: AbortSignal;
   progress?: string[];
+  activity?: () => void;
 }): WorkerContext => ({
   tools: opts.toolName ? hostWith(opts.toolName, opts.toolEffect ?? "irreversible") : new ToolRegistry().hostFor(GRANT),
   lease: lease(opts.held),
   onProgress: (n) => opts.progress?.push(n),
+  ...(opts.activity ? { onActivity: opts.activity } : {}),
   signal: opts.signal ?? new AbortController().signal,
 });
 
@@ -102,16 +104,17 @@ test("tool_use blocks emit a progress heartbeat (feeds idle/stall watchdogs) wit
   assert.match(res.summary, /^done$/); // heartbeats are progress-only, never part of the summary
 });
 
-test("in-flight keepalive ticks only while a tool is awaiting its result (long-tool liveness)", async () => {
+test("in-flight keepalive pulses SILENT onActivity (no progress spam) while a tool is awaiting its result", async () => {
   const progress: string[] = [];
+  let activity = 0;
   const fired: Array<() => void> = []; // captured ticker callbacks; we fire them by hand (no real time)
-  // Generator that interleaves the ticker: tool_use (in flight) → fire×2 → tool_result (done) → fire×1.
+  // tool_use (inflight=1) → fire ticker ×2 (pulses onActivity) → tool_result (inflight=0) → fire ×1 (no-op).
   const query: ClaudeQuery = async function* (): AsyncIterable<SdkMessage> {
     yield { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash" }] } };
-    fired.forEach((fn) => fn()); // tool in flight → these heartbeat
+    fired.forEach((fn) => fn());
     fired.forEach((fn) => fn());
     yield { type: "user", message: { content: [{ type: "tool_result" }] } };
-    fired.forEach((fn) => fn()); // tool done → inflight back to 0 → silent
+    fired.forEach((fn) => fn());
     yield { type: "assistant", message: { content: [{ type: "text", text: "done" }] } };
     yield { type: "result", subtype: "success" };
   };
@@ -121,10 +124,15 @@ test("in-flight keepalive ticks only while a tool is awaiting its result (long-t
     setInterval: (fn) => { fired.push(fn); return fired.length; },
     clearInterval: () => {},
   });
-  const res = await worker.run(ASSIGNMENT, ctxOf({ held: true, progress }));
+  const res = await worker.run(ASSIGNMENT, ctxOf({ held: true, progress, activity: () => activity++ }));
   assert.equal(res.status, "completed");
-  assert.deepEqual(progress, ["using Bash…", "still using Bash…", "still using Bash…", "done"]);
-  assert.match(res.summary, /^done$/); // keepalive ticks never reach the summary
+  // The ticker no longer adds "still using…" notes — progress is just the real tool note + final text.
+  assert.deepEqual(progress, ["using Bash…", "done"]);
+  // Liveness is signalled SILENTLY instead: per-message onActivity (4 msgs) + 2 ticker pulses while a
+  // tool is in flight (the 3rd ticker fire is a no-op, inflight back to 0). So strictly more than the
+  // message count — proving the ticker contributes silent liveness during the tool gap.
+  assert.ok(activity >= 6, `expected silent liveness pulses (msgs + 2 ticker), got ${activity}`);
+  assert.match(res.summary, /^done$/);
 });
 
 test("reversible tool is NOT gated even when lease lost (ADR-0004 effect split)", async () => {

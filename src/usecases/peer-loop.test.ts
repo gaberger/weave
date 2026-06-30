@@ -290,6 +290,78 @@ test("stall watchdog aborts a silent worker, retries via reclaim, then fails ter
   ac.abort();
 });
 
+test("stall watchdog spares a worker that signals liveness but emits no progress notes", async () => {
+  const clock = new FakeClock(0);
+  const weave = new InProcessSubstrate(clock);
+  let n = 0;
+  const newId = () => `id-${++n}`;
+
+  // A worker mid long-tool-call: it streams liveness (onActivity) but no user-facing progress
+  // notes, and stays running until released. Without the liveness channel this looks identical to
+  // the hung worker above and would be wrongly aborted.
+  let captured: import("../ports/worker.js").WorkerContext | undefined;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const live = (): Worker => ({
+    async run(_a, ctx) {
+      captured = ctx;
+      ctx.onActivity?.(); // alive at claim
+      await gate;
+      return { status: "completed", summary: "done" };
+    },
+  });
+
+  const timer = new ManualTimer();
+  const peer = createPeer({
+    weave,
+    // Same shape as the hung-worker test: lease never expires, so only the stall watchdog could
+    // free this task. stallMs=50 — we advance well past it repeatedly while signaling liveness.
+    cfg: { agentId: "agent-a", grant: GRANT, leaseMs: 10_000, maxConcurrent: 1, tickMs: 10, stallMs: 50, maxStalls: 1 },
+    newWorker: () => live(),
+    clock,
+    timer,
+    newId,
+  });
+
+  const ac = new AbortController();
+  void peer.start(ac.signal);
+  await weave.append({
+    id: newId(),
+    kind: TaskKind.Declared,
+    actor: "client",
+    subject: "task-1",
+    payload: { spec: { goal: "long quiet tool call" } },
+  });
+  await settle();
+
+  // Advance far past stallMs three times; each step signals liveness at the new time just before
+  // the watchdog ticks (mirroring a worker that streams output then the peer sweeps).
+  for (const t of [60, 120, 180]) {
+    clock.set(t);
+    captured?.onActivity?.();
+    timer.fire();
+    await settle();
+  }
+
+  let events = await collect(weave);
+  assert.equal(events.some((e) => e.kind === TaskKind.Failed && e.subject === "task-1"), false, "live worker not failed");
+  assert.equal(
+    events.some((e) => e.kind === TaskKind.Progress && /stall watchdog/.test((e.payload as { note: string }).note)),
+    false,
+    "no stall-watchdog abort note for a live worker",
+  );
+  assert.equal(isSettled(events, "task-1"), false, "task still running, not aborted");
+
+  // Releasing the worker lets it complete normally.
+  release();
+  await settle();
+  events = await collect(weave);
+  assert.equal(isSettled(events, "task-1"), true, "task settles once the worker returns");
+  assert.equal(events.some((e) => e.kind === TaskKind.Completed && e.subject === "task-1"), true, "completed cleanly");
+
+  ac.abort();
+});
+
 test("task.cancel aborts the running worker and is terminal (no reclaim)", async () => {
   const clock = new FakeClock(0);
   const weave = new InProcessSubstrate(clock);

@@ -154,19 +154,21 @@ export class ClaudeAgentSdkWorker implements Worker {
     // In-flight keepalive (ADR-0005). The SDK emits an `assistant` message when it *requests* a tool,
     // then goes silent until that tool's `tool_result` returns — a single slow tool (nested LLM call,
     // long bash, big fetch) can exceed the chat's idle-timeout / peer stallMs and look dead. While ≥1
-    // tool is in flight we tick a heartbeat so an actively-working turn never trips a watchdog; when no
-    // tool is running we stay silent, so a genuinely wedged SDK (one that never even starts a tool) is
-    // still caught. A hung *tool* is now bounded only by the lease / maxTurns — the accepted trade-off.
+    // tool is in flight we pulse `onActivity` — a SILENT liveness signal that resets the watchdog
+    // WITHOUT writing a log event (no "still using…" spam) — so an actively-working turn never trips a
+    // watchdog; when no tool is running we stay quiet, so a genuinely wedged SDK (one that never even
+    // starts a tool) is still caught. A hung *tool* is bounded only by the lease / maxTurns.
     let inflight = 0;
     let lastTool = "a tool";
     const startTicker = this.deps.setInterval ?? ((fn, ms) => { const h = setInterval(fn, ms); h.unref?.(); return h; });
     const stopTicker = this.deps.clearInterval ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
     const ticker = startTicker(() => {
-      if (inflight > 0) ctx.onProgress(`still using ${lastTool}…`);
+      if (inflight > 0) ctx.onActivity?.();
     }, this.cfg.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
 
     try {
       for await (const msg of this.deps.query({ prompt, options })) {
+        ctx.onActivity?.(); // any SDK message = liveness, incl. tool_use/tool_result/system with no text note
         if (msg.type === "assistant") {
           for (const block of msg.message?.content ?? []) {
             if (block.type === "text" && block.text) {

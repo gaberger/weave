@@ -263,6 +263,13 @@ export class PeerLoop {
             if (e) e.lastProgressAt = this.deps.clock.now(); // feed the stall watchdog
             void this.emit(TaskKind.Progress, taskId, { note });
           },
+          // Liveness without a log event: any output from the worker (incl. events that don't map
+          // to a *new* note) proves the subprocess is alive, so it resets the stall watchdog. A
+          // worker truly hung (e.g. blocked on silent stdin) emits nothing and is still reclaimed.
+          onActivity: () => {
+            const e = this.active.get(taskId);
+            if (e) e.lastProgressAt = this.deps.clock.now();
+          },
           signal: abort.signal,
         },
       );

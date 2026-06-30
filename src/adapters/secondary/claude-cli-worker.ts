@@ -184,8 +184,9 @@ export class ClaudeCliWorker implements Worker {
     let isError = false;
     let lastNote = "";
     // In-flight keepalive: a tool that runs longer than the chat idle-timeout / peer stallMs emits no
-    // stream events while it works, so we tick a heartbeat while ≥1 tool is in flight. When none is
-    // running we stay silent, so a genuinely hung CLI (no tool started) is still caught by the watchdog.
+    // stream events while it works, so we pulse `onActivity` (silent liveness, no log event) while ≥1
+    // tool is in flight. When none is running we stay quiet, so a genuinely hung CLI (no tool started)
+    // is still caught by the watchdog.
     let inflight = 0;
     const handleLine = (line: string) => {
       const s = line.trim();
@@ -206,6 +207,10 @@ export class ClaudeCliWorker implements Worker {
       }
     };
     const onData = (chunk: string) => {
+      // Any byte from the subprocess = it's alive and working. Feed the stall watchdog even when the
+      // chunk holds no *new* progress note (a long tool call streaming tool_use/tool_result, or a
+      // partial line) so a healthy-but-quiet turn isn't aborted as "silent" (ADR-0005 §4).
+      ctx.onActivity?.();
       buf += chunk;
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -214,10 +219,10 @@ export class ClaudeCliWorker implements Worker {
       }
     };
 
-    // Re-assert the current activity on a timer so the idle-timeout slides while a tool runs. Bypasses
-    // the `lastNote` stream-dedup deliberately — each tick must reach the chat to reset its deadline.
+    // Pulse silent liveness on a timer so the watchdog slides while a tool runs without emitting a log
+    // event. (onData covers streamed output; this covers a tool that's silent on stdout while it works.)
     const ticker = this.timer.set(() => {
-      if (inflight > 0) ctx.onProgress(lastNote || "· working…");
+      if (inflight > 0) ctx.onActivity?.();
     }, this.cfg.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
     let res: ClaudeCliResult;
     try {
