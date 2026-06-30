@@ -855,10 +855,11 @@ const SPECS: readonly ScriptToolSpec[] = [
     script: "forward-report-table/scripts/render.py",
     description:
       "Render rows as a TABLE — ANSI terminal, GitHub-flavored Markdown, standalone HTML (sortable), or " +
-      "CSV. Pass `data` as a JSON ARRAY of flat row objects (or { data: [...] }) — each object's keys become " +
-      "columns. For \"show me a table of …\", \"format as a grid\", \"export to CSV\", \"a Markdown table I can " +
-      "paste\". Narrow/order with columns; sort/group with sort/groupBy. listTemplates lists templates. " +
-      "Pass networkId to auto-file the artifact under the network's reports folder.",
+      "CSV. Default: `data` = a JSON ARRAY of flat row objects (or { data: [...] }) — each object's keys " +
+      "become columns (templates: generic / device-list / stig). The `security-matrix` template instead " +
+      "wants { zones: [...], cells: [[...]] }, and `diff` wants { left, right, rows: [...] }. For \"table " +
+      "of …\", \"format as a grid\", \"export to CSV\". Narrow/order with columns; sort/group with sort/" +
+      "groupBy. listTemplates lists templates. Pass networkId to auto-file under the network's reports folder.",
     stdinArg: "data", rawOutput: true, effect: "reversible",
     args: [
       { key: "format", flag: "--format", kind: "string", desc: "ansi (default) | markdown | html | csv | json" },

@@ -613,6 +613,16 @@ def main() -> int:
     template = args.template or detect_template(data)
     spec = TEMPLATES[template]
 
+    # Templates that need a JSON OBJECT (not a list) — fail with a clear shape hint instead of an
+    # uncaught AttributeError when handed row data.
+    if spec["kind"] in ("matrix", "diff") and not isinstance(data, dict):
+        want = ("{\"zones\": [...], \"cells\": [[...]]}" if spec["kind"] == "matrix"
+                else "{\"left\": \"...\", \"right\": \"...\", \"rows\": [...]}")
+        emit_error(ERR_INPUT,
+                   f"the '{template}' template expects a JSON object {want}, not an array — "
+                   f"for plain row data use the default/device-list/stig template instead",
+                   fmt=args.format)
+
     if args.format == "ansi":
         color_enabled = (sys.stdout.isatty() and not args.no_color) or args.color
     else:
