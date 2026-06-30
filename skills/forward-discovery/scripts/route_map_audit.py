@@ -26,6 +26,7 @@ sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
+from skill_io import add_format_arg, emit_success, emit_error, ERR_EMPTY
 
 
 def get_bgp_sessions(client: ForwardClient, network_id: int) -> List[Dict[str, Any]]:
@@ -162,12 +163,8 @@ def analyze_bgp_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     return analysis
 
 
-def print_analysis(analysis: Dict[str, Any], format: str = "human"):
-    """Print route-map audit results."""
-
-    if format == "json":
-        print(json.dumps(analysis, indent=2))
-        return
+def print_analysis(analysis: Dict[str, Any]):
+    """Print the human-readable route-map audit (JSON is emitted via emit_success)."""
 
     print(f"\n{'='*80}")
     print(f"ROUTE-MAP AUDIT RESULTS")
@@ -236,12 +233,7 @@ Examples:
         help="Forward Networks network ID"
     )
 
-    parser.add_argument(
-        "--format",
-        choices=["human", "json"],
-        default="human",
-        help="Output format (default: human)"
-    )
+    add_format_arg(parser, choices=("human", "json"))
 
     args = parser.parse_args()
 
@@ -252,15 +244,29 @@ Examples:
     sessions = get_bgp_sessions(client, args.network_id)
 
     if not sessions:
-        print("❌ No BGP sessions found or unable to query BGP data", file=sys.stderr)
-        print("   Ensure the NQE catalog includes BGP session queries", file=sys.stderr)
-        sys.exit(1)
+        emit_error(ERR_EMPTY,
+                   "No BGP sessions found or unable to query BGP data",
+                   hint="ensure the NQE catalog includes BGP session queries",
+                   fmt=args.format)
 
     # Analyze
     analysis = analyze_bgp_sessions(sessions)
 
-    # Print results
-    print_analysis(analysis, format=args.format)
+    meta = {
+        "network_id": args.network_id,
+        "total_sessions": analysis["total_sessions"],
+        "ebgp_sessions": len(analysis["ebgp_sessions"]),
+        "ibgp_sessions": len(analysis["ibgp_sessions"]),
+        "missing_inbound_policy": len(analysis["missing_inbound_policy"]),
+        "missing_outbound_policy": len(analysis["missing_outbound_policy"]),
+    }
+
+    # JSON is the machine contract — findings live in data/meta, exit 0.
+    if args.format == "json":
+        emit_success(analysis, meta=meta, fmt="json")
+
+    # Human output below preserves its critical-finding exit code.
+    print_analysis(analysis)
 
     # Exit with error if critical issues found
     if analysis["missing_inbound_policy"] or analysis["missing_outbound_policy"]:

@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 from _common import add_scope_args, scope_query, validate_prefix, resolve_node
 
 
@@ -36,6 +37,10 @@ def main() -> int:
 
     try:
         prefix = validate_prefix(args.prefix)
+    except ForwardError as e:
+        emit_error(ERR_INPUT, str(e))
+
+    try:
         client = ForwardClient.from_env()
         q = scope_query(args)
         node = resolve_node(client, args.network_id, prefix, args.device, args.vrf, q)
@@ -45,9 +50,18 @@ def main() -> int:
             query=q or None,
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    emit_success(
+        result,
+        meta={
+            "network_id": args.network_id,
+            "snapshot_id": args.snapshot_id,
+            "prefix": prefix,
+            "device": args.device,
+            "vrf": node.get("vrf"),
+        },
+    )
     return 0
 
 

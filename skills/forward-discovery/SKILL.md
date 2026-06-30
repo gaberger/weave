@@ -59,6 +59,23 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-discovery/scripts/create_intent_ch
 
 Never paste raw JSON. Lead with a verdict, not a dump.
 
+With `--format json`, the data-emitting scripts (`interface_inventory.py`,
+`route_map_audit.py`, `check_intent_violations.py`, `discover_nqe_queries.py`,
+`validate_all.py`) print the standard weave envelope and exit 0:
+
+```json
+{"ok": true, "schema": 1, "data": {...}, "meta": {...}}
+```
+
+On failure they print `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}`
+and exit non-zero. Severity (dark links, violations, test failures) lives in
+`data`/`meta` — in JSON mode the exit code means *did the script run*, not *what
+the data shows*. In `--format human` (the default) these scripts keep their
+Nagios-style exit codes (2 = warnings/violations, etc.). `preflight_check.py`
+uses `--json` (not `--format`): it emits the same envelope but preserves its
+gate exit code (0 pass / 1 blocked / 2 warning). `architecture_intent.py` and
+`create_intent_checks.py` are human/interactive tools with no JSON mode.
+
 ### `preflight_check.py`
 
 ```markdown
@@ -373,9 +390,8 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-discovery/scripts/create_intent_ch
 
 ## Gotchas
 
-- **Scripts use print() not emit_json()**: These scripts were authored before the emit_json convention was adopted. Output will be human-readable text rather than structured JSON. Parse with care in automation contexts.
-- **Scripts bypass _bootstrap / use cross-skill sys.path**: Current scripts insert sibling skill paths manually. A `_bootstrap.py` is now present but scripts do not yet import it. This is a known technical debt item.
-- **ForwardClient() without .from_env()**: Scripts construct `ForwardClient()` directly instead of `ForwardClient.from_env()`. Credentials must be available via the environment in another way.
+- **JSON output is the weave envelope**: The data-emitting scripts honor `--format json` (and `preflight_check.py` honors `--json`) by emitting the `skill_io` envelope (`{"ok", "schema", "data", "meta"}`). To read a value in automation, look under `.data` / `.meta`, not at the top level. `architecture_intent.py` and `create_intent_checks.py` have no JSON mode (human/interactive only).
+- **Cross-skill sys.path**: Some scripts (`validate_all.py`, `discover_nqe_queries.py`, …) still insert sibling skill paths manually to import helpers like `search_path`. `_bootstrap.py` handles the local `_shared/` (`forward_client`, `skill_io`); the cross-skill inserts are separate technical debt.
 - **validate_all.py requires PyYAML**: The `--config` flag reads a YAML file using `yaml.safe_load()` (third-party). Ensure PyYAML is installed or convert your validation matrix to JSON format.
 - **preflight_check.py writes files to cwd**: `architecture_intent.py` and `preflight_check.py` generate files (`ARCHITECTURE.md`, `validation_matrix.yml`) in the working directory. This is intentional but differs from the skill convention of emitting JSON only.
 - **Snapshot scoping**: All scripts default to the network's latest processed snapshot. Pass `--snapshot-id` explicitly when comparing pre/post-change states.

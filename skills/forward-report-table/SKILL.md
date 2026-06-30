@@ -69,6 +69,7 @@ Format-specific presentation guidance:
 - **Markdown** — paste the fenced table verbatim.
 - **HTML** — note the output file path; offer to show a preview.
 - **CSV** — state the row count and offer to display the first few rows.
+- **JSON** — the machine contract, not for pasting. Emits the standard envelope on stdout: `{"ok":true,"schema":1,"data":<rows>,"meta":{"count","columns","template"}}`. For `security-matrix` `data` is `{"zones","cells"}`; for `diff` `data` is the diff rows and `meta` carries `left`/`right`. Errors emit `{"ok":false,"schema":1,"error":{"code","message","hint?"}}` (code `INPUT` for malformed/empty/unreadable input). The `--output` flag is not applied to `json` — the envelope always goes to stdout.
 
 To export as a self-contained sortable HTML page, ask: "Render this as sortable HTML and save to report.html."
 
@@ -109,7 +110,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-report-table/scripts/render.py" \
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--format` | no | One of `ansi` (default), `markdown`, `html`, `csv` |
+| `--format` | no | One of `ansi` (default), `markdown`, `html`, `csv`, `json` |
 | `--template` | no | One of `stig`, `security-matrix`, `device-list`, `diff`, `generic`; auto-picked by schema if omitted |
 | `--columns` | no | Comma-separated column names; overrides template default (useful with `generic`) |
 | `--sort` | no | Column name to sort by; prefix `-` for descending (e.g. `--sort -severity`) |

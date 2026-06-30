@@ -35,10 +35,9 @@ from forward_client import (
     ForwardClient,
     ForwardError,
     NotFoundError,
-    die,
-    emit_json,
     find_catalog,
 )
+from skill_io import emit_error, emit_success, ERR_API, ERR_AUTH, ERR_EMPTY
 
 
 REPOS_DEFAULT = ("fwd", "org")
@@ -126,7 +125,7 @@ def main() -> int:
     try:
         client = ForwardClient.from_env()
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_AUTH, str(e))
 
     merged: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -139,7 +138,7 @@ def main() -> int:
             per_repo_counts[repo] = 0
             continue
         except ForwardError as e:
-            die(f"listing repo {repo!r}: {e}")
+            emit_error(ERR_API, f"listing repo {repo!r}: {e}")
         per_repo_counts[repo] = len(rows)
         for row in rows:
             key = (repo, row.get("queryId") or row.get("path", ""))
@@ -150,7 +149,8 @@ def main() -> int:
             merged.append(row)
 
     if not merged:
-        die("no queries returned — check FORWARD_API_BASE_URL and credentials")
+        emit_error(ERR_EMPTY, "no queries returned",
+                   hint="check FORWARD_API_BASE_URL and credentials")
 
     if args.enrich:
         for i, rec in enumerate(merged):
@@ -160,11 +160,10 @@ def main() -> int:
         sys.stderr.write(f"  enriched {len(merged)}/{len(merged)}\n")
 
     if args.dry_run:
-        emit_json({
-            "total": len(merged),
-            "perRepo": per_repo_counts,
-            "enriched": args.enrich,
-        })
+        emit_success(
+            {"total": len(merged), "perRepo": per_repo_counts, "enriched": args.enrich},
+            meta={"dryRun": True},
+        )
         return 0
 
     out_path = Path(args.output) if args.output else find_catalog(__file__)
@@ -185,12 +184,10 @@ def main() -> int:
     with out_path.open("w") as f:
         json.dump(envelope, f, indent=2)
 
-    emit_json({
-        "wrote": str(out_path),
-        "total": len(merged),
-        "perRepo": per_repo_counts,
-        "enriched": args.enrich,
-    })
+    emit_success(
+        {"wrote": str(out_path), "total": len(merged)},
+        meta={"perRepo": per_repo_counts, "enriched": args.enrich},
+    )
     return 0
 
 

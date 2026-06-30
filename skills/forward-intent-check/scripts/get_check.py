@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_NOT_FOUND
 
 
 def main():
@@ -24,19 +25,24 @@ def main():
         networks = client.get("/api/networks")
         net = next((n for n in networks if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+                       hint="list networks with forward-inventory")
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
-            die(f"Network {args.network_id} has no processed snapshots")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} has no processed snapshots")
 
     path = f"/api/snapshots/{args.snapshot_id}/checks/{args.check_id}"
 
     try:
         check = client.get(path)
     except ForwardError as e:
-        die(f"Failed to fetch check: {e}")
+        emit_error(ERR_API, f"Failed to fetch check: {e}")
 
-    emit_json(check)
+    emit_success(check, meta={
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "check_id": args.check_id,
+    })
 
 
 if __name__ == "__main__":

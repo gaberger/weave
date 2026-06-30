@@ -15,7 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardError, emit_json, die, load_catalog
+from forward_client import ForwardError, load_catalog
+from skill_io import emit_error, emit_success, ERR_API, ERR_INPUT
 
 
 def category_of(path: str) -> str:
@@ -39,7 +40,7 @@ def main() -> int:
     try:
         queries = load_catalog(__file__)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     if args.list_categories:
         counts: dict = {}
@@ -48,11 +49,12 @@ def main() -> int:
             counts[c] = counts.get(c, 0) + 1
         out = sorted(({"category": c, "count": n} for c, n in counts.items()),
                      key=lambda r: -r["count"])
-        emit_json({"total": len(queries), "categories": out})
+        emit_success(out, meta={"total": len(queries)})
         return 0
 
     if not args.terms and not args.category and not args.repo:
-        die("provide at least one search term, or --category, --repo, or --list-categories")
+        emit_error(ERR_INPUT,
+                   "provide at least one search term, or --category, --repo, or --list-categories")
 
     needles = [t.lower() for t in args.terms]
     results = []
@@ -86,12 +88,11 @@ def main() -> int:
     for r in results:
         r.pop("_score", None)
     truncated = len(results) > args.limit
-    emit_json({
+    emit_success(results[: args.limit], meta={
         "count": len(results),
         "truncated": truncated,
         "catalogEnriched": enriched_count > 0,
         "intentCoverage": enriched_count,
-        "results": results[: args.limit],
     })
     return 0
 

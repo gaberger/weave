@@ -30,7 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_INPUT
 
 
 _VALID_TYPES = {"EBGP", "IBGP"}
@@ -67,14 +68,14 @@ def _validate_prefix(p: str) -> None:
     try:
         ipaddress.ip_network(p, strict=False)
     except ValueError as e:
-        die(f"--prefix {p!r}: {e}")
+        emit_error(ERR_INPUT, f"--prefix {p!r}: {e}")
 
 
 def _validate_ip(label: str, v: str) -> None:
     try:
         ipaddress.ip_address(v)
     except ValueError as e:
-        die(f"--{label} {v!r}: {e}")
+        emit_error(ERR_INPUT, f"--{label} {v!r}: {e}")
 
 
 def _opt_int_str(label: str, v: str | None) -> str:
@@ -82,7 +83,7 @@ def _opt_int_str(label: str, v: str | None) -> str:
     if v is None or v == "":
         return ""
     if not v.lstrip("-").isdigit():
-        die(f"--{label} must be an integer or empty, got {v!r}")
+        emit_error(ERR_INPUT, f"--{label} must be an integer or empty, got {v!r}")
     return v
 
 
@@ -120,7 +121,7 @@ def main() -> int:
     try:
         as_path = _parse_as_path(args.as_path) if args.as_path else []
     except ValueError as e:
-        die(str(e))
+        emit_error(ERR_INPUT, str(e))
 
     body = {
         "vrf": args.vrf,
@@ -139,20 +140,30 @@ def main() -> int:
         f"/devices/{args.device}/bgp-advertisements"
     )
 
+    meta = {
+        "device": args.device,
+        "network_id": args.network_id,
+        "changeset_id": args.changeset_id,
+        "prefix": args.prefix,
+    }
+
     if args.dry_run:
-        emit_json({"method": "POST", "path": path, "query": {"action": "add"}, "body": body})
+        emit_success(
+            {"method": "POST", "path": path, "query": {"action": "add"}, "body": body},
+            meta={**meta, "dry_run": True},
+        )
         return 0
 
     try:
         client = ForwardClient.from_env()
         result = client.post(path, body, query={"action": "add"})
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     if result is None:
-        emit_json({"added": True, "device": args.device, "echo": body})
+        emit_success({"added": True, "device": args.device, "echo": body}, meta=meta)
     else:
-        emit_json(result)
+        emit_success(result, meta=meta)
     return 0
 
 

@@ -21,7 +21,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 from _common import add_scope_args, scope_query, validate_prefix
 
 
@@ -34,6 +35,10 @@ def main() -> int:
 
     try:
         prefix = validate_prefix(args.prefix)
+    except ForwardError as e:
+        emit_error(ERR_INPUT, str(e))
+
+    try:
         client = ForwardClient.from_env()
         q = scope_query(args)
         q["view"] = "bgp-prefix-info"
@@ -41,9 +46,17 @@ def main() -> int:
         device = urllib.parse.quote(args.device, safe="")
         result = client.get(f"/api/networks/{args.network_id}/devices/{device}", query=q)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    emit_success(
+        result,
+        meta={
+            "network_id": args.network_id,
+            "snapshot_id": args.snapshot_id,
+            "device": args.device,
+            "prefix": prefix,
+        },
+    )
     return 0
 
 

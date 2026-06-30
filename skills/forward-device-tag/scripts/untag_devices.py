@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 
 
 def main():
@@ -37,10 +38,10 @@ def main():
     args = parser.parse_args()
 
     if not args.devices and not args.devices_file:
-        die("Must specify --devices or --devices-file")
+        emit_error(ERR_INPUT, "Must specify --devices or --devices-file")
 
     if not args.tag_name and not args.remove_all:
-        die("Must specify --tag-name or --remove-all")
+        emit_error(ERR_INPUT, "Must specify --tag-name or --remove-all")
 
     # Collect device names
     devices = []
@@ -51,10 +52,10 @@ def main():
             with open(args.devices_file) as f:
                 devices.extend([line.strip() for line in f if line.strip()])
         except OSError as e:
-            die(f"Failed to read devices file: {e}")
+            emit_error(ERR_INPUT, f"Failed to read devices file: {e}")
 
     if not devices:
-        die("No devices specified")
+        emit_error(ERR_INPUT, "No devices specified")
 
     client = ForwardClient.from_env()
 
@@ -76,15 +77,21 @@ def main():
     try:
         client.post(path, body=body, query=query if query else None)
     except ForwardError as e:
-        die(f"Failed to untag devices: {e}")
+        emit_error(ERR_API, f"Failed to untag devices: {e}")
 
-    emit_json({
-        "untagged": True,
-        "tagName": args.tag_name or "ALL",
-        "deviceCount": len(devices),
-        "devices": devices[:10],  # First 10 for display
-        "snapshotId": args.snapshot_id,
-    })
+    emit_success(
+        {
+            "untagged": True,
+            "tagName": args.tag_name or "ALL",
+            "devices": devices[:10],  # First 10 for display
+        },
+        meta={
+            "network_id": args.network_id,
+            "tag_name": args.tag_name or "ALL",
+            "device_count": len(devices),
+            "snapshot_id": args.snapshot_id,
+        },
+    )
 
 
 if __name__ == "__main__":

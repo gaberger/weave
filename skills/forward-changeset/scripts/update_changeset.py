@@ -13,7 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 
 
 def main() -> int:
@@ -32,17 +33,17 @@ def main() -> int:
         patch["snapshotId"] = args.snapshot_id
 
     if not patch:
-        die("provide at least one field to update: --name or --snapshot-id")
+        emit_error(ERR_INPUT, "provide at least one field to update: --name or --snapshot-id")
 
     if args.dry_run:
-        emit_json(
+        emit_success(
             {
                 "method": "PATCH",
                 "path": f"/api/networks/{args.network_id}/change-sets/{args.changeset_id}",
                 "body": patch,
-            }
+            },
+            meta={"dry_run": True},
         )
-        return 0
 
     try:
         client = ForwardClient.from_env()
@@ -51,9 +52,12 @@ def main() -> int:
             patch,
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    emit_success(
+        result,
+        meta={"network_id": args.network_id, "changeset_id": args.changeset_id},
+    )
     return 0
 
 

@@ -13,7 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 
 
 def main() -> int:
@@ -25,24 +26,31 @@ def main() -> int:
     args = p.parse_args()
 
     if args.dry_run:
-        emit_json(
+        emit_success(
             {
                 "method": "DELETE",
                 "path": f"/api/networks/{args.network_id}/change-sets/{args.changeset_id}",
-            }
+            },
+            meta={"dry_run": True},
         )
-        return 0
 
     if not args.yes:
-        die(f"deletion of {args.changeset_id} is destructive; pass --yes to confirm")
+        emit_error(
+            ERR_INPUT,
+            f"deletion of {args.changeset_id} is destructive; pass --yes to confirm",
+            hint="re-run with --yes",
+        )
 
     try:
         client = ForwardClient.from_env()
         client.delete(f"/api/networks/{args.network_id}/change-sets/{args.changeset_id}")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    sys.stdout.write(f"Deleted change-set {args.changeset_id}.\n")
+    emit_success(
+        {"deleted": True, "changeset_id": args.changeset_id},
+        meta={"network_id": args.network_id},
+    )
     return 0
 
 

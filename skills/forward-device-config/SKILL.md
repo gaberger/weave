@@ -80,10 +80,14 @@ Override with `--format cisco|junos|xml` if detection picks the wrong bucket.
 
 Never paste raw JSON. Config text should appear in fenced code blocks, never as prose.
 
+**Script output contract.** Two scripts emit the standard weave JSON envelope on `--format json`-style machine output: `list_configs.py` and `grep_configs.py` print `{"ok":true,"schema":1,"data":…,"meta":…}` (the render fields below come from `data`/`meta`). The two text-primary scripts — `get_config.py` and `diff_configs.py` — keep emitting **raw config / diff text** to stdout (no envelope); on failure they write an `error [CODE]: …` line to stderr and exit non-zero (diff uses exit 2 for errors). Render the text scripts exactly as before; for the JSON scripts, pull counts from `meta` and rows from `data`.
+
 ### `list_configs.py`
 
+Envelope: `data` is the list of file rows (`fileName`, `device`, `category`, `sizeBytes`); `meta` carries `snapshot_id`, `count`, `device_filter`, `category_filter`.
+
 ```markdown
-**<N> files** in snapshot `<id>`<, device matches `<filter>`>
+**<meta.count> files** in snapshot `<id>`<, device matches `<filter>`>
 
 | device | category | size |
 
@@ -161,8 +165,10 @@ Zero results: "XPath `<expr>` matched zero elements in `<device>`'s config. The 
 
 ### `grep_configs.py`
 
+Envelope: `data.matches` is the match list (`device`, `line`, `match`, `text`, `context`); `meta` carries `snapshot_id`, `pattern`, `category`, `devices_searched`, `devices_with_matches`, `match_count`.
+
 ```markdown
-**<matchCount> matches** across <devicesWithMatches>/<devicesSearched> devices · pattern `<regex>`
+**<meta.match_count> matches** across <meta.devices_with_matches>/<meta.devices_searched> devices · pattern `<regex>`
 
 Group by device. For each device:
 

@@ -20,7 +20,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, NotFoundError, emit_json, die
+from forward_client import ForwardClient, ForwardError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT, ERR_NOT_FOUND, ERR_EMPTY
 
 
 _REQUIRED = ("name", "resourcePools")
@@ -42,15 +43,15 @@ def _load_filters(path: str) -> list[dict]:
     try:
         text = Path(path).read_text()
     except OSError as e:
-        die(f"cannot read {path!r}: {e}")
+        emit_error(ERR_INPUT, f"cannot read {path!r}: {e}")
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
-        die(f"{path!r} is not valid JSON: {e}")
+        emit_error(ERR_INPUT, f"{path!r} is not valid JSON: {e}")
     if not isinstance(data, list):
-        die(f"{path!r} must contain a top-level JSON array of filter objects")
+        emit_error(ERR_INPUT, f"{path!r} must contain a top-level JSON array of filter objects")
     if not data:
-        die(f"{path!r} contains an empty array — nothing to import")
+        emit_error(ERR_EMPTY, f"{path!r} contains an empty array — nothing to import")
     return data
 
 
@@ -94,7 +95,7 @@ def _existing_filters_by_name(client: ForwardClient, network_id: str) -> dict[st
     try:
         data = client.get(f"/api/networks/{network_id}/securityMatrixFilters")
     except NotFoundError:
-        die(f"target network {network_id} not found on this Forward instance")
+        emit_error(ERR_NOT_FOUND, f"target network {network_id} not found on this Forward instance")
     filters = data.get("filters") if isinstance(data, dict) else data
     if not isinstance(filters, list):
         return {}
@@ -133,17 +134,19 @@ def main() -> int:
         if not ok:
             invalid.append(msg)
     if invalid:
-        sys.stderr.write("preflight validation failed — refusing to start the import:\n")
-        for m in invalid:
-            sys.stderr.write(f"  - {m}\n")
-        return 2
+        # Preflight failure — refuse to start the import. Keep the exit code at 2
+        # (distinct from a partial-failure run) but emit the contract envelope.
+        emit_error(ERR_INPUT,
+                   "preflight validation failed — refusing to start the import: "
+                   + "; ".join(invalid),
+                   exit_code=2)
 
     if args.dry_run:
         try:
             client = ForwardClient.from_env()
             existing = _existing_filters_by_name(client, args.network_id)
         except ForwardError as e:
-            die(str(e))
+            emit_error(ERR_API, str(e))
         plan = []
         for item in items:
             name = item["name"]
@@ -151,14 +154,14 @@ def main() -> int:
             if name in existing:
                 action = {"skip": "skip", "fail": "fail", "replace": "replace"}[args.on_conflict]
             plan.append({"name": name, "action": action, "existingId": existing.get(name)})
-        emit_json({"network_id": args.network_id, "total": len(items), "plan": plan})
+        emit_success(plan, meta={"dry_run": True, "network_id": args.network_id, "total": len(items)})
         return 0
 
     try:
         client = ForwardClient.from_env()
         existing = _existing_filters_by_name(client, args.network_id)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     created: list[dict] = []
     skipped: list[dict] = []
@@ -201,22 +204,27 @@ def main() -> int:
         record = {"index": i, "name": name, "id": new_id}
         (replaced if existing_id is not None else created).append(record)
 
-    summary = {
+    # Per-filter failures are part of the data, not a skill failure: under the
+    # contract the exit code means "did the skill run", so we always exit 0 and
+    # surface the failed count in meta for parsers to branch on.
+    meta = {
         "network_id": args.network_id,
         "total": len(items),
         "created": len(created),
         "replaced": len(replaced),
         "skipped": len(skipped),
         "failed": len(failed),
-        "details": {
+    }
+    emit_success(
+        {
             "created": created,
             "replaced": replaced,
             "skipped": skipped,
             "failed": failed,
         },
-    }
-    emit_json(summary)
-    return 0 if not failed else 1
+        meta=meta,
+    )
+    return 0
 
 
 if __name__ == "__main__":

@@ -32,7 +32,8 @@ import argparse
 import sys
 
 import _bootstrap  # noqa: F401 — puts forward_client on sys.path
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_INPUT, ERR_NOT_FOUND
 
 
 def resolve_snapshot(client, network_id, snapshot_id):
@@ -44,7 +45,7 @@ def resolve_snapshot(client, network_id, snapshot_id):
     snaps = data.get("snapshots", []) if isinstance(data, dict) else data
     processed = [s for s in snaps if s.get("state") == "PROCESSED"]
     if not processed:
-        die(f"Network {network_id} has no PROCESSED snapshots")
+        emit_error(ERR_NOT_FOUND, f"Network {network_id} has no PROCESSED snapshots")
     # ids are numeric strings; newest = max
     return max(processed, key=lambda s: int(s["id"]))["id"]
 
@@ -124,16 +125,18 @@ def main():
 
     if not any([args.set_note is not None, args.add_tag, args.remove_tag,
                 args.set_tags is not None, args.priority, args.set_name]):
-        die("nothing to patch — supply at least one of --set-note/--add-tag/"
-            "--remove-tag/--set-tags/--priority/--set-name")
+        emit_error(ERR_INPUT,
+                   "nothing to patch — supply at least one of --set-note/--add-tag/"
+                   "--remove-tag/--set-tags/--priority/--set-name")
 
     client = ForwardClient.from_env()
     snap = resolve_snapshot(client, args.network_id, args.snapshot_id)
     targets = select(list_checks(client, snap), args)
 
     if not targets:
-        die("no checks matched the selectors (need at least one selector; "
-            "--check-id / --match-name / --match-tag / --status)")
+        emit_error(ERR_NOT_FOUND,
+                   "no checks matched the selectors (need at least one selector; "
+                   "--check-id / --match-name / --match-tag / --status)")
 
     print(f"snapshot {snap}: {len(targets)} check(s) matched", file=sys.stderr)
     persistent = args.persistent.lower() in ("true", "1", "yes")
@@ -184,8 +187,12 @@ def main():
 
     print(f"\npatched={ok} skipped={skipped}", file=sys.stderr)
     if args.json:
-        emit_json({"snapshotId": snap, "patched": ok, "skipped": skipped,
-                   "results": results})
+        emit_success({"results": results}, meta={
+            "network_id": args.network_id,
+            "snapshot_id": snap,
+            "patched": ok,
+            "skipped": skipped,
+        })
 
 
 if __name__ == "__main__":

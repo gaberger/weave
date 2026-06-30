@@ -49,9 +49,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-device-intel/scripts/get_interface
 
 ## Output format
 
+Every script emits one JSON envelope on stdout. Success carries the rows in `data` (a list) and facts about them in `meta` (`count`, `network_id`, `snapshot_id`, the resolved `catalog` entry, and `filteredBy` when `--device-name` was applied); failure carries a stable `error` code. Branch on `ok`.
+
+```json
+{ "ok": true, "schema": 1, "data": [ ...rows... ], "meta": { "count": 12, "network_id": "NET_xyz", "snapshot_id": null, "catalog": { "path": "/L3/ARPs", "queryId": "FQ_..." } } }
+```
+```json
+{ "ok": false, "schema": 1, "error": { "code": "NOT_FOUND", "message": "...", "hint": "..." } }
+```
+
+Error `code` is one of `AUTH`, `NOT_FOUND`, `API`. Exit code means *did the script run* (0) vs *could not produce a result* (non-zero).
+
 Never paste raw JSON. Lead with a verdict, not a dump.
 
-The server's column set varies by query — emit whatever columns came back, but condense.
+The server's column set varies by query — emit whatever columns came back, but condense. The rows live in `data`; render from there.
 
 ### Default shape (any script, no `--device-name`)
 

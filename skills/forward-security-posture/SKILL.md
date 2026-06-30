@@ -92,7 +92,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-security-posture/scripts/import_ma
 
 ## Output format
 
-Never paste raw JSON. Lead with a verdict, not a dump.
+Every script emits the standard weave skill envelope on stdout:
+
+- Success: `{"ok": true, "schema": 1, "data": <answer>, "meta": {<counts/ids/echoed params>}}` (exit 0).
+- Failure: `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` (exit non-zero). Codes: `AUTH`, `NOT_FOUND`, `API`, `INPUT`, `EMPTY`.
+
+The answer lives under `data`; descriptive facts (counts, `network_id`, `snapshot_id`, `filter_id`, echoed params) live under `meta`. The exit code means *did the skill run*, not *what the data shows* — `import_matrix_filters.py` exits 0 even when some filters failed (read `meta.failed` / `data.failed`).
+
+Never paste raw JSON to the user. Lead with a verdict, not a dump.
 
 ### `list_matrix_filters.py`
 

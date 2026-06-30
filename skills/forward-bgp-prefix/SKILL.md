@@ -51,7 +51,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-bgp-prefix/scripts/trace_prefix.py
 
 ## Output format
 
-Never paste raw JSON. Lead with a verdict, not a dump.
+Every script emits the weave skill envelope on stdout and always exits 0 when it
+ran: `{"ok": true, "schema": 1, "data": <payload>, "meta": {...}}`. The endpoint
+result lives in `data`; `meta` echoes `network_id` / `snapshot_id` / `prefix`
+(plus `device`/`vrf`/`outcome` and counts where relevant). On failure the shape is
+`{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` with a
+non-zero exit (`INPUT` = bad CIDR, `API` = endpoint/resolution failure).
+
+Never paste raw JSON. Lead with a verdict, not a dump. The renderings below
+describe the `data` payload.
 
 ### `search_prefix.py`
 

@@ -63,6 +63,21 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-intent-check/scripts/delete_check.
 
 ## Output format
 
+Every script emits the standard skill envelope on stdout:
+
+- success: `{"ok": true, "schema": 1, "data": <payload>, "meta": {...}}`
+- failure: `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` (exits non-zero)
+
+`data` is the answer; `meta` carries facts about it (`network_id`, `snapshot_id`, `count`, and write summaries like `patched`/`skipped`). Per-script `data` shapes:
+
+- `list_checks.py` — `data` is the array of checks; `meta.count` is the total.
+- `get_check.py` / `create_check.py` — `data` is the check object (`meta.check_id`, `meta.status`).
+- `delete_check.py` — `data` is `{"deleted": true, "checkId": ...}`.
+- `list_predefined.py` — `data` is the array of predefined types (`meta.count`).
+- `patch_check.py` — emits the envelope only with `--json`; `data.results[]` plus `meta.patched`/`meta.skipped`. Dry-run (no `--execute`) prints a preview to stderr and emits no envelope.
+
+Error `code` is one of `INPUT` / `NOT_FOUND` / `API` / `AUTH` / `EMPTY`.
+
 Never paste raw JSON. Lead with a verdict, not a dump.
 
 ### `list_checks.py`
@@ -465,7 +480,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-intent-check/scripts/create_check.
 ```bash
 # 1. Find failing checks
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-intent-check/scripts/list_checks.py" \
-    --network-id NET_xyz --snapshot-id <id> | jq '.checks[] | select(.status == "FAIL")'
+    --network-id NET_xyz --snapshot-id <id> | jq '.data[] | select(.status == "FAIL")'
 
 # 2. For EACH failing check, extract filters and trace path
 # Example: branch-portal-la-br-to-lon-dmz shows FAIL

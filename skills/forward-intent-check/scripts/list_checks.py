@@ -10,7 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_NOT_FOUND
 
 
 def main():
@@ -44,10 +45,11 @@ def main():
         networks = client.get("/api/networks")
         net = next((n for n in networks if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+                       hint="list networks with forward-inventory")
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
-            die(f"Network {args.network_id} has no processed snapshots")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} has no processed snapshots")
 
     # Build query params
     query = {}
@@ -63,9 +65,18 @@ def main():
     try:
         checks = client.get(path, query=query)
     except ForwardError as e:
-        die(f"Failed to fetch checks: {e}")
+        emit_error(ERR_API, f"Failed to fetch checks: {e}")
 
-    emit_json({"checks": checks, "snapshotId": args.snapshot_id, "networkId": args.network_id})
+    # Normalize to a bare list — the API may return {"checks": [...]} or a list.
+    items = checks.get("checks", []) if isinstance(checks, dict) else checks
+    emit_success(items, meta={
+        "count": len(items) if isinstance(items, list) else None,
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "type": args.type,
+        "priority": args.priority,
+        "status": args.status,
+    })
 
 
 if __name__ == "__main__":

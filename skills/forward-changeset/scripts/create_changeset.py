@@ -13,7 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API
 
 
 def main() -> int:
@@ -35,15 +36,15 @@ def main() -> int:
         query["dirPath"] = args.dir_path
 
     if args.dry_run:
-        emit_json(
+        emit_success(
             {
                 "method": "POST",
                 "path": f"/api/networks/{args.network_id}/change-sets",
                 "query": query,
                 "body": body,
-            }
+            },
+            meta={"dry_run": True},
         )
-        return 0
 
     try:
         client = ForwardClient.from_env()
@@ -53,9 +54,17 @@ def main() -> int:
             query=query or None,
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    emit_success(
+        result,
+        meta={
+            "network_id": args.network_id,
+            "name": args.name,
+            "snapshot_id": args.snapshot_id,
+            "dir_path": args.dir_path,
+        },
+    )
     return 0
 
 

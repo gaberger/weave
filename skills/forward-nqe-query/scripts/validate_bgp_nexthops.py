@@ -22,7 +22,8 @@ from ipaddress import ip_address, ip_network
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_NOT_FOUND
 
 
 # Query to get BGP routes with next-hops
@@ -116,10 +117,12 @@ def main():
         networks = client.get("/api/networks")
         net = next((n for n in networks if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+                       hint="list networks with forward-inventory")
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
-            die(f"Network {args.network_id} has no processed snapshots")
+            emit_error(ERR_NOT_FOUND,
+                       f"Network {args.network_id} has no processed snapshots")
 
     print("Step 1: Fetching BGP routes with next-hops...", file=sys.stderr)
 
@@ -137,7 +140,7 @@ def main():
     try:
         bgp_result = client.post("/api/nqe", body=bgp_body)
     except ForwardError as e:
-        die(f"BGP routes query failed: {e}")
+        emit_error(ERR_API, f"BGP routes query failed: {e}")
 
     bgp_routes = bgp_result.get("items", [])
 
@@ -165,7 +168,7 @@ def main():
     try:
         rt_result = client.post("/api/nqe", body=rt_body)
     except ForwardError as e:
-        die(f"Routing table query failed: {e}")
+        emit_error(ERR_API, f"Routing table query failed: {e}")
 
     routing_table = rt_result.get("items", [])
 
@@ -208,15 +211,14 @@ def main():
 
     print(f"\nValidation complete: {unreachable_count} unreachable next-hops found", file=sys.stderr)
 
-    # Emit results
-    output = {
-        "snapshotId": args.snapshot_id,
-        "totalBgpRoutes": len(bgp_routes),
-        "unreachableNextHops": unreachable_count,
-        "results": results,
-    }
-
-    emit_json(output)
+    # Emit results — the validated routes are the answer; the totals describe them
+    emit_success(results, meta={
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "total_bgp_routes": len(bgp_routes),
+        "unreachable_next_hops": unreachable_count,
+        "count": len(results),
+    })
 
 
 if __name__ == "__main__":

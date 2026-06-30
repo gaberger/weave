@@ -16,7 +16,8 @@ from typing import List, Dict, Any, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardError, emit_json, die, load_catalog
+from forward_client import ForwardError, load_catalog
+from skill_io import emit_error, emit_success, ERR_API, ERR_INPUT
 
 
 # Synonym/stem mapping for common network terms
@@ -220,7 +221,7 @@ Improvements over search_catalog.py:
     try:
         queries = load_catalog(__file__)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     if args.list_categories:
         counts: dict = {}
@@ -229,11 +230,12 @@ Improvements over search_catalog.py:
             counts[c] = counts.get(c, 0) + 1
         out = sorted(({"category": c, "count": n} for c, n in counts.items()),
                      key=lambda r: -r["count"])
-        emit_json({"total": len(queries), "categories": out})
+        emit_success(out, meta={"total": len(queries)})
         return 0
 
     if not args.terms and not args.category and not args.repo:
-        die("provide at least one search term, or --category, --repo, or --list-categories")
+        emit_error(ERR_INPUT,
+                   "provide at least one search term, or --category, --repo, or --list-categories")
 
     # Apply filters first (category, repo)
     filtered_queries = queries
@@ -254,11 +256,10 @@ Improvements over search_catalog.py:
                 "intent": q.get("intent"),
                 "lastCommitId": q.get("lastCommitId"),
             })
-        emit_json({
+        emit_success(results, meta={
             "count": len(filtered_queries),
             "truncated": len(filtered_queries) > args.limit,
             "catalogEnriched": any(q.get("intent") for q in filtered_queries),
-            "results": results,
         })
         return 0
 
@@ -298,18 +299,17 @@ Improvements over search_catalog.py:
         suggestions = suggest_queries(args.terms, queries)
 
     truncated = len(scored_results) > args.limit
-    result_data = {
+    meta = {
         "count": len(scored_results),
         "truncated": truncated,
         "catalogEnriched": any(q.get("intent") for q in queries),
         "intentCoverage": sum(1 for q in queries if q.get("intent")),
-        "results": scored_results[:args.limit],
     }
 
     if suggestions:
-        result_data["suggestions"] = suggestions
+        meta["suggestions"] = suggestions
 
-    emit_json(result_data)
+    emit_success(scored_results[:args.limit], meta=meta)
     return 0
 
 

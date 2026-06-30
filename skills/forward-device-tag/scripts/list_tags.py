@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API
 
 
 def main():
@@ -37,9 +38,14 @@ def main():
     try:
         result = client.get(path, query=query if query else None)
     except ForwardError as e:
-        die(f"Failed to list tags: {e}")
+        emit_error(ERR_API, f"Failed to list tags: {e}")
 
-    emit_json(result)
+    meta = {"network_id": args.network_id, "with_devices": args.with_devices}
+    if isinstance(result, list):
+        meta["count"] = len(result)
+    if args.snapshot_id:
+        meta["snapshot_id"] = args.snapshot_id
+    emit_success(result, meta=meta)
 
 
 if __name__ == "__main__":

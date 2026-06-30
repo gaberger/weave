@@ -26,6 +26,7 @@ sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
+from skill_io import add_format_arg, emit_success, emit_error, ERR_EMPTY
 
 
 def get_interface_status(client: ForwardClient, network_id: int, device_filter: str = None) -> List[Dict[str, Any]]:
@@ -117,14 +118,9 @@ def analyze_interfaces(interfaces: List[Dict[str, Any]]) -> Dict[str, Any]:
     return analysis
 
 
-def print_analysis(analysis: Dict[str, Any], format: str = "human"):
-    """Print analysis in requested format."""
+def print_analysis(analysis: Dict[str, Any]):
+    """Print the human-readable analysis (JSON is emitted via emit_success)."""
 
-    if format == "json":
-        print(json.dumps(analysis, indent=2))
-        return
-
-    # Human-readable format
     print(f"\n{'='*80}")
     print(f"INTERFACE INVENTORY ANALYSIS")
     print(f"{'='*80}\n")
@@ -194,12 +190,7 @@ Examples:
         help="Device name filter (substring match, e.g., 'border' for all border routers)"
     )
 
-    parser.add_argument(
-        "--format",
-        choices=["human", "json"],
-        default="human",
-        help="Output format (default: human)"
-    )
+    add_format_arg(parser, choices=("human", "json"))
 
     args = parser.parse_args()
 
@@ -214,14 +205,29 @@ Examples:
     )
 
     if not interfaces:
-        print(f"❌ No interfaces found (filter: {args.device_filter or 'none'})", file=sys.stderr)
-        sys.exit(1)
+        emit_error(ERR_EMPTY,
+                   f"No interfaces found (filter: {args.device_filter or 'none'})",
+                   hint="widen or drop --device-filter, or verify the network has a processed snapshot",
+                   fmt=args.format)
 
     # Analyze
     analysis = analyze_interfaces(interfaces)
 
-    # Print results
-    print_analysis(analysis, format=args.format)
+    meta = {
+        "network_id": args.network_id,
+        "device_filter": args.device_filter,
+        "total_interfaces": analysis["total_interfaces"],
+        "up": len(analysis["up_interfaces"]),
+        "down": len(analysis["down_interfaces"]),
+        "dark_links": len(analysis["dark_links"]),
+    }
+
+    # JSON is the machine contract — severity lives in data/meta, exit 0.
+    if args.format == "json":
+        emit_success(analysis, meta=meta, fmt="json")
+
+    # Human output below preserves its dark-link warning exit code.
+    print_analysis(analysis)
 
     # Exit with warning code if dark links found
     if analysis["dark_links"]:

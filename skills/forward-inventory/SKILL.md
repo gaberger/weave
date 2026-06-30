@@ -43,7 +43,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-inventory/scripts/list_devices.py"
 
 ## Output format
 
-Never paste raw JSON. Lead with a verdict, not a dump.
+Every script emits one JSON envelope on stdout:
+
+- success: `{"ok": true, "schema": 1, "data": <answer>, "meta": {...}}` (exit 0)
+- failure: `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` (exit non-zero) — codes: `AUTH`, `NOT_FOUND`, `API`.
+
+`data` is the answer; `meta` carries counts and echoed filters. Read `ok` first. Where `data` is a list (`list_networks`, `list_snapshots`, `list_devices`), `meta.count` is the length. `forward_overview` returns `data` = `{networks, defaults, summary}`.
+
+Never paste raw JSON to the user. Lead with a verdict, not a dump.
 
 ### `forward_overview.py`
 

@@ -40,7 +40,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_AUTH, ERR_INPUT, ERR_NOT_FOUND
 
 
 CHANGES = "/api/users/current/nqe/changes"
@@ -79,20 +80,20 @@ def main() -> int:
         try:
             source = Path(args.file).read_text()
         except OSError as e:
-            die(f"cannot read --file {args.file}: {e}")
+            emit_error(ERR_INPUT, f"cannot read --file {args.file}: {e}")
     else:
         source = args.source
 
     try:
         client = ForwardClient.from_env()
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_AUTH, str(e))
 
     # Resolve add vs edit
     try:
         existing = find_existing(client, args.repo, args.path)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     action = "editQuery" if existing else "addQuery"
     qid = existing.get("queryId") if existing else None
@@ -113,7 +114,7 @@ def main() -> int:
             f"  {'updates existing query, queryId PRESERVED' if existing else 'creates new query'}"
             f"{f' ({qid})' if qid else ''}\n"
             f"  source: {len(source)} bytes. Re-run with --execute to stage + commit.\n")
-        emit_json(plan)
+        emit_success(plan, meta={"dryRun": True})
         return 0
 
     # --- STAGE ---
@@ -127,9 +128,10 @@ def main() -> int:
     except ForwardError as e:
         if "ENCLOSING_DIR_DOES_NOT_EXIST" in str(e):
             parent = args.path.rsplit("/", 1)[0] + "/"
-            die(f"staging failed: enclosing directory {parent!r} does not exist. "
-                f"Create it first (action=addDir&path={parent}) or pick an existing folder.")
-        die(f"staging failed: {e}")
+            emit_error(ERR_NOT_FOUND,
+                       f"staging failed: enclosing directory {parent!r} does not exist.",
+                       hint=f"Create it first (action=addDir&path={parent}) or pick an existing folder.")
+        emit_error(ERR_API, f"staging failed: {e}")
 
     draft = client.get(CHANGES).get("changes", [])
     # Forward stages NOTHING when the new source is byte-identical to the committed
@@ -139,8 +141,8 @@ def main() -> int:
     if not staged_here:
         sys.stderr.write(f"no change to publish — {args.path!r} already matches the "
                          f"committed source. Nothing to commit.\n")
-        emit_json({"published": False, "noop": True, "reason": "source identical to committed",
-                   "path": args.path, "repo": args.repo, "queryId": qid})
+        emit_success({"published": False, "noop": True, "reason": "source identical to committed"},
+                     meta={"path": args.path, "repo": args.repo, "queryId": qid})
         return 0
     sys.stderr.write(f"staged {action} for {args.path!r}; draft now holds {len(draft)} change(s).\n")
 
@@ -158,23 +160,27 @@ def main() -> int:
             except ForwardError:
                 sys.stderr.write("commit failed — could NOT auto-discard; the change "
                                  "remains staged in your workspace draft.\n")
-        die(f"commit failed: {e}")
+        emit_error(ERR_API, f"commit failed: {e}")
 
     # --- VERIFY ---
     after = find_existing(client, args.repo, args.path)
-    result = {
-        "published": bool(after),
-        "action": action,
-        "path": args.path,
-        "repo": args.repo,
-        "queryId": after.get("queryId") if after else None,
-        "queryIdPreserved": bool(existing) and after and after.get("queryId") == qid,
-        "headCommit": client.get(f"/api/nqe/repos/{args.repo}/commits/head"),
-    }
+    published = bool(after)
+    query_id = after.get("queryId") if after else None
+    query_id_preserved = bool(existing) and after and after.get("queryId") == qid
+    head_commit = client.get(f"/api/nqe/repos/{args.repo}/commits/head")
     sys.stderr.write(
         f"published {args.path!r} ({action}); queryId="
-        f"{result['queryId']}{' (preserved)' if result['queryIdPreserved'] else ''}.\n")
-    emit_json(result)
+        f"{query_id}{' (preserved)' if query_id_preserved else ''}.\n")
+    # The publish outcome is the answer; path/repo/head-commit describe it.
+    emit_success(
+        {
+            "published": published,
+            "action": action,
+            "queryId": query_id,
+            "queryIdPreserved": query_id_preserved,
+        },
+        meta={"path": args.path, "repo": args.repo, "headCommit": head_commit},
+    )
     return 0
 
 

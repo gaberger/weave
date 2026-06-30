@@ -14,12 +14,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_INPUT
 
 
 def parse_param(raw: str) -> tuple:
     if "=" not in raw:
-        die(f"--param must be KEY=VALUE, got: {raw}")
+        emit_error(ERR_INPUT, f"--param must be KEY=VALUE, got: {raw}")
     k, _, v = raw.partition("=")
     # Try to coerce common types
     if v.lower() in ("true", "false"):
@@ -62,7 +63,7 @@ def main() -> int:
         try:
             body["query"] = Path(args.query_file).read_text()
         except OSError as e:
-            die(f"cannot read --query-file {args.query_file}: {e}")
+            emit_error(ERR_INPUT, f"cannot read --query-file {args.query_file}: {e}")
 
     # Parameters
     parameters: dict = {}
@@ -70,7 +71,7 @@ def main() -> int:
         try:
             parameters = json.loads(args.params_json)
         except json.JSONDecodeError as e:
-            die(f"--params-json is not valid JSON: {e}")
+            emit_error(ERR_INPUT, f"--params-json is not valid JSON: {e}")
     for raw in args.param:
         k, v = parse_param(raw)
         parameters[k] = v
@@ -98,9 +99,22 @@ def main() -> int:
         client = ForwardClient.from_env()
         result = client.post(path, body)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    # `result` (the NQE row set) is the answer; row count + scope describe it.
+    # NOTE: --format here is the server-side NQE output format (JSON/CSV) baked
+    # into the request body, not the skill's presentation format, so the
+    # contract envelope is always emitted.
+    meta = {"network_id": args.network_id}
+    if args.snapshot_id:
+        meta["snapshot_id"] = args.snapshot_id
+    if args.query_id:
+        meta["query_id"] = args.query_id
+    items = result.get("items") if isinstance(result, dict) else None
+    if items is not None:
+        meta["count"] = len(items)
+
+    emit_success(result, meta=meta)
     return 0
 
 

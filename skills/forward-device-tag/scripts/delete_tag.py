@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API
 
 
 def main():
@@ -26,9 +27,12 @@ def main():
     try:
         client.delete(path)
     except ForwardError as e:
-        die(f"Failed to delete tag: {e}")
+        emit_error(ERR_API, f"Failed to delete tag: {e}")
 
-    emit_json({"deleted": True, "tagName": args.tag_name})
+    emit_success(
+        {"deleted": True, "tagName": args.tag_name},
+        meta={"network_id": args.network_id, "tag_name": args.tag_name},
+    )
 
 
 if __name__ == "__main__":

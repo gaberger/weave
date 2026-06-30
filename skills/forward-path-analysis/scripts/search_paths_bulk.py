@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError, AuthError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_AUTH, ERR_INPUT, ERR_NOT_FOUND
 
 
 def main() -> int:
@@ -43,13 +44,13 @@ def main() -> int:
     try:
         body = json.loads(Path(args.queries_file).read_text())
     except OSError as e:
-        die(f"cannot read --queries-file {args.queries_file}: {e}")
+        emit_error(ERR_INPUT, f"cannot read --queries-file {args.queries_file}: {e}")
     except json.JSONDecodeError as e:
-        die(f"--queries-file is not valid JSON: {e}")
+        emit_error(ERR_INPUT, f"--queries-file is not valid JSON: {e}")
 
     queries = body.get("queries")
     if not isinstance(queries, list) or not queries:
-        die("queries-file must contain a non-empty 'queries' array")
+        emit_error(ERR_INPUT, "queries-file must contain a non-empty 'queries' array")
 
     if len(queries) > args.warn_at:
         sys.stderr.write(
@@ -67,10 +68,21 @@ def main() -> int:
         budget = int(body.get("maxSeconds") or 60)
         client.timeout = max(client.timeout, budget * max(1, len(queries)) + 30)
         result = client.post(path, body)
+    except AuthError as e:
+        emit_error(ERR_AUTH, str(e))
+    except NotFoundError as e:
+        emit_error(ERR_NOT_FOUND, str(e))
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    meta = {
+        "network_id": args.network_id,
+        "query_count": len(queries),
+    }
+    if args.snapshot_id:
+        meta["snapshot_id"] = args.snapshot_id
+
+    emit_success(result, meta=meta)
     return 0
 
 

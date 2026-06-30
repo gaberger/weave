@@ -15,7 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API
 
 
 def main() -> int:
@@ -25,6 +26,8 @@ def main() -> int:
     p.add_argument("--json", action="store_true", help="Emit raw JSON only")
     args = p.parse_args()
 
+    fmt = "json" if args.json else "human"
+
     try:
         client = ForwardClient.from_env()
         result = client.get(
@@ -32,37 +35,44 @@ def main() -> int:
             query={"view": "version-history"},
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e), fmt=fmt)
 
-    if args.json:
-        emit_json(result)
-        return 0
+    def _render_human(data, meta) -> None:
+        if not data:
+            sys.stdout.write(
+                f"No commits found for change-set {meta['changeset_id']}. "
+                "Use commit_changeset.py to create a version checkpoint.\n"
+            )
+            return
 
-    if not result:
         sys.stdout.write(
-            f"No commits found for change-set {args.changeset_id}. "
-            "Use commit_changeset.py to create a version checkpoint.\n"
+            f"{len(data)} commit(s) in change-set {meta['changeset_id']} "
+            "(most recent first):\n"
         )
-        return 0
+        for entry in data:
+            action = entry.get("action", {})
+            commit_id = action.get("id", entry.get("commitId", "?"))
+            note = action.get("note", entry.get("note", ""))
+            performed_at = action.get("performedAt", action.get("createdAt", ""))
+            actor = (action.get("performedBy") or {}).get("username", "")
+            sys.stdout.write(
+                f"  {commit_id}  \"{note}\""
+                + (f"  by={actor}" if actor else "")
+                + (f"  at={performed_at}" if performed_at else "")
+                + "\n"
+            )
+        sys.stdout.write("\n")
 
-    sys.stdout.write(
-        f"{len(result)} commit(s) in change-set {args.changeset_id} "
-        "(most recent first):\n"
+    emit_success(
+        result,
+        meta={
+            "network_id": args.network_id,
+            "changeset_id": args.changeset_id,
+            "count": len(result or []),
+        },
+        fmt=fmt,
+        human=_render_human,
     )
-    for entry in result:
-        action = entry.get("action", {})
-        commit_id = action.get("id", entry.get("commitId", "?"))
-        note = action.get("note", entry.get("note", ""))
-        performed_at = action.get("performedAt", action.get("createdAt", ""))
-        actor = (action.get("performedBy") or {}).get("username", "")
-        sys.stdout.write(
-            f"  {commit_id}  \"{note}\""
-            + (f"  by={actor}" if actor else "")
-            + (f"  at={performed_at}" if performed_at else "")
-            + "\n"
-        )
-    sys.stdout.write("\n")
-    emit_json(result)
     return 0
 
 

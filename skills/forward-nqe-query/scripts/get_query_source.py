@@ -12,7 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, NotFoundError, emit_json, die
+from forward_client import ForwardClient, ForwardError, NotFoundError
+from skill_io import emit_error, emit_success, ERR_API, ERR_AUTH, ERR_INPUT, ERR_NOT_FOUND
 
 
 def fetch(client: ForwardClient, repo: str, commit: str, path: str):
@@ -31,7 +32,7 @@ def main() -> int:
     args = p.parse_args()
 
     if not args.commit_id and not args.head:
-        die("provide --commit-id (from catalog) or --head")
+        emit_error(ERR_INPUT, "provide --commit-id (from catalog) or --head")
 
     commit = args.commit_id or "head"
     repos = [args.repo] if args.repo else ["fwd", "org"]
@@ -39,7 +40,7 @@ def main() -> int:
     try:
         client = ForwardClient.from_env()
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_AUTH, str(e))
 
     last_err = None
     for repo in repos:
@@ -49,14 +50,14 @@ def main() -> int:
             last_err = e
             continue
         except ForwardError as e:
-            die(str(e))
+            emit_error(ERR_API, str(e))
         # Tag the response with the repo we succeeded on
         if isinstance(data, dict):
             data.setdefault("_repository", repo)
-        emit_json(data)
+        emit_success(data, meta={"path": args.path, "repo": repo, "commit": commit})
         return 0
 
-    die(f"query not found in repos {repos}: {last_err}")
+    emit_error(ERR_NOT_FOUND, f"query not found in repos {repos}: {last_err}")
     return 1
 
 

@@ -16,7 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError, AuthError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_AUTH, ERR_INPUT, ERR_NOT_FOUND
 
 
 PROTO_ALIAS = {
@@ -67,7 +68,8 @@ def main() -> int:
             try:
                 qs["ipProto"] = int(proto_raw)
             except ValueError:
-                die(f"invalid --ip-proto {args.ip_proto}: use tcp|udp|icmp or a number")
+                emit_error(ERR_INPUT,
+                           f"invalid --ip-proto {args.ip_proto}: use tcp|udp|icmp or a number")
     if args.src_port:
         qs["srcPort"] = args.src_port
     if args.dst_port:
@@ -94,10 +96,28 @@ def main() -> int:
         # Increase client-side timeout past server budget to avoid premature cutoff
         client.timeout = max(client.timeout, args.max_seconds + 30)
         result = client.get(path)
+    except AuthError as e:
+        emit_error(ERR_AUTH, str(e))
+    except NotFoundError as e:
+        emit_error(ERR_NOT_FOUND, str(e))
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    meta = {
+        "network_id": args.network_id,
+        "src_ip": args.src_ip,
+        "dst_ip": args.dst_ip,
+    }
+    if args.from_:
+        meta["from"] = args.from_
+    if args.intent:
+        meta["intent"] = args.intent
+    if args.snapshot_id:
+        meta["snapshot_id"] = args.snapshot_id
+    if args.changeset_id:
+        meta["changeset_id"] = args.changeset_id
+
+    emit_success(result, meta=meta)
     return 0
 
 

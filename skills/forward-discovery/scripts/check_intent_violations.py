@@ -29,6 +29,7 @@ sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
+from skill_io import add_format_arg, emit_success, emit_error, ERR_EMPTY
 
 
 def get_all_intent_checks(client: ForwardClient, network_id: int) -> List[Dict[str, Any]]:
@@ -147,12 +148,8 @@ def analyze_violations(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     return analysis
 
 
-def print_analysis(analysis: Dict[str, Any], format: str = "human", verbose: bool = False):
-    """Print intent check violation analysis."""
-
-    if format == "json":
-        print(json.dumps(analysis, indent=2))
-        return
+def print_analysis(analysis: Dict[str, Any], verbose: bool = False):
+    """Print the human-readable analysis (JSON is emitted via emit_success)."""
 
     print(f"\n{'='*80}")
     print(f"INTENT CHECK VIOLATIONS - BASELINE ANALYSIS")
@@ -260,12 +257,7 @@ Why this matters:
         help="Specific snapshot ID (default: latest)"
     )
 
-    parser.add_argument(
-        "--format",
-        choices=["human", "json"],
-        default="human",
-        help="Output format (default: human)"
-    )
+    add_format_arg(parser, choices=("human", "json"))
 
     parser.add_argument(
         "--verbose",
@@ -289,12 +281,11 @@ Why this matters:
     checks = get_all_intent_checks(client, args.network_id)
 
     if not checks:
-        print("⚠️  No intent checks found for this network", file=sys.stderr)
-        print("   This may mean:", file=sys.stderr)
-        print("   1. Intent checks are not configured for this network", file=sys.stderr)
-        print("   2. The Forward API does not support intent check listing", file=sys.stderr)
-        print("   3. You may need to configure checks in Forward UI first", file=sys.stderr)
-        sys.exit(1)
+        emit_error(ERR_EMPTY,
+                   "No intent checks found for this network",
+                   hint="intent checks may not be configured — create them in the Forward UI "
+                        "(or the API may not support listing them)",
+                   fmt=args.format)
 
     print(f"Found {len(checks)} intent check(s) to run...\n", file=sys.stderr)
 
@@ -334,8 +325,23 @@ Why this matters:
             len(v) for v in filtered_violations.values()
         )
 
-    # Print results
-    print_analysis(analysis, format=args.format, verbose=args.verbose)
+    meta = {
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "checks_run": analysis["checks_run"],
+        "checks_passed": analysis["checks_passed"],
+        "checks_failed": analysis["checks_failed"],
+        "checks_errored": analysis["checks_errored"],
+        "total_violations": analysis["total_violations"],
+        "severity_filter": args.severity_filter,
+    }
+
+    # JSON is the machine contract — severity lives in data/meta, exit 0.
+    if args.format == "json":
+        emit_success(analysis, meta=meta, fmt="json")
+
+    # Human output below preserves its violation exit code.
+    print_analysis(analysis, verbose=args.verbose)
 
     # Exit with warning code if violations found
     if analysis["checks_failed"] > 0:

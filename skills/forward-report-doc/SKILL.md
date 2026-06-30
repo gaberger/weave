@@ -54,6 +54,16 @@ Report written to <output-file> — <N> sections, format: <markdown|html>.
 If no output file was specified, the rendered content follows below.
 ```
 
+`--format markdown` / `--format html` write the rendered document as-is (the primary product). `--format json` wraps a result descriptor in the weave skill envelope instead — the document is rendered as markdown (the canonical text form):
+
+```json
+{ "ok": true, "schema": 1,
+  "data": { "format": "markdown", "bytes": 1234, "rendered": "# Title\n..." },
+  "meta": { "template": "incident-report", "format": "markdown", "bytes": 1234, "output": null } }
+```
+
+When `--format json` is combined with `--output FILE`, the document is written to the file and `data` carries `{ "path", "format", "bytes" }` instead of the inline `rendered` string. Errors (bad/missing input) emit `{ "ok": false, "schema": 1, "error": { "code", "message", "hint" } }`.
+
 If the input JSON has no sections or an empty `sections[]` array, say: "**No report sections provided.** Pass a document JSON with at least one section in `sections[]`."
 
 To share or review the report, ask: "Open `review.html` in a browser" or "Post `postmortem.md` to the incident channel."
@@ -105,7 +115,7 @@ Arguments:
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--format` | no | `markdown` (default) or `html` |
+| `--format` | no | `markdown` (default), `html`, or `json` (wraps a result descriptor in the weave skill envelope; document rendered as markdown) |
 | `--template` | no | `incident-report`, `change-ticket`, `compliance-audit`, `network-review`, `action-plan`, `drift-report`, `generic` (default). Sets default section ordering. |
 | `--title` | no | Override the report title from the input JSON |
 | `--input` | no | Read document JSON from a file; defaults to stdin |
@@ -126,7 +136,7 @@ Reads JSON describing the report structure on stdin (or `--input <file>`), write
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--format` | `markdown` | One of `markdown`, `html` |
+| `--format` | `markdown` | One of `markdown`, `html`, `json` (json wraps a result descriptor in the weave skill envelope) |
 | `--template` | `generic` | One of `incident-report`, `change-ticket`, `compliance-audit`, `network-review`, `action-plan`, `drift-report`, `generic` |
 | `--title` | *(from input)* | Override the report title |
 | `--input` | stdin | Read JSON from a file |

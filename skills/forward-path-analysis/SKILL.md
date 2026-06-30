@@ -42,7 +42,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-path-analysis/scripts/search_paths
 
 ## Output format
 
-Never paste raw JSON. Lead with a verdict, not a dump.
+Both scripts emit one JSON envelope on stdout (the weave skill I/O contract):
+
+- success: `{"ok": true, "schema": 1, "data": <paths result>, "meta": {...}}` — `data` is the raw Forward path-search response (paths/hops/verdict); `meta` carries facts about it (`network_id`, `src_ip`, `dst_ip`, `snapshot_id`/`changeset_id`, and for bulk `query_count`).
+- failure: `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` with exit non-zero. Codes: `INPUT` (bad args / unreadable or empty queries file), `AUTH`, `NOT_FOUND`, `API`.
+
+Exit code means *did the skill run*, not what the data showed — read the verdict from `data`, not the exit code.
+
+Never paste raw JSON to the user. Lead with a verdict, not a dump.
 
 ### `search_path.py`
 

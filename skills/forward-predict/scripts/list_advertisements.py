@@ -32,7 +32,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API
 
 
 def _collect(changeset: dict, device_filter: str | None) -> list[dict]:
@@ -45,6 +46,38 @@ def _collect(changeset: dict, device_filter: str | None) -> list[dict]:
             row.update(ad)
             out.append(row)
     return out
+
+
+def _render_human(rows: list[dict], meta) -> None:
+    """Compact human summary, then the JSON array for downstream consumers."""
+    changeset_id = meta.get("changeset_id")
+    device = meta.get("device")
+    if not rows:
+        scope = f" on {device}" if device else ""
+        sys.stdout.write(
+            f"no added BGP advertisements in change-set {changeset_id}{scope}\n"
+        )
+        return
+
+    by_dev: dict[str, list[dict]] = {}
+    for r in rows:
+        by_dev.setdefault(r["device"], []).append(r)
+    sys.stdout.write(
+        f"{len(rows)} added BGP advertisement(s) across {len(by_dev)} device(s) "
+        f"in change-set {changeset_id}:\n"
+    )
+    for dev, items in by_dev.items():
+        sys.stdout.write(f"  {dev}:\n")
+        for r in items:
+            ap = ",".join(str(a) for a in r.get("asPath") or [])
+            sys.stdout.write(
+                f"    {r.get('type','?')} vrf={r.get('vrf','?')} "
+                f"prefix={r.get('prefix','?')} nextHop={r.get('nextHop','?')} "
+                f"peer={r.get('externalPeer','?')} as-path=[{ap}]\n"
+            )
+    sys.stdout.write("\n")
+    json.dump(rows, sys.stdout, indent=2, default=str)
+    sys.stdout.write("\n")
 
 
 def main() -> int:
@@ -68,47 +101,33 @@ def main() -> int:
             query={"view": "summary"},
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     if "deviceToChanges" not in cs:
-        die(
+        emit_error(
+            ERR_API,
             f"change-set {args.changeset_id} summary does not include deviceToChanges — "
-            "this Forward server only exposes view=summary which omits advertisement details"
+            "this Forward server only exposes view=summary which omits advertisement details",
         )
 
     rows = _collect(cs, args.device)
 
-    if args.json:
-        emit_json(rows)
-        return 0
+    meta = {
+        "count": len(rows),
+        "device_count": len({r["device"] for r in rows}),
+        "network_id": args.network_id,
+        "changeset_id": args.changeset_id,
+        "device": args.device,
+    }
 
-    if not rows:
-        scope = f" on {args.device}" if args.device else ""
-        sys.stdout.write(
-            f"no added BGP advertisements in change-set {args.changeset_id}{scope}\n"
-        )
-        return 0
-
-    # Compact human summary, then the JSON for downstream consumers.
-    by_dev: dict[str, list[dict]] = {}
-    for r in rows:
-        by_dev.setdefault(r["device"], []).append(r)
-    sys.stdout.write(
-        f"{len(rows)} added BGP advertisement(s) across {len(by_dev)} device(s) "
-        f"in change-set {args.changeset_id}:\n"
+    # --json selects the machine envelope; otherwise render the human summary
+    # (which still appends the raw JSON array — the model uses both).
+    emit_success(
+        rows,
+        meta=meta,
+        fmt="json" if args.json else "human",
+        human=_render_human,
     )
-    for dev, items in by_dev.items():
-        sys.stdout.write(f"  {dev}:\n")
-        for r in items:
-            ap = ",".join(str(a) for a in r.get("asPath") or [])
-            sys.stdout.write(
-                f"    {r.get('type','?')} vrf={r.get('vrf','?')} "
-                f"prefix={r.get('prefix','?')} nextHop={r.get('nextHop','?')} "
-                f"peer={r.get('externalPeer','?')} as-path=[{ap}]\n"
-            )
-    sys.stdout.write("\n")
-    json.dump(rows, sys.stdout, indent=2, default=str)
-    sys.stdout.write("\n")
     return 0
 
 

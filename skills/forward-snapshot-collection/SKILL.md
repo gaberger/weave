@@ -42,7 +42,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-snapshot-collection/scripts/delete
 
 ## Output format
 
-Never paste raw JSON. Lead with a verdict, not a dump.
+Every script emits the standard skill envelope on stdout and exits 0 on success:
+
+```json
+{"ok": true, "schema": 1, "data": <result>, "meta": {"network_id": "...", ...}}
+```
+
+On failure it emits `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` and exits non-zero. Codes: `AUTH` (bad creds), `NOT_FOUND` (unknown network/task/schedule — includes 404), `API` (any other Forward API error, e.g. a 409 "collection already running"). `data` is the API result; `meta` carries facts about it (network_id, task_id, cron, count). Read `data`/`meta`, then render as below — never paste raw JSON. Lead with a verdict, not a dump.
 
 ### `start_collection.py`
 

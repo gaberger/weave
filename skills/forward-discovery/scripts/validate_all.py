@@ -24,17 +24,29 @@ from typing import Dict, List, Any, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Add parent directories to path for imports
+# Local skill I/O + client FIRST, so the {ok,error} contract is available to
+# report a graceful failure if the cross-skill imports below can't be resolved.
 SCRIPT_DIR = Path(__file__).parent
 SKILL_ROOT = SCRIPT_DIR.parent
 SKILLS_ROOT = SKILL_ROOT.parent
-sys.path.insert(0, str(SKILLS_ROOT / "forward-path-analysis" / "scripts"))
-sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
-
-from search_path import search_path, SearchParams
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
+from skill_io import add_format_arg, emit_success, emit_error, ERR_INPUT
+
+# Cross-skill imports: validate_all orchestrates forward-path-analysis +
+# forward-nqe-query. If those skills aren't installed alongside this one, fail
+# with a clear error envelope instead of an uncaught ImportError traceback.
+sys.path.insert(0, str(SKILLS_ROOT / "forward-path-analysis" / "scripts"))
+sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
+try:
+    from search_path import search_path, SearchParams
+except ImportError as e:
+    emit_error(
+        ERR_INPUT,
+        f"validate_all requires the forward-path-analysis skill's search_path module: {e}",
+        hint="ensure forward-path-analysis (and forward-nqe-query) are installed alongside forward-discovery",
+    )
 
 
 class ValidationMatrix:
@@ -363,12 +375,8 @@ class ValidationMatrix:
 
         return self.results
 
-    def print_results(self, format: str = "human"):
-        """Print validation results."""
-
-        if format == "json":
-            print(json.dumps(self.results, indent=2))
-            return
+    def print_results(self):
+        """Print the human-readable validation results (JSON is emitted via emit_success)."""
 
         print(f"\n{'='*80}")
         print(f"VALIDATION RESULTS")
@@ -425,13 +433,18 @@ class ValidationMatrix:
             return False
 
 
-def load_validation_config(config_path: Path) -> Dict[str, Any]:
+def load_validation_config(config_path: Path, fmt: str = "json") -> Dict[str, Any]:
     """Load validation configuration from YAML file."""
-    import yaml
+    try:
+        import yaml
+    except ImportError as e:
+        emit_error(ERR_INPUT, f"loading a validation config requires PyYAML: {e}",
+                   hint="pip install pyyaml", fmt=fmt)
 
     if not config_path.exists():
-        print(f"❌ Config file not found: {config_path}", file=sys.stderr)
-        sys.exit(1)
+        emit_error(ERR_INPUT, f"Config file not found: {config_path}",
+                   hint="pass a valid --config path to a validation matrix YAML file",
+                   fmt=fmt)
 
     with open(config_path) as f:
         return yaml.safe_load(f)
@@ -490,17 +503,12 @@ Config file format (YAML):
         help="Validation configuration YAML file"
     )
 
-    parser.add_argument(
-        "--format",
-        choices=["human", "json"],
-        default="human",
-        help="Output format (default: human)"
-    )
+    add_format_arg(parser, choices=("human", "json"))
 
     args = parser.parse_args()
 
     # Load config
-    config = load_validation_config(Path(args.config))
+    config = load_validation_config(Path(args.config), fmt=args.format)
 
     # Initialize client and validator
     client = ForwardClient.from_env()
@@ -509,8 +517,23 @@ Config file format (YAML):
     # Run all tests
     validator.run_all_tests(config)
 
-    # Print results
-    success = validator.print_results(format=args.format)
+    summary = validator.results["summary"]
+    meta = {
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "config": args.config,
+        "total_tests": summary["total_tests"],
+        "passed": summary["passed"],
+        "failed": summary["failed"],
+        "warnings": summary["warnings"],
+    }
+
+    # JSON is the machine contract — pass/fail lives in data/meta, exit 0.
+    if args.format == "json":
+        emit_success(validator.results, meta=meta, fmt="json")
+
+    # Human output below preserves its pass/fail exit code.
+    success = validator.print_results()
 
     # Exit with error code if tests failed
     sys.exit(0 if success else 1)
