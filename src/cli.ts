@@ -575,10 +575,22 @@ async function pickLlm(args: Args): Promise<{ kind: string; make: (sp?: string) 
  *  - fallback: claude (general agent, via SDK or `claude -p` CLI) else echo (offline)
  *  - generic tools: http_fetch, spawn_task, notify. No domain logic in the harness.
  */
-// Package root = parent of the dir holding this module. Resolves to the repo root
-// from both `src/cli.ts` (dev/tsx) and `dist/cli.js` (built) — both sit one level
-// under the root. Used to locate the vendored NetOps skills shipped in `skills/`.
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+// Package root = the dir that contains the vendored `skills/` (NetOps persona packs + bundled
+// Claude skills). From source (`src/cli.ts` via tsx) or the built `dist/cli.js`, `import.meta.url`
+// sits one level under the repo root. But from a `bun --compile` standalone binary it points into
+// bun's virtual filesystem (`/$bunfs/…`), where `skills/` is NOT embedded — the dir ships ALONGSIDE
+// the executable instead. So pick the first candidate that actually has a `skills/` subdir; this
+// transparently covers tsx, dist, and the compiled binary. `WEAVE_PACKAGE_ROOT` is an explicit
+// escape hatch for installs that keep `skills/` somewhere else.
+function resolvePackageRoot(): string {
+  const candidates = [
+    process.env.WEAVE_PACKAGE_ROOT,                   // explicit override
+    dirname(dirname(fileURLToPath(import.meta.url))), // src/cli.ts (tsx) or dist/cli.js
+    dirname(process.execPath),                        // bun --compile binary: skills/ ships beside it
+  ].filter((d): d is string => !!d);
+  return candidates.find((d) => existsSync(join(d, "skills"))) ?? candidates[0]!;
+}
+const PACKAGE_ROOT = resolvePackageRoot();
 
 /** The domain pack selected for this run, or null for the generic assistant. Resolved from the
  *  generic `--persona <name>` flag (or the `--netops` back-compat alias — the ONLY place the engine

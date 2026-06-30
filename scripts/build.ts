@@ -7,12 +7,14 @@
 //   bun run scripts/build.ts --target darwin-arm64,linux-x64
 //   bun run scripts/build.ts --parallel      # run builds concurrently
 
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, cp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..");
 const ENTRY = join(ROOT, "src/cli.ts");
 const OUT_DIR = join(ROOT, "dist");
+const SKILLS_SRC = join(ROOT, "skills");
+const SKILLS_OUT = join(OUT_DIR, "skills");
 
 interface Target {
   readonly platform: "darwin" | "linux";
@@ -82,6 +84,13 @@ async function buildTarget(target: Target): Promise<BuildResult> {
 async function main(): Promise<void> {
   const { targets, parallel } = parseArgs(process.argv.slice(2));
   await mkdir(OUT_DIR, { recursive: true });
+
+  // The compiled binary can't embed `skills/` (its scripts run via Bash on a real path), so the
+  // vendored skills ship beside the executable. One copy in dist/ serves every platform binary —
+  // each resolves PACKAGE_ROOT to its own dir (see resolvePackageRoot in cli.ts).
+  await rm(SKILLS_OUT, { recursive: true, force: true });
+  await cp(SKILLS_SRC, SKILLS_OUT, { recursive: true });
+  console.log(`▶ copied skills/ → ${SKILLS_OUT}`);
 
   console.log(`▶ building ${targets.length} target(s) ${parallel ? "in parallel" : "sequentially"}`);
   const results = parallel
