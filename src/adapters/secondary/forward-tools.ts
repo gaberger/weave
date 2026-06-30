@@ -48,6 +48,16 @@ interface ScriptToolSpec {
   readonly effect?: Effect; // default "read"
   readonly description: string;
   readonly args: readonly ArgSpec[];
+  // --- write semantics (ADR-0004). A `write` tool MUTATES the live Forward network. It is gated two
+  //     ways: (1) effect "irreversible" → the worker's canUseTool blocks it unless the lease is held;
+  //     (2) the UNIFORM tool gate below — it NEVER mutates unless the caller passes `execute: true`.
+  //     Without execute it returns a non-mutating preview: spawn the script with `dryRunFlag` if it has
+  //     one (a real "what would happen"), else a synthetic plan with NO spawn (fail-safe for scripts
+  //     that mutate immediately with no guard). With execute it adds `confirmFlag` (--yes / --execute)
+  //     where the script requires one. ---
+  readonly write?: boolean;
+  readonly dryRunFlag?: string; // flag that forces a SAFE preview when not executing (e.g. "--dry-run")
+  readonly confirmFlag?: string; // flag the script needs to actually mutate (e.g. "--yes" / "--execute")
 }
 
 /** Coerce a value the MCP bridge may have stringified (Haiku sends arrays/numbers as JSON strings,
@@ -165,14 +175,30 @@ function runScript(opts: ForwardToolsOptions, scriptRelPath: string, flags: stri
 function buildTool(opts: ForwardToolsOptions, spec: ScriptToolSpec): ToolDefinition {
   const inputSchema: Record<string, string> = {};
   for (const a of spec.args) inputSchema[a.key] = a.desc;
+  if (spec.write) inputSchema["execute"] = "boolean — MUST be true to actually apply this change; omit/false = a non-mutating dry-run preview";
   return {
     name: spec.name,
     description: spec.description,
-    effect: spec.effect ?? "read",
+    // A write tool defaults to irreversible (lease-gated) unless it explicitly down-classes.
+    effect: spec.effect ?? (spec.write ? "irreversible" : "read"),
     inputSchema,
     execute: (args) => {
       const flags = buildFlags(spec, args);
       if (!Array.isArray(flags)) return Promise.resolve({ ok: false, output: { error: flags.error } });
+      if (spec.write && !isTruthy(args["execute"])) {
+        // NON-MUTATING preview. Prefer the script's own dry-run (real "what would happen"); else, for a
+        // script that mutates immediately with no guard, do NOT spawn at all — synthesize the plan.
+        if (spec.dryRunFlag) return runScript(opts, spec.script, [...flags, spec.dryRunFlag]);
+        return Promise.resolve({
+          ok: true,
+          output: {
+            dryRun: true,
+            wouldRun: `${spec.script} ${flags.join(" ")}`.trim(),
+            note: "This is a WRITE that would change the live network and was NOT applied. Confirm with the user, then re-run with execute:true to apply.",
+          },
+        });
+      }
+      if (spec.write && spec.confirmFlag) flags.push(spec.confirmFlag);
       return runScript(opts, spec.script, flags);
     },
   };
@@ -427,6 +453,120 @@ const SPECS: readonly ScriptToolSpec[] = [
     args: [
       { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
       { key: "name", flag: "--name", kind: "string", desc: "filter by name substring" },
+    ],
+  },
+  // ============ WRITE tools (batch 4) — MUTATE the live network; irreversible + execute-gated ============
+  // -- changeset (config change-management lifecycle: create → edit → commit; delete). All have a real
+  //    --dry-run, so the preview spawns the script safely. commit/edit default-execute without --dry-run. --
+  {
+    name: "changeset_list",
+    script: "forward-changeset/scripts/list_changesets.py",
+    description: "List config change-sets (drafts) for a network. Read-only — call this before editing/committing.",
+    args: [{ key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" }],
+  },
+  {
+    name: "changeset_create",
+    script: "forward-changeset/scripts/create_changeset.py",
+    description: "Create a new config change-set (draft) on a network. WRITE: dry-run unless execute:true.",
+    write: true, dryRunFlag: "--dry-run",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "name", flag: "--name", kind: "string", required: true, desc: "change-set name (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "base snapshot (default latest processed)" },
+      { key: "dirPath", flag: "--dir-path", kind: "string", desc: "directory path for the change-set" },
+    ],
+  },
+  {
+    name: "changeset_edit",
+    script: "forward-changeset/scripts/edit_commands.py",
+    description: "Stage device config commands into a change-set. WRITE: dry-run unless execute:true.",
+    write: true, dryRunFlag: "--dry-run",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "changesetId", flag: "--changeset-id", kind: "string", required: true, desc: "change-set id (required)" },
+      { key: "device", flag: "--device", kind: "string", required: true, desc: "target device name (required)" },
+      { key: "commands", flag: "--commands", kind: "string", desc: "config commands (inline)" },
+      { key: "commandsFile", flag: "--commands-file", kind: "string", desc: "path to a file of commands" },
+    ],
+  },
+  {
+    name: "changeset_commit",
+    script: "forward-changeset/scripts/commit_changeset.py",
+    description: "COMMIT a change-set (applies staged config to the modeled network). WRITE: dry-run unless execute:true.",
+    write: true, dryRunFlag: "--dry-run",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "changesetId", flag: "--changeset-id", kind: "string", required: true, desc: "change-set id (required)" },
+      { key: "note", flag: "--note", kind: "string", desc: "commit note" },
+    ],
+  },
+  {
+    name: "changeset_delete",
+    script: "forward-changeset/scripts/delete_changeset.py",
+    description: "DELETE a change-set (destructive). WRITE: dry-run unless execute:true (adds the script's --yes).",
+    write: true, dryRunFlag: "--dry-run", confirmFlag: "--yes",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "changesetId", flag: "--changeset-id", kind: "string", required: true, desc: "change-set id (required)" },
+    ],
+  },
+  // -- device tags. These scripts have NO guard flag (they mutate immediately), so when execute is not
+  //    set the tool returns a SYNTHETIC plan and does NOT spawn — the fail-safe path. --
+  {
+    name: "tag_list",
+    script: "forward-device-tag/scripts/list_tags.py",
+    description: "List device tags for a network. Read-only.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+      { key: "withDevices", flag: "--with-devices", kind: "bool", desc: "include each tag's device membership" },
+    ],
+  },
+  {
+    name: "tag_create",
+    script: "forward-device-tag/scripts/create_tag.py",
+    description: "Create a device tag. WRITE (no dry-run in the script): only applied when execute:true.",
+    write: true,
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "tagName", flag: "--tag-name", kind: "string", required: true, desc: "tag name (required)" },
+      { key: "color", flag: "--color", kind: "string", desc: "tag color" },
+    ],
+  },
+  {
+    name: "tag_delete",
+    script: "forward-device-tag/scripts/delete_tag.py",
+    description: "Delete a device tag (destructive). WRITE: only applied when execute:true.",
+    write: true,
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "tagName", flag: "--tag-name", kind: "string", required: true, desc: "tag name (required)" },
+    ],
+  },
+  {
+    name: "tag_devices",
+    script: "forward-device-tag/scripts/tag_devices.py",
+    description: "Apply a tag to devices. WRITE: only applied when execute:true.",
+    write: true,
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "tagName", flag: "--tag-name", kind: "string", required: true, desc: "tag name (required)" },
+      { key: "devices", flag: "--devices", kind: "string", desc: "device names (comma-separated)" },
+      { key: "devicesFile", flag: "--devices-file", kind: "string", desc: "path to a file of device names" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+    ],
+  },
+  {
+    name: "untag_devices",
+    script: "forward-device-tag/scripts/untag_devices.py",
+    description: "Remove a tag from devices (or all). WRITE: only applied when execute:true.",
+    write: true,
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "tagName", flag: "--tag-name", kind: "string", required: true, desc: "tag name (required)" },
+      { key: "devices", flag: "--devices", kind: "string", desc: "device names (comma-separated)" },
+      { key: "removeAll", flag: "--remove-all", kind: "bool", desc: "remove the tag from ALL devices" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
     ],
   },
 ];

@@ -16,7 +16,8 @@ test("forwardSkills returns the expected code skills, each granted only forward_
     skills.map((s) => s.name),
     [
       "forward-vulnerability", "forward-compliance-check", "forward-security-posture", "forward-bgp-prefix",
-      "forward-device-intel", "forward-path-analysis", "forward-device-config", "forward-nqe-query", "forward-inventory",
+      "forward-device-intel", "forward-changeset", "forward-device-tag", "forward-path-analysis",
+      "forward-device-config", "forward-nqe-query", "forward-inventory",
     ],
   );
   for (const s of skills) assert.equal(typeof s.run, "function");
@@ -43,6 +44,8 @@ test("routing: each domain goal selects its specialized skill before the catch-a
   assert.equal(sel("what can reach the DMZ — security posture"), "forward-security-posture");
   assert.equal(sel("who originates bgp prefix 10.0.0.0/8"), "forward-bgp-prefix");
   assert.equal(sel("show the arp table on core-rtr-1"), "forward-device-intel");
+  assert.equal(sel("create a change-set for this config"), "forward-changeset");
+  assert.equal(sel("tag these devices as production"), "forward-device-tag");
   assert.equal(sel("why is traffic to 10.0.0.1 dropping"), "forward-path-analysis");
   assert.equal(sel("show me the config for core-rtr-1"), "forward-device-config");
   assert.equal(sel("how many interfaces are down"), "forward-nqe-query");

@@ -52,6 +52,13 @@ export const BGP_PREFIX_MATCH = [
 export const DEVICE_INTEL_MATCH = [
   "arp", "bgp peer", "bgp neighbor", "interface status", "interfaces on", "device info", "mac address",
 ] as const;
+export const CHANGESET_MATCH = [
+  "changeset", "change set", "change-set", "stage a config", "stage config", "commit the change", "config change",
+] as const;
+export const TAG_MATCH = [
+  "device tag", "tag the device", "tag devices", "tag these", "tag those", "tag all", "apply the tag",
+  "untag", "create a tag", "delete the tag", "list tags",
+] as const;
 
 function skill(
   make: (sp?: string) => Worker,
@@ -198,6 +205,56 @@ export function forwardDeviceIntelSkill(make: (sp?: string) => Worker): Skill {
   );
 }
 
+// Preamble for WRITE skills — the confirmation-first discipline on top of GROUND. The tools are
+// already irreversible (lease-gated) and default to a non-mutating dry-run; this makes the agent
+// preview-and-confirm rather than mutate on its own initiative.
+const WRITE_GROUND = GROUND +
+  "- These tools MUTATE the live network. ALWAYS preview FIRST (call the tool without execute, or " +
+  "execute:false) and show the user exactly what would change. NEVER pass execute:true unless the user " +
+  "has EXPLICITLY confirmed THIS specific change in this conversation — a vague 'go ahead' on an earlier " +
+  "topic does not count. After applying, report exactly what changed (ids, names).\n";
+
+function writeSkill(
+  make: (sp?: string) => Worker,
+  name: string,
+  description: string,
+  tools: string[],
+  match: readonly string[],
+  body: string,
+): Skill {
+  const prompt = WRITE_GROUND + body;
+  return makeAgentSkill({ name, description, prompt, tools, match: [...match] }, make(prompt));
+}
+
+/** Config change-set lifecycle (create → edit → commit; delete). WRITE. */
+export function forwardChangesetSkill(make: (sp?: string) => Worker): Skill {
+  return writeSkill(
+    make,
+    "forward-changeset",
+    "Manage Forward config change-sets: list, create, stage device commands, commit, delete. Use for " +
+      "\"create a change-set\", \"stage this config\", \"commit the change\", \"delete the change-set\".",
+    ["forward_networks", "changeset_list", "changeset_create", "changeset_edit", "changeset_commit", "changeset_delete"],
+    CHANGESET_MATCH,
+    "- Read with `changeset_list` first. Lifecycle: `changeset_create` → `changeset_edit` (stage commands) " +
+      "→ `changeset_commit`. `changeset_delete` is destructive. Every mutator previews unless execute:true.",
+  );
+}
+
+/** Device tagging (create/delete tags, tag/untag devices). WRITE. */
+export function forwardDeviceTagSkill(make: (sp?: string) => Worker): Skill {
+  return writeSkill(
+    make,
+    "forward-device-tag",
+    "Manage device tags: list, create, delete, tag/untag devices. Use for \"create a tag\", \"tag these " +
+      "devices\", \"untag\", \"delete the tag\", \"list tags\".",
+    ["forward_networks", "tag_list", "tag_create", "tag_delete", "tag_devices", "untag_devices"],
+    TAG_MATCH,
+    "- Read with `tag_list` first. `tag_create`/`tag_delete` manage tag definitions; `tag_devices`/" +
+      "`untag_devices` change membership. These scripts apply immediately when executed (no server-side " +
+      "dry-run), so the preview is synthetic — be explicit about what execute:true will do.",
+  );
+}
+
 /** All forward code skills, in routing order: narrow/specialized first, the broad query skills
  *  (nqe, inventory) last so they don't shadow a specific match; the persona catch-all backstops. */
 export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
@@ -207,6 +264,8 @@ export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
     forwardSecurityPostureSkill(make),
     forwardBgpPrefixSkill(make),
     forwardDeviceIntelSkill(make),
+    forwardChangesetSkill(make),
+    forwardDeviceTagSkill(make),
     forwardPathSkill(make),
     forwardDeviceConfigSkill(make),
     forwardNqeSkill(make),

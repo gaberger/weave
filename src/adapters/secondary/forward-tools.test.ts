@@ -10,14 +10,17 @@ import { forwardTools } from "./forward-tools.js";
  *  tool builds the right flags and parses JSON — without touching live Forward. */
 function fakePackageRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "weave-fwd-"));
-  for (const rel of ["forward-inventory/scripts", "forward-vulnerability/scripts"]) {
+  for (const rel of ["forward-inventory/scripts", "forward-vulnerability/scripts",
+    "forward-changeset/scripts", "forward-device-tag/scripts"]) {
     mkdirSync(join(root, "skills", rel), { recursive: true });
   }
   const echo = "import sys, json\nprint(json.dumps({'argv': sys.argv[1:]}))\n";
   const fail = "import sys\nsys.stderr.write('boom\\n')\nsys.exit(3)\n";
-  writeFileSync(join(root, "skills/forward-inventory/scripts/list_networks.py"), echo);
-  writeFileSync(join(root, "skills/forward-inventory/scripts/list_snapshots.py"), echo);
-  writeFileSync(join(root, "skills/forward-vulnerability/scripts/cve_disposition.py"), echo);
+  for (const s of ["forward-inventory/scripts/list_networks.py", "forward-inventory/scripts/list_snapshots.py",
+    "forward-vulnerability/scripts/cve_disposition.py", "forward-changeset/scripts/create_changeset.py",
+    "forward-changeset/scripts/delete_changeset.py", "forward-device-tag/scripts/create_tag.py"]) {
+    writeFileSync(join(root, "skills", s), echo);
+  }
   // A separate failing script swapped in per-test by overwriting the target file.
   void chmodSync; void fail;
   return root;
@@ -25,13 +28,55 @@ function fakePackageRoot(): string {
 
 const tools = (root: string) => Object.fromEntries(forwardTools({ packageRoot: root }).map((t) => [t.name, t]));
 
-test("forward tools are typed read tools incl. the Slice-1 + batch-2 read surface", () => {
+test("read tools are effect:read; write tools are effect:irreversible (lease-gated, ADR-0004)", () => {
   const t = tools(fakePackageRoot());
   for (const name of ["forward_networks", "forward_snapshots", "forward_devices", "forward_cve_audit",
-    "nqe_search", "nqe_get_source", "nqe_run", "path_search", "config_get", "config_grep"]) {
+    "nqe_search", "nqe_get_source", "nqe_run", "path_search", "config_get", "config_grep",
+    "changeset_list", "tag_list"]) {
     assert.ok(t[name], `missing tool ${name}`);
+    assert.equal(t[name]!.effect, "read", `${name} should be read`);
   }
-  for (const def of Object.values(t)) assert.equal(def.effect, "read");
+  for (const name of ["changeset_create", "changeset_edit", "changeset_commit", "changeset_delete",
+    "tag_create", "tag_delete", "tag_devices", "untag_devices"]) {
+    assert.ok(t[name], `missing write tool ${name}`);
+    assert.equal(t[name]!.effect, "irreversible", `${name} should be irreversible`);
+  }
+});
+
+test("WRITE gate: a script with --dry-run previews (spawns with --dry-run) when execute is not set", async () => {
+  const t = tools(fakePackageRoot());
+  const r = await t["changeset_create"]!.execute({ networkId: "1", name: "cs" });
+  assert.equal(r.ok, true);
+  const argv = (r.output as { argv: string[] }).argv;
+  assert.ok(argv.includes("--dry-run"), "preview must pass --dry-run");
+  assert.ok(!argv.includes("--yes") && !argv.includes("--execute"), "preview must not pass a confirm flag");
+});
+
+test("WRITE gate: a no-guard script is NOT spawned without execute — returns a synthetic plan", async () => {
+  const t = tools(fakePackageRoot());
+  const r = await t["tag_create"]!.execute({ networkId: "1", tagName: "prod" });
+  assert.equal(r.ok, true);
+  const out = r.output as { dryRun?: boolean; wouldRun?: string; argv?: string[] };
+  assert.equal(out.dryRun, true, "must be a synthetic dry-run");
+  assert.equal(out.argv, undefined, "must NOT have spawned the script");
+  assert.match(String(out.wouldRun), /create_tag\.py/);
+});
+
+test("WRITE gate: execute:true applies — spawns with the confirm flag (--yes), no --dry-run", async () => {
+  const t = tools(fakePackageRoot());
+  const r = await t["changeset_delete"]!.execute({ networkId: "1", changesetId: "cs-9", execute: true });
+  assert.equal(r.ok, true);
+  const argv = (r.output as { argv: string[] }).argv;
+  assert.ok(argv.includes("--yes"), "execute must add the script's --yes confirm flag");
+  assert.ok(!argv.includes("--dry-run"), "execute must not pass --dry-run");
+});
+
+test("WRITE gate: execute:true on a no-guard script spawns it (the real mutation path)", async () => {
+  const t = tools(fakePackageRoot());
+  const r = await t["tag_create"]!.execute({ networkId: "1", tagName: "prod", execute: true });
+  assert.equal(r.ok, true);
+  const argv = (r.output as { argv: string[] }).argv;
+  assert.deepEqual(argv, ["--network-id", "1", "--tag-name", "prod"]);
 });
 
 test("forward_networks runs the script and parses its JSON", async () => {
