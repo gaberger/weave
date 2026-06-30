@@ -6,7 +6,7 @@
  * Runs under `node --import tsx src/cli.ts` and compiles via `bun build --compile`.
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, openSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, createWriteStream, renameSync } from "node:fs";
+import { mkdirSync, openSync, writeFileSync, readFileSync, appendFileSync, readdirSync, existsSync, rmSync, createWriteStream, renameSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, tmpdir } from "node:os";
@@ -2812,10 +2812,25 @@ async function cmdChat(args: Args): Promise<void> {
 
   console.log(`${green("weave chat")}${netBadge}— talk to your weave. Just type and press enter.\n`);
   console.log(`  ${gray("mode:")}   ${mode}`);
-  console.log(`  ${gray("cmds:")}   /help  /status  /reset  /quit${carry ? "" : "  /no-context"}`);
+  console.log(`  ${gray("cmds:")}   /help  /history  /status  /reset  /quit${carry ? "" : "  /no-context"}`);
   console.log();
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // Shell-like command history: persist typed lines to networks/<id>/chat-history and seed readline
+  // so ↑/↓ recall works ACROSS sessions. Interactive (TTY) only — piped/scripted input isn't recorded.
+  const interactive = !!process.stdin.isTTY;
+  const histPath = resolve(networkRoot(net), "chat-history");
+  let seedHistory: string[] = [];
+  if (interactive) {
+    try { seedHistory = readFileSync(histPath, "utf8").split("\n").filter(Boolean).slice(-1000).reverse(); } catch { /* no history yet */ }
+  }
+  const recordHistory = (s: string): void => {
+    if (!interactive || !s) return;
+    try { appendFileSync(histPath, s + "\n"); } catch { /* best-effort */ }
+  };
+
+  // `history`/`historySize` seed readline's recall ring (most-recent-first); removeHistoryDuplicates
+  // collapses repeats like a shell. Falls back gracefully if the runtime ignores these options.
+  const rl = createInterface({ input: process.stdin, output: process.stdout, history: seedHistory, historySize: 1000, removeHistoryDuplicates: true });
 
   // Line-queue model: lines typed or piped while a turn is in flight are buffered, not dropped. With
   // rl.question() readline reads ahead to EOF during the await and 'close' fires before later lines
@@ -2839,13 +2854,24 @@ async function cmdChat(args: Args): Promise<void> {
     if (raw === null) break; // input drained (Ctrl-D / EOF) or interrupted (Ctrl-C)
     const line = raw.trim();
     if (!line) continue;
+    recordHistory(line); // shell-like: every typed line (incl. /commands) is persisted + recallable
 
     if (line === "/quit" || line === "/exit") break;
     if (line === "/help") {
       console.log("  Just talk — each turn is a conversational reply from the general agent, and");
       console.log("  follow-ups remember the prior turns. (Start with --route or --skill X to target skills.)");
-      console.log("  Ctrl-C cancels the current turn; at the prompt it exits.");
-      console.log("  /status  show task states   /reset  forget conversation context   /quit  exit\n");
+      console.log("  Ctrl-C cancels the current turn; at the prompt it exits. ↑/↓ recall past lines.");
+      console.log("  /history  recent lines   /status  task states   /reset  forget context   /quit  exit\n");
+      continue;
+    }
+    if (line === "/history") {
+      try {
+        const lines = readFileSync(histPath, "utf8").split("\n").filter(Boolean);
+        const tail = lines.slice(-20);
+        if (!tail.length) console.log("  (no history yet)");
+        tail.forEach((l, i) => console.log(`  ${String(lines.length - tail.length + i + 1).padStart(4)}  ${l}`));
+      } catch { console.log("  (no history yet)"); }
+      console.log("");
       continue;
     }
     if (line === "/reset") {
