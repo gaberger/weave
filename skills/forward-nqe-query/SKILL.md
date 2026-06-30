@@ -601,10 +601,24 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-nqe-query/scripts/refresh_catalog.
 
 ## Writing a custom query
 
-Don't hallucinate NQE syntax. The fastest path to a correct custom query is:
+Two complementary sources keep custom NQE correct — use both:
+
+- **`references/nqe-reference.md`** — the authoritative NQE grammar: query structure, type
+  system, operators, `foreach`/`where`/`let`/`group-by`/`select` clauses, expressions,
+  built-in functions, pattern matching, UDFs (`export`/`import`), parameterized queries
+  (`@query`), the data-model schema, enums, common patterns, and gotchas. Read this when you
+  need to **author** a query from scratch or understand a clause/function you haven't seen.
+- **The live catalog** — ground-truth working examples for the exact data you're after.
+
+Fastest path to a correct custom query:
 
 1. Use `smart_search_catalog.py` to find a query that returns similar data.
-2. Use `get_query_source.py` to read its source.
-3. Copy it into a file, adapt, run with `run_query.py --query-file`.
+2. Use `get_query_source.py` to read its source (real, current syntax for that pattern).
+3. Adapt it — or, for a clause/function the example doesn't cover, consult
+   `references/nqe-reference.md` for the grammar rather than guessing.
+4. Run with `run_query.py --query-file`. **Validate syntax by running** before any
+   `publish_query.py` — a broken query commits fine and only fails at run time.
 
-See `references/nqe-primer.md` for the tiny bit of syntax Claude needs before step 3.
+Don't write NQE from training-data memory: prefer a verified catalog example for the shape,
+and the grammar reference for any syntax the example doesn't show. `references/nqe-primer.md`
+is the quick orientation; `references/nqe-reference.md` is the full grammar.
