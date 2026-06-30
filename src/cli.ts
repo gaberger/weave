@@ -141,16 +141,14 @@ function networkId(args: Args): string {
   return str(args, "network-id", process.env.WEAVE_NETWORK_ID ?? DEFAULT_NETWORK);
 }
 
-/** Resolve the state root for a network: <stateRoot>/networks/<id>/ or <stateRoot>/ for default.
- *  In the ~/.weave home, stateRoot is "." so this yields networks/<id>/ and the home itself.
- *  The id becomes a path segment (db/pid/log/reports), so it MUST be a strict slug — reject anything
- *  that could traverse (`../`, separators, etc.) rather than escape the workspace. */
+/** Resolve the state root for a network: <stateRoot>/networks/<id>/. EVERY network — including the
+ *  default — nests under `networks/<id>/`, so the home root stays clean (db, reports, memory, logs all
+ *  live under the network folder, never loose at the root). The id becomes a path segment, so it MUST
+ *  be a strict slug — reject anything that could traverse (`../`, separators) rather than escape. */
 function networkRoot(network: string): string {
-  const base = stateRoot();
-  if (network === DEFAULT_NETWORK) return base;
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(network))
     throw new Error(`invalid network id ${JSON.stringify(network)} — must match [A-Za-z0-9_-]{1,64}`);
-  return join(base, "networks", network);
+  return join(stateRoot(), "networks", network);
 }
 
 /** Resolve the db path for a network: <network-root>/weave.db. */
@@ -733,7 +731,9 @@ async function assembleSkills(
       registry.register(t);
   // --target <dir>: inspect an arbitrary tree read-only (rooted there, no edit tool); else edit cwd.
   // See registerInspectTools — extracted so the least-privilege invariant is unit-tested (inspect-tools.test.ts).
-  registerInspectTools(registry, str(args, "target", ""), process.cwd());
+  // Root the read/write/edit file tools at the active network's workspace (networks/<id>/), NOT the
+  // home root — so ad-hoc write_file output is isolated per-network and never pollutes the home root.
+  registerInspectTools(registry, str(args, "target", ""), resolve(networkRoot(networkId(args))));
   registry.register(writeSkillTool(dir)); // self-authoring (ADR-0017) — irreversible, grant-gated
   return { skills, registry, backend: llm?.kind ?? "none", errors, reload: { dir, codeSkills, tail } };
 }
