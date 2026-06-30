@@ -325,10 +325,11 @@ export function forwardReportSkill(make: (sp?: string) => Worker): Skill {
       "\"give me a Mermaid diagram\", \"export to CSV\", \"show me a table of …\".",
     ["forward_networks", "nqe_run", "report_doc", "report_graph", "report_table"],
     REPORT_MATCH,
-    "- GATHER the data first (e.g. `nqe_run` for tabular facts), THEN render it: `report_table` (tabular), " +
-      "`report_graph` (diagrams — Mermaid by default), `report_doc` (narrative). Pass the gathered JSON as " +
-      "the render tool's `data` arg. Use listTemplates:true to discover templates. Return the rendered " +
-      "artifact verbatim (it's already formatted) — don't re-summarize it.",
+    "- GATHER the data first (e.g. `nqe_run` for tabular facts), THEN render it. Each renderer wants a " +
+      "specific `data` shape: `report_table` → a JSON ARRAY of flat row objects; `report_graph` → " +
+      "{nodes:[{id,label?}], edges:[{from,to,label?}]}; `report_doc` → {title, sections:[{title, body}]} " +
+      "(body is markdown), with `template` ordering the sections by title. Use listTemplates:true to discover " +
+      "templates. Return the rendered artifact verbatim (it's already formatted) — don't re-summarize it.",
   );
 }
 

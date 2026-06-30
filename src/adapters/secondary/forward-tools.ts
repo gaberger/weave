@@ -767,8 +767,12 @@ const SPECS: readonly ScriptToolSpec[] = [
     script: "forward-report-doc/scripts/render.py",
     description:
       "Render structured data as a NARRATIVE report (network review, incident report, change ticket, " +
-      "compliance/drift writeup) in markdown or standalone HTML. Pass the content as `data` (JSON). For " +
-      "\"write this up as a report\", \"give me an HTML report\". Set listTemplates:true to see templates.",
+      "compliance/drift writeup) in markdown or standalone HTML. Pass `data` as " +
+      "{ title: string, sections: [{ title: string, body: string }] } — body is markdown (or a list of " +
+      "typed blocks: {kind:'table'|'code'|'mermaid'|'callout', …}). `template` " +
+      "(incident-report|change-ticket|compliance-audit|network-review|action-plan|drift-report|generic) " +
+      "ORDERS the sections by their title. For \"write this up as a report\", \"give me an HTML report\". " +
+      "Set listTemplates:true to see each template's section list.",
     stdinArg: "data", rawOutput: true,
     args: [
       { key: "format", flag: "--format", kind: "string", desc: "markdown (default) | html | json" },
@@ -783,8 +787,9 @@ const SPECS: readonly ScriptToolSpec[] = [
     script: "forward-report-graph/scripts/render.py",
     description:
       "Render data as a DIAGRAM — Mermaid (default; pastes into GitHub/Notion), Graphviz DOT, or " +
-      "standalone interactive HTML. Pass the graph data as `data` (JSON). For \"draw the path\", \"show " +
-      "the topology\", \"graph the BGP peerings\", \"give me a Mermaid diagram\". listTemplates lists templates.",
+      "standalone interactive HTML. Pass `data` as { nodes: [{ id, label? }], edges: [{ from, to, label? }] }. " +
+      "For \"draw the path\", \"show the topology\", \"graph the BGP peerings\", \"give me a Mermaid diagram\". " +
+      "listTemplates lists templates.",
     stdinArg: "data", rawOutput: true,
     args: [
       { key: "format", flag: "--format", kind: "string", desc: "mermaid (default) | dot | html | json" },
@@ -799,8 +804,9 @@ const SPECS: readonly ScriptToolSpec[] = [
     script: "forward-report-table/scripts/render.py",
     description:
       "Render rows as a TABLE — ANSI terminal, GitHub-flavored Markdown, standalone HTML (sortable), or " +
-      "CSV. Pass the rows as `data` (JSON). For \"show me a table of …\", \"format as a grid\", \"export to " +
-      "CSV\", \"a Markdown table I can paste\". listTemplates lists templates.",
+      "CSV. Pass `data` as a JSON ARRAY of flat row objects (or { data: [...] }) — each object's keys become " +
+      "columns. For \"show me a table of …\", \"format as a grid\", \"export to CSV\", \"a Markdown table I can " +
+      "paste\". Narrow/order with columns; sort/group with sort/groupBy. listTemplates lists templates.",
     stdinArg: "data", rawOutput: true,
     args: [
       { key: "format", flag: "--format", kind: "string", desc: "ansi (default) | markdown | html | csv | json" },
