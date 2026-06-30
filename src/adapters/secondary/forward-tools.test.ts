@@ -24,6 +24,9 @@ function fakePackageRoot(): string {
   // A renderer: reads JSON on stdin, emits FORMATTED TEXT (argv + the stdin data) — not JSON.
   writeFileSync(join(root, "skills/forward-report-table/scripts/render.py"),
     "import sys\nprint('ARGV ' + ' '.join(sys.argv[1:]))\nprint('DATA ' + sys.stdin.read())\n");
+  // A bash SSH script: echoes its positional argv (so we can assert ordering without touching a device).
+  mkdirSync(join(root, "skills/network-ssh-provision/scripts"), { recursive: true });
+  writeFileSync(join(root, "skills/network-ssh-provision/scripts/ssh-device.sh"), 'echo "ARGV $*"\n');
   // A separate failing script swapped in per-test by overwriting the target file.
   void chmodSync; void fail;
   return root;
@@ -40,10 +43,26 @@ test("read tools are effect:read; write tools are effect:irreversible (lease-gat
     assert.equal(t[name]!.effect, "read", `${name} should be read`);
   }
   for (const name of ["changeset_create", "changeset_edit", "changeset_commit", "changeset_delete",
-    "tag_create", "tag_delete", "tag_devices", "untag_devices"]) {
+    "tag_create", "tag_delete", "tag_devices", "untag_devices", "ssh_run", "ssh_push"]) {
     assert.ok(t[name], `missing write tool ${name}`);
     assert.equal(t[name]!.effect, "irreversible", `${name} should be irreversible`);
   }
+});
+
+test("SSH tool: positional args via bash, execute-gated, raw output (no live device touched)", async () => {
+  const t = tools(fakePackageRoot());
+  // Without execute: a no-guard WRITE → synthetic plan, NOT spawned (no device contacted).
+  const preview = await t["ssh_run"]!.execute({ host: "rtr-1", command: "show version" });
+  assert.equal((preview.output as { dryRun?: boolean }).dryRun, true, "must preview, not run");
+  assert.equal((preview.output as { content?: string }).content, undefined, "must not spawn");
+  // With execute: runs via bash, positional order host→command→username, raw text out.
+  const r = await t["ssh_run"]!.execute({ host: "rtr-1", command: "show version", username: "admin", execute: true });
+  assert.equal(r.ok, true);
+  assert.match((r.output as { content: string }).content, /ARGV rtr-1 show version admin/);
+  // Missing required positional is rejected.
+  const bad = await t["ssh_run"]!.execute({ host: "rtr-1", execute: true });
+  assert.equal(bad.ok, false);
+  assert.match(String((bad.output as { error: string }).error), /command is required/);
 });
 
 test("WRITE gate: a script with --dry-run previews (spawns with --dry-run) when execute is not set", async () => {

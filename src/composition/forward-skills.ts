@@ -74,6 +74,10 @@ export const REPORT_MATCH = [
   "render", "diagram", "mermaid", "graphviz", "draw the", "as a table", "table of", "csv", "export",
   "write this up", "write it up", "as a report", "html report", "format as", "render as a graph",
 ] as const;
+export const SSH_MATCH = [
+  "over ssh", "via ssh", "ssh to", "ssh into", "push config", "push the config", "push this config",
+  "run on the device", "on the device over", "provision the device", "configure the device",
+] as const;
 
 function skill(
   make: (sp?: string) => Worker,
@@ -339,11 +343,31 @@ export function forwardReportSkill(make: (sp?: string) => Worker): Skill {
   );
 }
 
+/** Live-device SSH provisioning (run a command / push config over SSH). WRITE — irreversible, on
+ *  REAL devices. Overrides the declarative network-ssh-provision (same name) so it's typed + gated. */
+export function networkSshProvisionSkill(make: (sp?: string) => Worker): Skill {
+  return writeSkill(
+    make,
+    "network-ssh-provision",
+    "Run commands on and push config to network devices over SSH. Use for \"ssh to X and run …\", " +
+      "\"push this config to <device>\", \"provision/configure <device>\".",
+    ["forward_networks", "ssh_run", "ssh_push"],
+    SSH_MATCH,
+    "- This touches LIVE devices over SSH and is irreversible. PREFER the read-only Forward tools " +
+      "(config_get, device_*, path_search) for any STATE you can read from a snapshot — use SSH only for " +
+      "live commands or config pushes that have no snapshot equivalent.\n" +
+      "- `ssh_run` runs one command; `ssh_push` pushes a config FILE (write it with write_file first). " +
+      "Both default to a non-mutating preview — only set execute:true after the user confirms the exact " +
+      "device + command/config in this conversation. Report what ran and the device's response.",
+  );
+}
+
 /** All forward code skills, in routing order: narrow/specialized first, the broad query skills
  *  (nqe, inventory) last so they don't shadow a specific match; the persona catch-all backstops. */
 export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
   return [
     forwardVulnerabilitySkill(make),
+    networkSshProvisionSkill(make),
     forwardComplianceSkill(make),
     forwardSecurityPostureSkill(make),
     forwardBgpPrefixSkill(make),

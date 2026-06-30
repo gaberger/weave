@@ -67,6 +67,8 @@ interface ScriptToolSpec {
   //     (JSON-stringified if an object); `rawOutput` returns stdout as text instead of JSON-parsing. ---
   readonly stdinArg?: string;
   readonly rawOutput?: boolean;
+  /** Interpreter — "bash" for the ssh-provision *.sh scripts; default python3. */
+  readonly interp?: string;
 }
 
 /** Coerce a value the MCP bridge may have stringified (Haiku sends arrays/numbers as JSON strings,
@@ -148,19 +150,20 @@ function buildFlags(spec: ScriptToolSpec, args: Readonly<Record<string, unknown>
 interface RunOpts {
   /** Piped to the child's stdin (for renderers that read JSON on stdin). */
   readonly stdin?: string;
-  /** Return stdout as raw text (renderers emit markdown/HTML/CSV/Mermaid, not JSON). */
+  /** Return stdout as raw text (renderers / shell scripts emit text, not JSON). */
   readonly rawOutput?: boolean;
+  /** Interpreter to run the script under — "python3" (default) or "bash" (the ssh-provision *.sh). */
+  readonly interp?: string;
 }
 
-/** Run one forward-* python script with fixed args; resolve to a parsed-JSON ToolResult (or raw
- *  text for renderers). stdin is ALWAYS ended — a script that reads stdin gets the data or a clean
- *  EOF, never a hang. */
+/** Run one forward-* script with fixed args; resolve to a parsed-JSON ToolResult (or raw text).
+ *  stdin is ALWAYS ended — a script that reads stdin gets the data or a clean EOF, never a hang. */
 function runScript(opts: ForwardToolsOptions, scriptRelPath: string, flags: string[], run: RunOpts = {}): Promise<ToolResult> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
   const maxBytes = opts.maxBytes ?? 8 * 1024 * 1024;
   const script = join(opts.packageRoot, "skills", scriptRelPath);
   return new Promise<ToolResult>((resolve) => {
-    const child = spawn("python3", [script, ...flags], {
+    const child = spawn(run.interp ?? "python3", [script, ...flags], {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
       env: process.env,
     });
@@ -226,55 +229,57 @@ function buildTool(opts: ForwardToolsOptions, spec: ScriptToolSpec): ToolDefinit
     execute: (args) => {
       const flags = buildFlags(spec, args);
       if (!Array.isArray(flags)) return Promise.resolve({ ok: false, output: { error: flags.error } });
-      // Renderer: pipe the data arg to stdin (JSON-stringify objects), return raw formatted text, and
-      // AUTO-FILE the artifact under the network's workspace reports dir when a networkId is given.
-      if (spec.stdinArg || spec.rawOutput) {
-        const v = args[spec.stdinArg ?? ""];
-        const stdin = v === undefined || v === null || v === "" ? undefined : typeof v === "string" ? v : JSON.stringify(v);
-        const fwdId = asStr(args["networkId"]);
-        // Auto-file only for a STRICT-slug network id — never let it become a path traversal. An
-        // invalid id is surfaced (saveError), not silently used.
-        const idOk = fwdId !== undefined && NETWORK_ID_RE.test(fwdId);
-        const reportsDir = idOk && opts.reportsDir ? opts.reportsDir(fwdId!) : undefined;
-        return runScript(opts, spec.script, flags, { ...(stdin ? { stdin } : {}), rawOutput: true }).then((r) => {
-          if (!r.ok) return r;
-          const content = (r.output as { content?: string }).content ?? "";
-          if (fwdId !== undefined && !idOk) {
-            return { ok: true, output: { content, saveError: `networkId ${JSON.stringify(fwdId)} is not a valid id (^[A-Za-z0-9_-]{1,64}$) — not auto-filed` } };
-          }
-          if (!reportsDir) return r; // no networkId given → just return the content
-          const ext = FORMAT_EXT[asStr(args["format"]) ?? "markdown"] ?? "md";
-          const file = `${safeName(asStr(args["name"]) ?? spec.name.replace(/^report_/, ""))}.${ext}`;
-          try {
-            const root = resolve(reportsDir);
-            const path = resolve(root, file);
-            // Defense-in-depth: the final path must stay inside the reports root.
-            if (path !== join(root, file) || !path.startsWith(root + sep)) throw new Error("refusing to write outside the reports dir");
-            mkdirSync(root, { recursive: true });
-            writeFileSync(path, content);
-            return { ok: true, output: { content, savedTo: path } };
-          } catch (e) {
-            return { ok: true, output: { content, saveError: e instanceof Error ? e.message : String(e) } };
-          }
-        });
-      }
+      const interp = spec.interp ?? "python3";
+      const raw = !!(spec.stdinArg || spec.rawOutput);
+      const v = spec.stdinArg ? args[spec.stdinArg] : undefined;
+      const stdin = v === undefined || v === null || v === "" ? undefined : typeof v === "string" ? v : JSON.stringify(v);
+      const run = { ...(stdin ? { stdin } : {}), rawOutput: raw, interp };
+
+      // WRITE gate — applies to EVERY write tool (raw-output ones too, e.g. ssh_run/ssh_push). Never
+      // mutate unless execute:true. With a real --dry-run, spawn it for a preview; otherwise (no
+      // server-side guard) synthesize the plan and DO NOT spawn.
       if (spec.write && !isTruthy(args["execute"])) {
-        // NON-MUTATING preview. Prefer the script's own dry-run (real "what would happen"); else, for a
-        // script that mutates immediately with no guard, do NOT spawn at all — synthesize the plan.
-        if (spec.dryRunFlag) return runScript(opts, spec.script, [...flags, spec.dryRunFlag]);
+        if (spec.dryRunFlag) return runScript(opts, spec.script, [...flags, spec.dryRunFlag], run);
         return Promise.resolve({
           ok: true,
           output: {
             dryRun: true,
             wouldRun: `${spec.script} ${flags.join(" ")}`.trim(),
-            note: "This is a WRITE that would change the live network and was NOT applied. Confirm with the user, then re-run with execute:true to apply.",
+            note: "This is a WRITE that would change the live network/devices and was NOT applied. Confirm with the user, then re-run with execute:true to apply.",
           },
         });
       }
       if (spec.write && spec.confirmFlag) flags.push(spec.confirmFlag);
-      return runScript(opts, spec.script, flags);
+      const p = runScript(opts, spec.script, flags, run);
+      // Renderers (stdinArg) auto-file their artifact under the per-network reports dir.
+      return spec.stdinArg ? p.then((r) => autoFileRendered(r, args, spec, opts)) : p;
     },
   };
+}
+
+/** Auto-file a renderer's output under networks/<id>/reports/ when a (strict-slug) networkId is given.
+ *  Path-traversal-safe: rejects a bad id and never escapes the reports root. */
+function autoFileRendered(r: ToolResult, args: Readonly<Record<string, unknown>>, spec: ScriptToolSpec, opts: ForwardToolsOptions): ToolResult {
+  if (!r.ok) return r;
+  const content = (r.output as { content?: string }).content ?? "";
+  const fwdId = asStr(args["networkId"]);
+  if (fwdId === undefined) return r; // no networkId → just return the content
+  if (!NETWORK_ID_RE.test(fwdId)) {
+    return { ok: true, output: { content, saveError: `networkId ${JSON.stringify(fwdId)} is not a valid id (^[A-Za-z0-9_-]{1,64}$) — not auto-filed` } };
+  }
+  if (!opts.reportsDir) return r;
+  const ext = FORMAT_EXT[asStr(args["format"]) ?? "markdown"] ?? "md";
+  const file = `${safeName(asStr(args["name"]) ?? spec.name.replace(/^report_/, ""))}.${ext}`;
+  try {
+    const root = resolve(opts.reportsDir(fwdId));
+    const path = resolve(root, file);
+    if (path !== join(root, file) || !path.startsWith(root + sep)) throw new Error("refusing to write outside the reports dir");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path, content);
+    return { ok: true, output: { content, savedTo: path } };
+  } catch (e) {
+    return { ok: true, output: { content, saveError: e instanceof Error ? e.message : String(e) } };
+  }
 }
 
 // --- Tool specs (the fan-out lives here as data) --------------------------------------------------
@@ -870,6 +875,39 @@ const SPECS: readonly ScriptToolSpec[] = [
       { key: "listTemplates", flag: "--list-templates", kind: "bool", desc: "list available templates (no data needed)" },
       { key: "networkId", kind: "string", desc: "Forward network id — auto-files the artifact under networks/<id>/reports/" },
       { key: "name", kind: "string", desc: "artifact filename base; extension from format" },
+    ],
+  },
+  // ============ SSH provisioning (network-ssh-provision/*.sh) — runs over SSH on LIVE devices ============
+  // bash scripts, positional args, human text output. WRITE + execute-gated: an arbitrary command or a
+  // config push on a real device is irreversible, so it NEVER runs unless execute:true (synthetic
+  // preview otherwise). This replaces the agent hand-rolling ssh via raw bash.
+  {
+    name: "ssh_run",
+    script: "network-ssh-provision/scripts/ssh-device.sh",
+    interp: "bash", write: true, rawOutput: true,
+    description:
+      "Run a command on a network device over SSH and return its output. WRITE (a command on a LIVE " +
+      "device is irreversible): dry-run unless execute:true. Use for 'run <cmd> on <device>', 'show " +
+      "run on X over ssh'. Prefer the read-only Forward tools (config_get, device_*) for state you can " +
+      "get from a snapshot — use SSH only for live/interactive actions.",
+    args: [
+      { key: "host", kind: "positional", required: true, desc: "device hostname/IP (required)" },
+      { key: "command", kind: "positional", required: true, desc: "command to run on the device (required)" },
+      { key: "username", kind: "positional", desc: "SSH username (optional)" },
+    ],
+  },
+  {
+    name: "ssh_push",
+    script: "network-ssh-provision/scripts/push-config.sh",
+    interp: "bash", write: true, rawOutput: true,
+    description:
+      "Push a configuration file to a device over SSH (CHANGES the live device). WRITE: dry-run unless " +
+      "execute:true. Use for 'push this config to <device>'. The config must already be a file on disk " +
+      "(e.g. write it with write_file first). Confirm the exact device + config with the user before execute.",
+    args: [
+      { key: "device", kind: "positional", required: true, desc: "target device hostname/IP (required)" },
+      { key: "configFile", kind: "positional", required: true, desc: "path to the config file to push (required)" },
+      { key: "username", kind: "positional", desc: "SSH username (optional)" },
     ],
   },
 ];
