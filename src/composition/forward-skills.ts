@@ -93,16 +93,20 @@ export function forwardVulnerabilitySkill(make: (sp?: string) => Worker): Skill 
     make,
     "forward-vulnerability",
     "Forward CVE/vulnerability audit: which CVEs impact the network, which were filtered out and WHY, " +
-      "and coverage. Use for \"what CVEs are we exposed to\", \"show the CVEs we filtered out and the reason\", " +
-      "\"vulnerability coverage\", \"CVE audit\".",
-    ["forward_networks", "forward_snapshots", "forward_cve_audit"],
+      "and coverage — and can render/file the audit as a report. Use for \"what CVEs are we exposed to\", " +
+      "\"show the CVEs we filtered out and the reason\", \"vulnerability coverage\", \"CVE audit\", \"save the " +
+      "CVE audit as a report\".",
+    ["forward_networks", "forward_snapshots", "forward_cve_audit", "report_table", "report_doc"],
     VULN_MATCH,
     "- 'What are we exposed to' → `forward_cve_audit` disposition=impacted. 'Show the CVEs we filtered out " +
       "and why' / coverage / audit → `forward_cve_audit` (disposition=not-impacted, or all for the full " +
       "partition); narrow with severity/limit.\n" +
       "- Lead with the partition (evaluated · impacted · potentially-impacted · not-impacted · not-evaluated), " +
       "then the evidence (each filtered-out CVE carries a reason + per-OS proof). Treat NOT_EVALUATED honestly " +
-      "as 'no detection implemented', NOT 'safe'.",
+      "as 'no detection implemented', NOT 'safe'.\n" +
+      "- To SAVE/produce a report: flatten the audit's `cves` to row objects {CVE, Severity, Score, OS, Devices, " +
+      "Reason} and render with `report_table` (and/or `report_doc` for a narrative), passing networkId (the " +
+      "Forward network) and a name so it auto-files under that network's reports folder; report the savedTo path.",
   );
 }
 
