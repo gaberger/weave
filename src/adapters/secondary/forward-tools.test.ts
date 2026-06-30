@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -84,14 +84,16 @@ test("WRITE gate: execute:true on a no-guard script spawns it (the real mutation
 
 test("RENDER tool: pipes `data` to stdin (JSON-stringified) and returns raw formatted text", async () => {
   const t = tools(fakePackageRoot());
-  assert.equal(t["report_table"]!.effect, "read");
+  // A renderer may write a file (auto-file), so it is reversible — not read.
+  assert.equal(t["report_table"]!.effect, "reversible");
   const r = await t["report_table"]!.execute({ data: { rows: [{ a: 1 }] }, format: "markdown" });
   assert.equal(r.ok, true);
   const content = (r.output as { content: string }).content;
   assert.match(content, /ARGV .*--format markdown/, "format flag is passed");
   assert.match(content, /DATA \{"rows":\[\{"a":1\}\]\}/, "data is JSON-stringified onto stdin");
-  // raw output: NOT JSON-parsed (no argv/dryRun keys at top level)
+  // raw output: NOT JSON-parsed, and NOT filed (no networkId) → no savedTo.
   assert.equal((r.output as { argv?: unknown }).argv, undefined);
+  assert.equal((r.output as { savedTo?: unknown }).savedTo, undefined);
 });
 
 test("RENDER tool: listTemplates needs no data and does not hang on stdin", async () => {
@@ -99,6 +101,19 @@ test("RENDER tool: listTemplates needs no data and does not hang on stdin", asyn
   const r = await t["report_table"]!.execute({ listTemplates: true });
   assert.equal(r.ok, true);
   assert.match((r.output as { content: string }).content, /ARGV .*--list-templates/);
+});
+
+test("RENDER tool: networkId auto-files the artifact under the per-network reports dir", async () => {
+  const root = fakePackageRoot();
+  const home = mkdtempSync(join(tmpdir(), "weave-home-"));
+  const reportsDir = (fwd: string) => join(home, "networks", fwd, "reports");
+  const t = Object.fromEntries(forwardTools({ packageRoot: root, reportsDir }).map((x) => [x.name, x]));
+  const r = await t["report_table"]!.execute({ data: [{ a: 1 }], format: "csv", networkId: "212984", name: "cve audit!" });
+  assert.equal(r.ok, true);
+  const savedTo = (r.output as { savedTo: string }).savedTo;
+  // name sanitized, extension from format, under networks/<id>/reports/
+  assert.equal(savedTo, join(home, "networks", "212984", "reports", "cve-audit.csv"));
+  assert.equal(readFileSync(savedTo, "utf8"), (r.output as { content: string }).content);
 });
 
 test("forward_networks runs the script and parses its JSON", async () => {

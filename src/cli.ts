@@ -718,7 +718,14 @@ async function assembleSkills(
   // Forward NetOps tools (Slice 1): typed front doors over the forward-* python. Registered only
   // when the pack bundles them, so the generic engine stays Forward-free (ADR-0016). cwd = where the
   // Forward `.env` lives (the python auto-loads creds from there).
-  if (packBundlesForward) for (const t of forwardTools({ packageRoot: PACKAGE_ROOT, cwd: process.cwd() })) registry.register(t);
+  if (packBundlesForward)
+    for (const t of forwardTools({
+      packageRoot: PACKAGE_ROOT,
+      cwd: process.cwd(),
+      // Per-Forward-network reports dir under the weave home: networks/<id>/reports/ (ADR-0016 Ring 3).
+      reportsDir: (fwdId: string) => resolve(networkRoot(fwdId), "reports"),
+    }))
+      registry.register(t);
   // --target <dir>: inspect an arbitrary tree read-only (rooted there, no edit tool); else edit cwd.
   // See registerInspectTools — extracted so the least-privilege invariant is unit-tested (inspect-tools.test.ts).
   registerInspectTools(registry, str(args, "target", ""), process.cwd());

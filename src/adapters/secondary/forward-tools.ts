@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Effect } from "../../domain/effect.js";
@@ -23,6 +24,9 @@ export interface ForwardToolsOptions {
   readonly packageRoot: string;
   /** Working dir the python runs in — must be where the Forward `.env` lives (creds auto-load). */
   readonly cwd?: string;
+  /** Absolute per-network reports dir for a Forward network id — `networks/<id>/reports/` under the
+   *  weave home (cli.ts owns the path logic). When set, render tools auto-file their artifact there. */
+  readonly reportsDir?: (forwardNetworkId: string) => string;
   /** Kill a script after this long (default 180s — full-network pulls are slow). */
   readonly timeoutMs?: number;
   /** Cap captured stdout (default 8 MiB — bounded but large enough for a full audit). */
@@ -99,6 +103,16 @@ function asInt(v: unknown): string | undefined {
 
 function isTruthy(v: unknown): boolean {
   return v === true || v === "true" || v === 1 || v === "1";
+}
+
+/** Map a renderer's --format to a file extension for auto-filed artifacts. */
+const FORMAT_EXT: Record<string, string> = {
+  markdown: "md", html: "html", csv: "csv", json: "json", mermaid: "mmd", dot: "dot", ansi: "txt",
+};
+
+/** Sanitize an artifact name to a safe single filename segment. */
+function safeName(s: string): string {
+  return s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 80) || "report";
 }
 
 /** Build the CLI argv for a spec from the orchestrator's args, or return an error string. */
@@ -208,11 +222,27 @@ function buildTool(opts: ForwardToolsOptions, spec: ScriptToolSpec): ToolDefinit
     execute: (args) => {
       const flags = buildFlags(spec, args);
       if (!Array.isArray(flags)) return Promise.resolve({ ok: false, output: { error: flags.error } });
-      // Renderer: pipe the data arg to stdin (JSON-stringify objects), return raw formatted text.
+      // Renderer: pipe the data arg to stdin (JSON-stringify objects), return raw formatted text, and
+      // AUTO-FILE the artifact under the network's workspace reports dir when a networkId is given.
       if (spec.stdinArg || spec.rawOutput) {
         const v = args[spec.stdinArg ?? ""];
         const stdin = v === undefined || v === null || v === "" ? undefined : typeof v === "string" ? v : JSON.stringify(v);
-        return runScript(opts, spec.script, flags, { ...(stdin ? { stdin } : {}), rawOutput: true });
+        const fwdId = asStr(args["networkId"]);
+        const reportsDir = fwdId && opts.reportsDir ? opts.reportsDir(fwdId) : undefined;
+        return runScript(opts, spec.script, flags, { ...(stdin ? { stdin } : {}), rawOutput: true }).then((r) => {
+          if (!r.ok || !reportsDir) return r;
+          const content = (r.output as { content?: string }).content ?? "";
+          const ext = FORMAT_EXT[asStr(args["format"]) ?? "markdown"] ?? "md";
+          const file = `${safeName(asStr(args["name"]) ?? spec.name.replace(/^report_/, ""))}.${ext}`;
+          try {
+            mkdirSync(reportsDir, { recursive: true });
+            const path = join(reportsDir, file);
+            writeFileSync(path, content);
+            return { ok: true, output: { content, savedTo: path } };
+          } catch (e) {
+            return { ok: true, output: { content, saveError: e instanceof Error ? e.message : String(e) } };
+          }
+        });
       }
       if (spec.write && !isTruthy(args["execute"])) {
         // NON-MUTATING preview. Prefer the script's own dry-run (real "what would happen"); else, for a
@@ -772,14 +802,17 @@ const SPECS: readonly ScriptToolSpec[] = [
       "typed blocks: {kind:'table'|'code'|'mermaid'|'callout', …}). `template` " +
       "(incident-report|change-ticket|compliance-audit|network-review|action-plan|drift-report|generic) " +
       "ORDERS the sections by their title. For \"write this up as a report\", \"give me an HTML report\". " +
-      "Set listTemplates:true to see each template's section list.",
-    stdinArg: "data", rawOutput: true,
+      "Set listTemplates:true to see each template's section list. Pass networkId to auto-file the " +
+      "artifact under that network's reports folder.",
+    stdinArg: "data", rawOutput: true, effect: "reversible",
     args: [
       { key: "format", flag: "--format", kind: "string", desc: "markdown (default) | html | json" },
       { key: "template", flag: "--template", kind: "string", desc: "template name (see listTemplates)" },
       { key: "title", flag: "--title", kind: "string", desc: "report title" },
       { key: "scaffold", flag: "--scaffold", kind: "bool", desc: "emit placeholder sections from the template" },
       { key: "listTemplates", flag: "--list-templates", kind: "bool", desc: "list available templates (no data needed)" },
+      { key: "networkId", kind: "string", desc: "Forward network id — auto-files the artifact under networks/<id>/reports/" },
+      { key: "name", kind: "string", desc: "artifact filename base (e.g. \"cve-audit\"); extension from format" },
     ],
   },
   {
@@ -789,14 +822,16 @@ const SPECS: readonly ScriptToolSpec[] = [
       "Render data as a DIAGRAM — Mermaid (default; pastes into GitHub/Notion), Graphviz DOT, or " +
       "standalone interactive HTML. Pass `data` as { nodes: [{ id, label? }], edges: [{ from, to, label? }] }. " +
       "For \"draw the path\", \"show the topology\", \"graph the BGP peerings\", \"give me a Mermaid diagram\". " +
-      "listTemplates lists templates.",
-    stdinArg: "data", rawOutput: true,
+      "listTemplates lists templates. Pass networkId to auto-file the artifact under the network's reports folder.",
+    stdinArg: "data", rawOutput: true, effect: "reversible",
     args: [
       { key: "format", flag: "--format", kind: "string", desc: "mermaid (default) | dot | html | json" },
       { key: "template", flag: "--template", kind: "string", desc: "template name (path-trace, topology, bgp-mesh, config-diff)" },
       { key: "direction", flag: "--direction", kind: "string", desc: "graph direction (e.g. LR, TB)" },
       { key: "labelEdges", flag: "--label-edges", kind: "bool", desc: "label edges" },
       { key: "listTemplates", flag: "--list-templates", kind: "bool", desc: "list available templates (no data needed)" },
+      { key: "networkId", kind: "string", desc: "Forward network id — auto-files the artifact under networks/<id>/reports/" },
+      { key: "name", kind: "string", desc: "artifact filename base; extension from format" },
     ],
   },
   {
@@ -806,8 +841,9 @@ const SPECS: readonly ScriptToolSpec[] = [
       "Render rows as a TABLE — ANSI terminal, GitHub-flavored Markdown, standalone HTML (sortable), or " +
       "CSV. Pass `data` as a JSON ARRAY of flat row objects (or { data: [...] }) — each object's keys become " +
       "columns. For \"show me a table of …\", \"format as a grid\", \"export to CSV\", \"a Markdown table I can " +
-      "paste\". Narrow/order with columns; sort/group with sort/groupBy. listTemplates lists templates.",
-    stdinArg: "data", rawOutput: true,
+      "paste\". Narrow/order with columns; sort/group with sort/groupBy. listTemplates lists templates. " +
+      "Pass networkId to auto-file the artifact under the network's reports folder.",
+    stdinArg: "data", rawOutput: true, effect: "reversible",
     args: [
       { key: "format", flag: "--format", kind: "string", desc: "ansi (default) | markdown | html | csv | json" },
       { key: "template", flag: "--template", kind: "string", desc: "template name (stig, device-list, security-matrix, diff)" },
@@ -815,6 +851,8 @@ const SPECS: readonly ScriptToolSpec[] = [
       { key: "sort", flag: "--sort", kind: "string", desc: "column to sort by" },
       { key: "groupBy", flag: "--group-by", kind: "string", desc: "column to group by" },
       { key: "listTemplates", flag: "--list-templates", kind: "bool", desc: "list available templates (no data needed)" },
+      { key: "networkId", kind: "string", desc: "Forward network id — auto-files the artifact under networks/<id>/reports/" },
+      { key: "name", kind: "string", desc: "artifact filename base; extension from format" },
     ],
   },
 ];

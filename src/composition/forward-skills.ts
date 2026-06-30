@@ -329,7 +329,9 @@ export function forwardReportSkill(make: (sp?: string) => Worker): Skill {
       "specific `data` shape: `report_table` → a JSON ARRAY of flat row objects; `report_graph` → " +
       "{nodes:[{id,label?}], edges:[{from,to,label?}]}; `report_doc` → {title, sections:[{title, body}]} " +
       "(body is markdown), with `template` ordering the sections by title. Use listTemplates:true to discover " +
-      "templates. Return the rendered artifact verbatim (it's already formatted) — don't re-summarize it.",
+      "templates. ALWAYS pass `networkId` (the Forward network) and a descriptive `name` so the artifact is " +
+      "auto-filed under that network's reports folder; report the savedTo path. Return the rendered artifact " +
+      "verbatim (it's already formatted) — don't re-summarize it.",
   );
 }
 
