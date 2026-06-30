@@ -15,7 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API
 
 
 def main() -> int:
@@ -31,9 +32,12 @@ def main() -> int:
             query={"view": "summary"},
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    emit_success(
+        result,
+        meta={"network_id": args.network_id, "changeset_id": args.changeset_id},
+    )
     return 0
 
 

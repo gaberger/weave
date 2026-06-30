@@ -11,8 +11,26 @@ import html
 import io
 import json
 import math
+import os
 import sys
+from pathlib import Path
 from typing import Any
+
+# Put the shared skill-I/O contract module on sys.path. This skill ships no
+# _bootstrap helper, so mirror its search order inline: plugin root, sibling
+# _shared/, or a `shared/` dir up the source tree.
+_HERE = Path(__file__).resolve().parent
+for _shared_dir in (
+    *([Path(os.environ["CLAUDE_PLUGIN_ROOT"]) / "shared"] if os.environ.get("CLAUDE_PLUGIN_ROOT") else []),
+    _HERE / "_shared",
+    *[p / "shared" for p in _HERE.parents],
+):
+    if (_shared_dir / "skill_io.py").is_file():
+        if str(_shared_dir) not in sys.path:
+            sys.path.insert(0, str(_shared_dir))
+        break
+
+from skill_io import add_format_arg, emit_error, emit_success, ERR_INPUT
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -26,7 +44,7 @@ def load_json(path: str | None) -> Any:
     return json.load(sys.stdin)
 
 
-def detect_template(data: Any) -> str:
+def detect_template(data: Any, fmt: str = "json") -> str:
     if isinstance(data, dict):
         if "hops" in data and ("src" in data or "dst" in data):
             return "path"
@@ -40,9 +58,11 @@ def detect_template(data: Any) -> str:
             if ns and isinstance(ns[0], dict) and ("vendor" in ns[0] or "role" in ns[0]):
                 return "topology"
             return "generic"
-    raise SystemExit(
-        "error: cannot auto-detect template; pass --template "
-        "(path|topology|bgp-mesh|config-diff|generic)"
+    emit_error(
+        ERR_INPUT,
+        "cannot auto-detect template from input schema",
+        hint="pass --template (path|topology|bgp-mesh|config-diff|generic)",
+        fmt=fmt,
     )
 
 
@@ -509,7 +529,11 @@ def render_html(g: dict, title: str, label_edges: bool) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Render network-data JSON as a graph.")
-    p.add_argument("--format", choices=["mermaid", "dot", "html"], default="mermaid")
+    # The diagram format and the I/O contract share one --format flag here:
+    # mermaid/dot/html emit the raw diagram (the primary product); json wraps a
+    # result descriptor in the envelope. json embeds the mermaid rendering since
+    # no separate diagram format can be chosen alongside it.
+    add_format_arg(p, choices=("mermaid", "dot", "html", "json"), default="mermaid")
     p.add_argument("--template", choices=list(BUILDERS.keys()), default=None)
     p.add_argument("--direction", choices=["LR", "RL", "TB", "BT"], default="LR")
     edge_grp = p.add_mutually_exclusive_group()
@@ -526,7 +550,7 @@ def main() -> int:
         return 0
 
     data = load_json(args.input)
-    template = args.template or detect_template(data)
+    template = args.template or detect_template(data, args.format)
     g = BUILDERS[template](data)
 
     if args.label_edges:
@@ -536,19 +560,46 @@ def main() -> int:
     else:
         label_edges = template in ("path", "bgp-mesh")
 
-    if args.format == "mermaid":
+    # json wraps a descriptor of the rendered diagram; it embeds the mermaid form.
+    render_fmt = "mermaid" if args.format == "json" else args.format
+    if render_fmt == "mermaid":
         payload = render_mermaid(g, args.direction, label_edges)
-    elif args.format == "dot":
+    elif render_fmt == "dot":
         payload = render_dot(g, args.direction, label_edges)
     else:  # html
         LAYOUTS[template](g)
         payload = render_html(g, g.get("title", "Graph"), label_edges)
 
+    def _write(p: str, out: str | None) -> None:
+        if out:
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(p)
+        else:
+            sys.stdout.write(p)
+
+    # In json mode, persist the diagram to --output (if given) before emitting the
+    # envelope on stdout; otherwise the rendered string travels inside the envelope.
+    if args.format == "json" and args.output:
+        _write(payload, args.output)
+
+    descriptor = {
+        "template": template,
+        "format": render_fmt,
+        "rendered": payload,
+        "bytes": len(payload),
+    }
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as fh:
-            fh.write(payload)
-    else:
-        sys.stdout.write(payload)
+        descriptor["path"] = args.output
+    meta = {
+        "template": template,
+        "nodes": len(g["nodes"]),
+        "edges": len(g["edges"]),
+        "title": g.get("title"),
+    }
+    # json → envelope on stdout; mermaid/dot/html → human renderer writes the
+    # raw diagram to --output or stdout, exactly as before.
+    emit_success(descriptor, meta=meta, fmt=args.format,
+                 human=lambda d, m: _write(payload, args.output))
     return 0
 
 

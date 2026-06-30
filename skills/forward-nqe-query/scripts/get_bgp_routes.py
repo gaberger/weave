@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_NOT_FOUND
 
 
 # NQE query to get BGP routes from AFT
@@ -66,10 +67,12 @@ def main():
         networks = client.get("/api/networks")
         net = next((n for n in networks if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+                       hint="list networks with forward-inventory")
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
-            die(f"Network {args.network_id} has no processed snapshots")
+            emit_error(ERR_NOT_FOUND,
+                       f"Network {args.network_id} has no processed snapshots")
 
     # Run NQE query
     body = {
@@ -85,7 +88,7 @@ def main():
     try:
         result = client.post("/api/nqe", body=body)
     except ForwardError as e:
-        die(f"NQE query failed: {e}")
+        emit_error(ERR_API, f"NQE query failed: {e}")
 
     items = result.get("items", [])
 
@@ -97,11 +100,11 @@ def main():
     if args.prefix:
         items = [r for r in items if args.prefix in r.get("Prefix", "")]
 
-    # Emit results
-    emit_json({
-        "snapshotId": args.snapshot_id,
-        "totalRoutes": len(items),
-        "routes": items,
+    # Emit results — routes are the answer; counts/scope describe them
+    emit_success(items, meta={
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "count": len(items),
     })
 
 

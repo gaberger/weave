@@ -17,7 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API
 
 
 def parse_filename(fname: str) -> tuple[str, str]:
@@ -50,7 +51,7 @@ def main() -> int:
         client = ForwardClient.from_env()
         data = client.get(f"/api/snapshots/{args.snapshot_id}/files")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     # Forward usually returns {"files": [...]} or a bare list. Handle both.
     if isinstance(data, dict):
@@ -58,7 +59,7 @@ def main() -> int:
     elif isinstance(data, list):
         files = data
     else:
-        die(f"unexpected response shape: {type(data).__name__}")
+        emit_error(ERR_API, f"unexpected response shape: {type(data).__name__}")
 
     rows = []
     for f in files:
@@ -87,11 +88,15 @@ def main() -> int:
     if args.limit:
         rows = rows[: args.limit]
 
-    emit_json({
-        "snapshotId": args.snapshot_id,
-        "count": len(rows),
-        "files": rows,
-    })
+    emit_success(
+        rows,
+        meta={
+            "snapshot_id": args.snapshot_id,
+            "count": len(rows),
+            "device_filter": args.device,
+            "category_filter": args.category,
+        },
+    )
     return 0
 
 

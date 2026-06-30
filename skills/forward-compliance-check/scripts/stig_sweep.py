@@ -27,7 +27,15 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die, load_catalog
+from forward_client import ForwardClient, ForwardError, load_catalog
+from skill_io import (
+    emit_error,
+    emit_success,
+    ERR_AUTH,
+    ERR_EMPTY,
+    ERR_INPUT,
+    ERR_NOT_FOUND,
+)
 
 
 SAFE_DEFAULT_LIMIT = 50
@@ -127,11 +135,12 @@ def main() -> int:
     try:
         queries = load_catalog(__file__)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_NOT_FOUND, str(e))
 
     matched = filter_stigs(queries, args.vendor or "", args.platform or "", args.path_contains or "")
     if not matched:
-        die("no STIG queries matched your filters")
+        emit_error(ERR_EMPTY, "no STIG queries matched your filters",
+                   hint="loosen --vendor/--platform/--path-contains, or run --dry-run to preview")
 
     selected = matched if args.limit_queries == 0 else matched[: args.limit_queries]
     if args.limit_queries and len(matched) > args.limit_queries:
@@ -141,19 +150,22 @@ def main() -> int:
         )
 
     if args.dry_run:
-        emit_json({
-            "mode": "dry-run",
-            "matched": len(matched),
-            "selected": len(selected),
-            "queries": [
-                {"path": q.get("path"), "queryId": q.get("queryId")}
-                for q in selected
-            ],
-        })
-        return 0
+        emit_success(
+            {
+                "queries": [
+                    {"path": q.get("path"), "queryId": q.get("queryId")}
+                    for q in selected
+                ],
+            },
+            meta={
+                "mode": "dry-run",
+                "matched": len(matched),
+                "selected": len(selected),
+            },
+        )
 
     if not args.network_id:
-        die("--network-id is required unless --dry-run is set")
+        emit_error(ERR_INPUT, "--network-id is required unless --dry-run is set")
 
     # Loud warning for long-running sweeps
     if len(selected) > SAFE_DEFAULT_LIMIT:
@@ -166,7 +178,7 @@ def main() -> int:
         client = ForwardClient.from_env()
         client.timeout = max(client.timeout, 120)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_AUTH, str(e))
 
     results = []
     api_errors = 0
@@ -207,8 +219,9 @@ def main() -> int:
                 "error": str(e),
             })
 
-    emit_json({
-        "summary": {
+    emit_success(
+        {"results": results},
+        meta={
             "matched": len(matched),
             "selected": len(selected),
             "executed": len(results),
@@ -217,8 +230,7 @@ def main() -> int:
             "total_violation_rows": total_violation_rows,
             "dialects": dialect_counts,
         },
-        "results": results,
-    })
+    )
     return 0
 
 

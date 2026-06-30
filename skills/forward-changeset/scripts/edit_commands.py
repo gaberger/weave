@@ -15,7 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 
 
 def main() -> int:
@@ -41,7 +42,7 @@ def main() -> int:
         try:
             command_text = Path(args.commands_file).read_text(encoding="utf-8")
         except OSError as e:
-            die(f"cannot read --commands-file {args.commands_file!r}: {e}")
+            emit_error(ERR_INPUT, f"cannot read --commands-file {args.commands_file!r}: {e}")
     else:
         command_text = args.commands
 
@@ -51,23 +52,30 @@ def main() -> int:
     )
 
     if args.dry_run:
-        emit_json(
+        emit_success(
             {
                 "method": "POST",
                 "path": path,
                 "query": {"action": "editCommands"},
                 "body": command_text,
-            }
+            },
+            meta={"dry_run": True},
         )
-        return 0
 
     try:
         client = ForwardClient.from_env()
         result = client.post(path, command_text, query={"action": "editCommands"})
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    emit_success(
+        result,
+        meta={
+            "network_id": args.network_id,
+            "changeset_id": args.changeset_id,
+            "device": args.device,
+        },
+    )
     return 0
 
 

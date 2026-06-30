@@ -14,7 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API
 
 
 def _walk(node: dict, prefix: str = "") -> None:
@@ -39,25 +40,33 @@ def main() -> int:
     p.add_argument("--json", action="store_true", help="Emit raw JSON only")
     args = p.parse_args()
 
+    fmt = "json" if args.json else "human"
+
     try:
         client = ForwardClient.from_env()
         result = client.get(f"/api/networks/{args.network_id}/change-set-directories")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e), fmt=fmt)
 
-    if args.json:
-        emit_json(result)
-        return 0
+    def _render_human(data, meta) -> None:
+        if not data:
+            sys.stdout.write(
+                f"No directory structure found for network {meta['network_id']}.\n"
+            )
+            return
+        sys.stdout.write(
+            f"Change-set directory tree for network {meta['network_id']}:\n"
+        )
+        root = data if isinstance(data, dict) else {"children": data}
+        _walk(root)
+        sys.stdout.write("\n")
 
-    if not result:
-        sys.stdout.write(f"No directory structure found for network {args.network_id}.\n")
-        return 0
-
-    sys.stdout.write(f"Change-set directory tree for network {args.network_id}:\n")
-    root = result if isinstance(result, dict) else {"children": result}
-    _walk(root)
-    sys.stdout.write("\n")
-    emit_json(result)
+    emit_success(
+        result,
+        meta={"network_id": args.network_id},
+        fmt=fmt,
+        human=_render_human,
+    )
     return 0
 
 

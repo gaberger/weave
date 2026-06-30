@@ -35,6 +35,7 @@ sys.path.insert(0, str(SKILLS_ROOT / "forward-nqe-query" / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — puts local _shared/forward_client on sys.path
 from forward_client import ForwardClient
+from skill_io import add_format_arg, emit_success, emit_error, ERR_EMPTY
 
 
 def get_nqe_catalog(client: ForwardClient, network_id: int) -> List[Dict[str, Any]]:
@@ -193,19 +194,10 @@ def suggest_discovery_queries(categories: Dict[str, List[Dict[str, Any]]]) -> Di
 def print_catalog(
     queries: List[Dict[str, Any]],
     categories: Dict[str, List[Dict[str, Any]]],
-    format: str = "human",
     show_descriptions: bool = False,
     category_filter: str = None
 ):
-    """Print NQE catalog in requested format."""
-
-    if format == "json":
-        print(json.dumps({
-            "total_queries": len(queries),
-            "categories": {k: [q.get("id") for q in v] for k, v in categories.items()},
-            "queries": queries
-        }, indent=2))
-        return
+    """Print the human-readable NQE catalog (JSON is emitted via emit_success)."""
 
     # Human-readable format
     print(f"\n{'='*80}")
@@ -337,12 +329,7 @@ If a discovery tool fails with "query not found", use this to find the right que
         help="Show query descriptions (verbose)"
     )
 
-    parser.add_argument(
-        "--format",
-        choices=["human", "json"],
-        default="human",
-        help="Output format (default: human)"
-    )
+    add_format_arg(parser, choices=("human", "json"))
 
     parser.add_argument(
         "--suggest",
@@ -359,12 +346,11 @@ If a discovery tool fails with "query not found", use this to find the right que
     queries = get_nqe_catalog(client, args.network_id)
 
     if not queries:
-        print("❌ No NQE queries found or unable to fetch catalog", file=sys.stderr)
-        print("   This may mean:", file=sys.stderr)
-        print("   1. The network has no NQE catalog configured", file=sys.stderr)
-        print("   2. The Forward API does not support catalog listing", file=sys.stderr)
-        print("   3. You may need to use Forward UI to browse queries", file=sys.stderr)
-        sys.exit(1)
+        emit_error(ERR_EMPTY,
+                   "No NQE queries found or unable to fetch catalog",
+                   hint="the network may have no NQE catalog configured, or the API may not "
+                        "support catalog listing — browse queries in the Forward UI",
+                   fmt=args.format)
 
     # Search mode
     if args.search:
@@ -372,8 +358,15 @@ If a discovery tool fails with "query not found", use this to find the right que
         queries = find_relevant_queries(queries, keywords)
 
         if not queries:
-            print(f"❌ No queries found matching: {args.search}", file=sys.stderr)
-            sys.exit(1)
+            emit_error(ERR_EMPTY, f"No queries found matching: {args.search}",
+                       fmt=args.format)
+
+        if args.format == "json":
+            emit_success({"queries": queries},
+                         meta={"network_id": args.network_id,
+                               "search": args.search,
+                               "count": len(queries)},
+                         fmt="json")
 
         print(f"\nFound {len(queries)} queries matching '{args.search}':\n")
         for query in queries:
@@ -390,20 +383,29 @@ If a discovery tool fails with "query not found", use this to find the right que
     # Categorize
     categories = categorize_queries(queries)
 
-    # Print catalog
+    # JSON is the machine contract — emit the full catalog and exit 0.
+    if args.format == "json":
+        emit_success(
+            {"categories": {k: [q.get("id") for q in v] for k, v in categories.items()},
+             "queries": queries},
+            meta={"network_id": args.network_id,
+                  "total_queries": len(queries),
+                  "category_filter": args.category},
+            fmt="json",
+        )
+
+    # Human output below.
     print_catalog(
         queries=queries,
         categories=categories,
-        format=args.format,
         show_descriptions=args.show_descriptions,
         category_filter=args.category
     )
 
-    # Suggestions
-    if args.suggest or args.format == "human":
-        suggestions = suggest_discovery_queries(categories)
-        if suggestions:
-            print_suggestions(suggestions)
+    # Suggestions (human only — JSON already returned above)
+    suggestions = suggest_discovery_queries(categories)
+    if suggestions:
+        print_suggestions(suggestions)
 
 
 if __name__ == "__main__":

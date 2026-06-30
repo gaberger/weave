@@ -61,6 +61,7 @@ Never paste raw JSON. Lead with a verdict, not a dump.
 - **Mermaid** — pastes directly into GitHub, GitLab, Notion, Obsidian, Confluence (with plugin), Slack canvases, VS Code preview. Wrap in fenced code block ` ```mermaid ` when embedding in Markdown.
 - **DOT** — Graphviz format. Pipe to `dot -Tpng` / `dot -Tsvg` / `dot -Tpdf` for raster/vector output.
 - **HTML** — single self-contained file with vis-network embedded **inline** (no CDN). Safe for air-gap environments. Opens in any browser, supports pan/zoom/drag.
+- **JSON** (`--format json`) — the machine contract: a single envelope `{"ok":true,"schema":1,"data":{...},"meta":{...}}`. `data` is a descriptor — `{template, format, rendered, bytes, path?}` (`rendered` is the diagram string, embedded as **mermaid**; `path` present when `--output` was given). `meta` carries `{template, nodes, edges, title}`. Errors emit `{"ok":false,"schema":1,"error":{code,message,hint?}}` — e.g. `INPUT` when the template can't be auto-detected. Exit code reflects whether the skill ran, not the graph's contents.
 
 Present the graph output inline (for Mermaid), or confirm the file was written and describe what it contains (for HTML/DOT). If the input JSON produced an empty graph (no nodes), state: "No graph rendered — the input contained no nodes or edges."
 
@@ -95,11 +96,15 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-report-graph/scripts/render.py" \
 
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-report-graph/scripts/render.py" \
     --list-templates
+
+# Machine contract: envelope wrapping a render descriptor (+ node/edge counts)
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-report-graph/scripts/render.py" \
+    --template topology --format json --input topology.json
 ```
 
 | Flag | Required | Notes |
 |---|---|---|
-| `--format` | no | Output format: `mermaid` (default), `dot`, `html` |
+| `--format` | no | Output format: `mermaid` (default), `dot`, `html`, or `json` (envelope wrapping a render descriptor; embeds the mermaid form). |
 | `--template` | no | One of `path`, `topology`, `bgp-mesh`, `config-diff`, `generic`. Auto-detected from input schema if omitted. |
 | `--direction` | no | Layout direction: `LR` (default), `RL`, `TB`, `BT`. Applies to Mermaid and DOT only. |
 | `--label-edges` | no | Force edge labels on (drop-reason / AS / metric). On by default for `path` and `bgp-mesh`. |

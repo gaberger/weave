@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API
 
 
 def main() -> int:
@@ -20,11 +21,11 @@ def main() -> int:
         client = ForwardClient.from_env()
         data = client.get(f"/api/networks/{args.network_id}/securityMatrixFilters")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     filters = data.get("filters") if isinstance(data, dict) else data
     if not isinstance(filters, list):
-        emit_json(data)
+        emit_success(data, meta={"network_id": args.network_id})
         return 0
 
     if args.name:
@@ -34,7 +35,10 @@ def main() -> int:
             if isinstance(f, dict) and needle in str(f.get("name", "")).lower()
         ]
 
-    emit_json({"count": len(filters), "filters": filters})
+    meta = {"count": len(filters), "network_id": args.network_id}
+    if args.name:
+        meta["name"] = args.name
+    emit_success(filters, meta=meta)
     return 0
 
 

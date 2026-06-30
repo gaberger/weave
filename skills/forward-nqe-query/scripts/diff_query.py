@@ -12,7 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_INPUT
 
 
 def main():
@@ -59,7 +60,7 @@ def main():
     args = parser.parse_args()
 
     if args.limit > 10000:
-        die("--limit cannot exceed 10000 (API constraint)")
+        emit_error(ERR_INPUT, "--limit cannot exceed 10000 (API constraint)")
 
     client = ForwardClient.from_env()
 
@@ -95,17 +96,19 @@ def main():
     try:
         result = client.post(path, body=body)
     except ForwardError as e:
-        die(f"Failed to run NQE diff: {e}")
+        emit_error(ERR_API, f"Failed to run NQE diff: {e}")
 
-    # Enhance output with metadata
-    result["_meta"] = {
+    meta = {
         "beforeSnapshot": args.before_snapshot,
         "afterSnapshot": args.after_snapshot,
         "queryId": args.query_id,
         "changeTypeFilter": args.change_type or ["ALL"],
     }
+    items = result.get("items") if isinstance(result, dict) else None
+    if items is not None:
+        meta["count"] = len(items)
 
-    emit_json(result)
+    emit_success(result, meta=meta)
 
 
 if __name__ == "__main__":

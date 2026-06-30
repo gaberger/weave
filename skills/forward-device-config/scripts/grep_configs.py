@@ -37,7 +37,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT, ERR_NOT_FOUND
 
 
 def main() -> int:
@@ -60,13 +61,13 @@ def main() -> int:
     try:
         rx = re.compile(args.pattern, re.IGNORECASE if args.ignore_case else 0)
     except re.error as e:
-        die(f"invalid --pattern regex: {e}")
+        emit_error(ERR_INPUT, f"invalid --pattern regex: {e}")
 
     try:
         client = ForwardClient.from_env()
         listing = client.get(f"/api/snapshots/{args.snapshot_id}/files")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     files_raw = (
         listing.get("files") or listing.get("items") or []
@@ -88,7 +89,11 @@ def main() -> int:
         targets.append((device, fname))
 
     if not targets:
-        die(f"no {args.category} files matched (device filter: {args.device or 'none'})")
+        emit_error(
+            ERR_NOT_FOUND,
+            f"no {args.category} files matched (device filter: {args.device or 'none'})",
+            hint="run list_configs.py without --category to see available categories",
+        )
 
     if len(targets) > args.warn_at:
         sys.stderr.write(
@@ -134,15 +139,17 @@ def main() -> int:
         if per_device:
             devices_with_matches += 1
 
-    emit_json({
-        "snapshotId": args.snapshot_id,
-        "pattern": args.pattern,
-        "category": args.category,
-        "devicesSearched": len(targets),
-        "devicesWithMatches": devices_with_matches,
-        "matchCount": len(matches),
-        "matches": matches,
-    })
+    emit_success(
+        {"matches": matches},
+        meta={
+            "snapshot_id": args.snapshot_id,
+            "pattern": args.pattern,
+            "category": args.category,
+            "devices_searched": len(targets),
+            "devices_with_matches": devices_with_matches,
+            "match_count": len(matches),
+        },
+    )
     return 0
 
 

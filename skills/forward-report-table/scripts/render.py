@@ -20,7 +20,27 @@ import io
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Iterable
+
+# --- weave skill I/O contract -------------------------------------------------
+# render.py is stdlib-only, but the machine-readable `--format json` path emits
+# the shared envelope so weave parses one shape for every skill. The contract
+# module lives in _shared/skill_io.py; this skill ships no `_bootstrap.py`, so
+# mirror that shim's search order inline (plugin root → _shared/ → source-tree
+# shared/) rather than adding a new `_`-prefixed file.
+_HERE = Path(__file__).resolve().parent
+for _cand in (
+    *([Path(os.environ["CLAUDE_PLUGIN_ROOT"]) / "shared"] if os.environ.get("CLAUDE_PLUGIN_ROOT") else []),
+    _HERE / "_shared",
+    *(p / "shared" for p in _HERE.parents),
+):
+    if (_cand / "skill_io.py").is_file():
+        if str(_cand) not in sys.path:
+            sys.path.insert(0, str(_cand))
+        break
+
+from skill_io import ERR_INPUT, add_format_arg, emit_error, emit_success
 
 # ---------------------------------------------------------------------------
 # Color helpers (ANSI)
@@ -161,12 +181,13 @@ def detect_template(data: Any) -> str:
     return "generic"
 
 
-def normalize_rows(data: Any) -> list[dict[str, Any]]:
+def normalize_rows(data: Any, fmt: str = "json") -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [r for r in data if isinstance(r, dict)]
     if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
         return [r for r in data["data"] if isinstance(r, dict)]
-    raise SystemExit("error: expected a JSON array of objects, got " + type(data).__name__)
+    emit_error(ERR_INPUT, "expected a JSON array of objects, got " + type(data).__name__,
+               hint='pass a list of row objects, or {"data": [...]}', fmt=fmt)
 
 
 # ---------------------------------------------------------------------------
@@ -390,16 +411,16 @@ def render_html_rows(rows, columns, template, group_label):
 # ---------------------------------------------------------------------------
 
 
-def _matrix_validate(data: dict) -> tuple[list[str], list[list[str]]]:
+def _matrix_validate(data: dict, fmt: str = "json") -> tuple[list[str], list[list[str]]]:
     zones = data.get("zones") or []
     cells = data.get("cells") or []
     if not isinstance(zones, list) or not isinstance(cells, list):
-        raise SystemExit("error: security-matrix expects {zones: [...], cells: [[...]]}")
+        emit_error(ERR_INPUT, "security-matrix expects {zones: [...], cells: [[...]]}", fmt=fmt)
     if len(cells) != len(zones):
-        raise SystemExit(f"error: security-matrix has {len(zones)} zones but {len(cells)} rows")
+        emit_error(ERR_INPUT, f"security-matrix has {len(zones)} zones but {len(cells)} rows", fmt=fmt)
     for i, row in enumerate(cells):
         if len(row) != len(zones):
-            raise SystemExit(f"error: row {i} has {len(row)} cells but {len(zones)} zones expected")
+            emit_error(ERR_INPUT, f"row {i} has {len(row)} cells but {len(zones)} zones expected", fmt=fmt)
     return zones, cells
 
 
@@ -564,7 +585,7 @@ def render_html_diff(data):
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Render network-data JSON as a table.")
-    p.add_argument("--format", choices=["ansi", "markdown", "html", "csv"], default="ansi")
+    add_format_arg(p, choices=("ansi", "markdown", "html", "csv", "json"), default="ansi")
     p.add_argument("--template", choices=list(TEMPLATES.keys()), default=None)
     p.add_argument("--columns", default=None, help="Comma-separated column names (overrides template default)")
     p.add_argument("--sort", default=None, help="Sort by column; prefix - for descending")
@@ -583,7 +604,12 @@ def main() -> int:
             print(f"{name:18s} kind={spec['kind']:8s} columns={cols}")
         return 0
 
-    data = load_json(args.input)
+    try:
+        data = load_json(args.input)
+    except FileNotFoundError:
+        emit_error(ERR_INPUT, f"input file not found: {args.input}", fmt=args.format)
+    except (json.JSONDecodeError, ValueError) as e:
+        emit_error(ERR_INPUT, f"could not parse JSON input: {e}", fmt=args.format)
     template = args.template or detect_template(data)
     spec = TEMPLATES[template]
 
@@ -595,7 +621,15 @@ def main() -> int:
     out_buf = io.StringIO()
 
     if spec["kind"] == "matrix":
-        zones, cells = _matrix_validate(data)
+        zones, cells = _matrix_validate(data, fmt=args.format)
+        if args.format == "json":
+            # JSON path: emit the matrix structure in the shared envelope so
+            # weave consumes one shape; human formats keep the rendered grid.
+            emit_success(
+                {"zones": zones, "cells": cells},
+                meta={"count": len(zones), "template": template},
+                fmt="json",
+            )
         if args.format == "ansi":
             out_buf.write(render_ansi_matrix(zones, cells, color_enabled))
         elif args.format == "markdown":
@@ -608,6 +642,19 @@ def main() -> int:
             out_buf.write(HTML_TAIL)
 
     elif spec["kind"] == "diff":
+        if args.format == "json":
+            # JSON path: the diff rows are the payload; left/right labels in meta.
+            diff_rows = data.get("rows", [])
+            emit_success(
+                diff_rows,
+                meta={
+                    "count": len(diff_rows),
+                    "left": data.get("left", "left"),
+                    "right": data.get("right", "right"),
+                    "template": template,
+                },
+                fmt="json",
+            )
         if args.format == "ansi":
             out_buf.write(render_ansi_diff(data, color_enabled))
         elif args.format == "markdown":
@@ -620,10 +667,17 @@ def main() -> int:
             out_buf.write(HTML_TAIL)
 
     else:  # rows
-        rows = normalize_rows(data)
+        rows = normalize_rows(data, fmt=args.format)
         rows = apply_sort(rows, args.sort)
-        groups = apply_group(rows, args.group_by)
         columns = resolve_columns(template, rows, args.columns)
+        if args.format == "json":
+            # JSON path: rows are the payload; table shape lives in meta.
+            emit_success(
+                rows,
+                meta={"count": len(rows), "columns": columns, "template": template},
+                fmt="json",
+            )
+        groups = apply_group(rows, args.group_by)
         color_rules = spec.get("color") or {}
 
         if args.format == "ansi":

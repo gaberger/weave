@@ -67,6 +67,11 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-device-tag/scripts/delete_tag.py" 
 
 ## Output format
 
+Every script emits one JSON envelope on stdout:
+
+- success: `{"ok": true, "schema": 1, "data": <payload>, "meta": {...}}` — read the answer from `data`; counts and echoed params (`network_id`, `tag_name`, `device_count`, `snapshot_id`, …) live in `meta`.
+- failure: `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` — non-zero exit. Codes: `NOT_FOUND` (network/snapshot missing), `API` (upstream call failed), `INPUT` (bad/missing args), `EMPTY` (query produced no devices to tag).
+
 Never paste raw JSON. Lead with a verdict, not a dump.
 
 ### `list_tags.py`

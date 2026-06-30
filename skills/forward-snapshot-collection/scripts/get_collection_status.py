@@ -10,10 +10,10 @@ Returns:
 from __future__ import annotations
 
 import argparse
-import sys
 
 import _bootstrap  # noqa: F401 — prepends shared/ to sys.path
-from forward_client import ForwardClient, emit_json, die, ForwardError
+from forward_client import ForwardClient, ForwardError, AuthError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_AUTH, ERR_NOT_FOUND
 
 
 def main():
@@ -31,9 +31,14 @@ def main():
         # GET /collector-tasks/{taskId}
         result = client.get(f"/api/collector-tasks/{args.task_id}")
 
-        emit_json(result)
+        emit_success(result, meta={"task_id": args.task_id})
+    except AuthError as e:
+        emit_error(ERR_AUTH, str(e), hint="check FORWARD_API_KEY / FORWARD_API_SECRET")
+    except NotFoundError as e:
+        emit_error(ERR_NOT_FOUND, str(e),
+                   hint="task ID comes from start_collection.py output")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
 
 if __name__ == "__main__":

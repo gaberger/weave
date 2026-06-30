@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError, AuthError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_AUTH, ERR_NOT_FOUND
 
 
 def main() -> int:
@@ -27,13 +28,16 @@ def main() -> int:
         client = ForwardClient.from_env()
         query = {"snapshotId": args.snapshot_id} if args.snapshot_id else None
         data = client.get(f"/api/networks/{args.network_id}/devices", query=query)
+    except AuthError as e:
+        emit_error(ERR_AUTH, str(e), hint="check FORWARD_API_KEY / FORWARD_API_SECRET in .env")
+    except NotFoundError as e:
+        emit_error(ERR_NOT_FOUND, str(e), hint=f"verify network {args.network_id} with list_networks.py")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     devices = data.get("devices") if isinstance(data, dict) else data
     if not isinstance(devices, list):
-        emit_json(data)
-        return 0
+        emit_success(data, meta={"network_id": args.network_id})
 
     if args.vendor:
         needle = args.vendor.lower()
@@ -44,7 +48,15 @@ def main() -> int:
     if args.limit:
         devices = devices[: args.limit]
 
-    emit_json({"count": len(devices), "devices": devices})
+    meta = {"count": len(devices), "network_id": args.network_id}
+    if args.snapshot_id:
+        meta["snapshot_id"] = args.snapshot_id
+    if args.vendor:
+        meta["vendor"] = args.vendor
+    if args.limit:
+        meta["limit"] = args.limit
+
+    emit_success(devices, meta=meta)
     return 0
 
 

@@ -27,7 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — puts forward_client on sys.path
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_NOT_FOUND
 
 RIB_QUERY = """
 foreach device in network.devices
@@ -85,14 +86,16 @@ def main():
         nets = client.get("/api/networks")
         net = next((n for n in nets if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+                       hint="list networks with forward-inventory")
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
             snaps = client.get(f"/api/networks/{args.network_id}/snapshots")
             snaps = snaps.get("snapshots", snaps) if isinstance(snaps, dict) else snaps
             proc = [s for s in snaps if s.get("state") == "PROCESSED"]
             if not proc:
-                die(f"Network {args.network_id} has no processed snapshots")
+                emit_error(ERR_NOT_FOUND,
+                           f"Network {args.network_id} has no processed snapshots")
             args.snapshot_id = max(proc, key=lambda s: int(s["id"]))["id"]
 
     print(f"Reading BGP RIB state (snapshot {args.snapshot_id})...", file=sys.stderr)
@@ -102,7 +105,7 @@ def main():
         res = client.post("/api/nqe", body=body,
                           query={"networkId": args.network_id, "snapshotId": args.snapshot_id})
     except ForwardError as e:
-        die(f"RIB query failed: {e}")
+        emit_error(ERR_API, f"RIB query failed: {e}")
     rows = res.get("items", [])
     if args.device:
         rows = [r for r in rows if r["device"] == args.device]
@@ -149,8 +152,14 @@ def main():
     findings.sort(key=lambda f: (f["device"], f["vrf"], f["prefix"]))
 
     if args.json:
-        emit_json({"snapshotId": args.snapshot_id, "findingCount": len(findings),
-                   "findings": findings})
+        # findings are the answer; snapshot + count describe them
+        meta = {"network_id": args.network_id, "snapshot_id": args.snapshot_id,
+                "finding_count": len(findings)}
+        if args.device:
+            meta["device"] = args.device
+        if args.vrf:
+            meta["vrf"] = args.vrf
+        emit_success(findings, meta=meta)
         return
 
     if not findings:

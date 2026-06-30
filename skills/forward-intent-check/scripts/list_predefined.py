@@ -6,7 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API
 
 
 def main():
@@ -15,9 +16,11 @@ def main():
     try:
         checks = client.get("/api/predefinedChecks")
     except ForwardError as e:
-        die(f"Failed to fetch predefined checks: {e}")
+        emit_error(ERR_API, f"Failed to fetch predefined checks: {e}")
 
-    emit_json(checks)
+    emit_success(checks, meta={
+        "count": len(checks) if isinstance(checks, list) else None,
+    })
 
 
 if __name__ == "__main__":

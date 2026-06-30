@@ -66,6 +66,8 @@ If > 20, show top 10, then: `...and <k> more. Run without --dry-run to execute (
 
 ### Real sweep output
 
+Summary placeholders below (`<queries_with_violations>`, `<dialects.*>`, …) live in the envelope's `meta`; per-control records (`violationRowCount`, `items`, …) live in `data.results`.
+
 ```markdown
 **<executed>/<selected> STIGs run** · <queries_with_violations> failing · <total_violation_rows> total violation rows · <api_errors> errors
 
@@ -150,40 +152,65 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-compliance-check/scripts/stig_swee
 
 ### Output shape
 
+The script emits the weave skill envelope on stdout: `{"ok": true, "schema": 1, "data": ..., "meta": ...}` on success, `{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}` on failure. Exit code reflects whether the skill *ran*, not whether the data is clean — a sweep that finds violations still exits 0.
+
+`meta` carries the run summary (counts, dialect mix); `data.results` holds the per-query records. A `--dry-run` puts the matched queries in `data.queries` and the `mode`/`matched`/`selected` counts in `meta`.
+
 ```json
 {
-  "summary": {
+  "ok": true,
+  "schema": 1,
+  "data": {
+    "results": [
+      {
+        "path": "/Security/STIGs/Cisco/Cisco IOS Router RTR/CISC-RT-000400 V-216588",
+        "queryId": "FQ_978e7fd839cb3656e0f57ae5e36aa72da713d454",
+        "durationSec": 2.14,
+        "rowCount": 3,
+        "violationRowCount": 3,
+        "detectionMethod": "rows-on-violation",
+        "indicatorField": null,
+        "items": [ { "...": "..." } ]
+      },
+      {
+        "path": "/Security/STIGs/Palo Alto Networks/.../PANW-NM-000001",
+        "queryId": "FQ_...",
+        "durationSec": 1.82,
+        "rowCount": 4,
+        "violationRowCount": 0,
+        "detectionMethod": "indicator-field",
+        "indicatorField": "violation",
+        "items": [ { "device": "fw01", "violation": false } ]
+      }
+    ]
+  },
+  "meta": {
+    "matched": 60,
     "selected": 50,
     "executed": 50,
     "api_errors": 0,
     "queries_with_violations": 12,
     "total_violation_rows": 87,
     "dialects": { "rows-on-violation": 38, "indicator-field": 12 }
-  },
-  "results": [
-    {
-      "path": "/Security/STIGs/Cisco/Cisco IOS Router RTR/CISC-RT-000400 V-216588",
-      "queryId": "FQ_978e7fd839cb3656e0f57ae5e36aa72da713d454",
-      "durationSec": 2.14,
-      "rowCount": 3,
-      "violationRowCount": 3,
-      "detectionMethod": "rows-on-violation",
-      "indicatorField": null,
-      "items": [ { ... }, ... ]
-    },
-    {
-      "path": "/Security/STIGs/Palo Alto Networks/.../PANW-NM-000001",
-      "queryId": "FQ_...",
-      "durationSec": 1.82,
-      "rowCount": 4,
-      "violationRowCount": 0,
-      "detectionMethod": "indicator-field",
-      "indicatorField": "violation",
-      "items": [ { "device": "fw01", "violation": false }, ... ]
-    }
-  ]
+  }
 }
 ```
+
+On failure (e.g. filters match nothing, or creds are missing):
+
+```json
+{
+  "ok": false,
+  "schema": 1,
+  "error": {
+    "code": "EMPTY",
+    "message": "no STIG queries matched your filters",
+    "hint": "loosen --vendor/--platform/--path-contains, or run --dry-run to preview"
+  }
+}
+```
+
+Error codes: `EMPTY` (no STIGs matched), `NOT_FOUND` (catalog unavailable), `INPUT` (missing `--network-id` outside `--dry-run`), `AUTH` (missing/invalid creds).
 
 See `references/interpreting-stig-results.md` for how to read these.
 

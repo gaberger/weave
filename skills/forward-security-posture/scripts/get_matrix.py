@@ -22,7 +22,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, NotFoundError, emit_json, die
+from forward_client import ForwardClient, ForwardError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_NOT_FOUND, ERR_INPUT
 
 
 def _resolve_snapshot_id(client: ForwardClient, network_id: str, snapshot_arg: str) -> str:
@@ -34,7 +35,7 @@ def _resolve_snapshot_id(client: ForwardClient, network_id: str, snapshot_arg: s
     snaps = client.get(f"/api/networks/{network_id}/snapshots")
     items = snaps if isinstance(snaps, list) else (snaps.get("snapshots") if isinstance(snaps, dict) else None)
     if not items:
-        die(f"could not list snapshots for network {network_id} to resolve '{snapshot_arg}'")
+        emit_error(ERR_NOT_FOUND, f"could not list snapshots for network {network_id} to resolve '{snapshot_arg}'")
     # Prefer processed snapshots, newest first
     def _key(s):
         return (
@@ -43,7 +44,7 @@ def _resolve_snapshot_id(client: ForwardClient, network_id: str, snapshot_arg: s
         )
     items = sorted([s for s in items if isinstance(s, dict)], key=_key, reverse=True)
     if not items:
-        die(f"no usable snapshots in network {network_id}")
+        emit_error(ERR_NOT_FOUND, f"no usable snapshots in network {network_id}")
     return str(items[0].get("id"))
 
 
@@ -56,7 +57,7 @@ def _resolve_filter_id(client: ForwardClient, network_id: str, filter_arg: str |
     data = client.get(f"/api/networks/{network_id}/securityMatrixFilters")
     filters = data.get("filters") if isinstance(data, dict) else data
     if not isinstance(filters, list):
-        die(f"could not list filters for network {network_id}")
+        emit_error(ERR_API, f"could not list filters for network {network_id}")
     needle = filter_arg.lower()
     for f in filters:
         if isinstance(f, dict) and str(f.get("name", "")).lower() == needle:
@@ -65,9 +66,9 @@ def _resolve_filter_id(client: ForwardClient, network_id: str, filter_arg: str |
     if len(matches) == 1:
         return str(matches[0].get("id"))
     if not matches:
-        die(f"no security-matrix filter named '{filter_arg}' in network {network_id}")
+        emit_error(ERR_NOT_FOUND, f"no security-matrix filter named '{filter_arg}' in network {network_id}")
     names = ", ".join(str(m.get("name")) for m in matches)
-    die(f"filter name '{filter_arg}' is ambiguous; matches: {names}")
+    emit_error(ERR_INPUT, f"filter name '{filter_arg}' is ambiguous; matches: {names}")
 
 
 def _pool_label(p: Any) -> str:
@@ -165,7 +166,7 @@ def main() -> int:
     args = p.parse_args()
 
     if args.shape == "cell" and (not args.src or not args.dst):
-        die("--shape cell requires both --src and --dst")
+        emit_error(ERR_INPUT, "--shape cell requires both --src and --dst")
 
     try:
         client = ForwardClient.from_env()
@@ -176,24 +177,31 @@ def main() -> int:
             query={"filterId": filter_id, "snapshotId": snapshot_id},
         )
     except NotFoundError as e:
-        die(f"not found: {e}")
+        emit_error(ERR_NOT_FOUND, f"not found: {e}")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
+
+    base_meta = {
+        "network_id": args.network_id,
+        "snapshot_id": snapshot_id,
+        "filter_id": filter_id,
+        "shape": args.shape,
+    }
 
     if args.shape == "raw":
-        emit_json(data)
+        emit_success(data, meta=base_meta)
         return 0
 
     matrix = _normalize_to_matrix(data if isinstance(data, dict) else {})
 
     if args.shape == "matrix":
-        emit_json(matrix)
+        emit_success(matrix, meta={**base_meta, "zone_count": len(matrix.get("zones", []))})
         return 0
 
     # cell
     zones = matrix["zones"]
     if args.src not in zones or args.dst not in zones:
-        die(f"src '{args.src}' or dst '{args.dst}' not in matrix zones: {zones}")
+        emit_error(ERR_INPUT, f"src '{args.src}' or dst '{args.dst}' not in matrix zones: {zones}")
     si = zones.index(args.src)
     di = zones.index(args.dst)
     verdict = matrix["cells"][si][di]
@@ -201,7 +209,7 @@ def main() -> int:
         f"python3 \"$CLAUDE_PLUGIN_ROOT/skills/forward-path-analysis/scripts/run_path.py\" "
         f"--snapshot-id {snapshot_id} --src-zone {args.src!r} --dst-zone {args.dst!r}"
     )
-    emit_json(
+    emit_success(
         {
             "src": args.src,
             "dst": args.dst,
@@ -209,7 +217,8 @@ def main() -> int:
             "filter_id": filter_id,
             "snapshot_id": snapshot_id,
             "drill_down": suggested,
-        }
+        },
+        meta=base_meta,
     )
     return 0
 

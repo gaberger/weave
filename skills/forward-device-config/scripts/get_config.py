@@ -35,7 +35,14 @@ from typing import List
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, ERR_API, ERR_INPUT
+
+# This script's primary output is raw config TEXT, not a JSON envelope, and it
+# has no output --format flag (the existing --format selects the config
+# *language*: auto/cisco/junos/xml). Errors therefore go to stderr only
+# (fmt="human") with a non-zero exit, matching the prior die() behavior — but
+# now carry a stable contract error code.
 
 
 # ---------- format detection ----------
@@ -136,12 +143,12 @@ def extract_xml(text: str, xpath: str) -> List[str]:
     try:
         root = ET.fromstring(text)
     except ET.ParseError as e:
-        die(f"not valid XML: {e}")
+        emit_error(ERR_INPUT, f"not valid XML: {e}", fmt="human")
 
     try:
         elements = root.findall(xpath)
     except SyntaxError as e:
-        die(f"invalid xpath {xpath!r}: {e}")
+        emit_error(ERR_INPUT, f"invalid xpath {xpath!r}: {e}", fmt="human")
 
     out: List[str] = []
     for el in elements:
@@ -159,7 +166,7 @@ def _compile(pattern: str) -> re.Pattern:
     try:
         return re.compile(pattern)
     except re.error as e:
-        die(f"invalid regex {pattern!r}: {e}")
+        emit_error(ERR_INPUT, f"invalid regex {pattern!r}: {e}", fmt="human")
 
 
 def main() -> int:
@@ -196,7 +203,7 @@ def main() -> int:
         client = ForwardClient.from_env()
         text = client.get_text(url_path)
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e), fmt="human")
 
     if not text:
         print(f"# empty file: {file_name}", file=sys.stderr)
@@ -206,10 +213,11 @@ def main() -> int:
 
     # Selector validation
     if args.xpath and fmt != "xml":
-        die(f"--xpath requires --format xml (detected: {fmt}); "
-            f"use --stanza for cisco/junos")
+        emit_error(ERR_INPUT,
+                   f"--xpath requires --format xml (detected: {fmt}); "
+                   f"use --stanza for cisco/junos", fmt="human")
     if args.stanza and fmt == "xml":
-        die(f"--stanza does not work on xml; use --xpath")
+        emit_error(ERR_INPUT, "--stanza does not work on xml; use --xpath", fmt="human")
 
     if args.stanza:
         blocks = (

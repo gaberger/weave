@@ -8,19 +8,24 @@ brief "you are here" summary. Read by Claude at the start of any operational
 session so the rest of the conversation runs in substrate terms (pinned
 network id, snapshot id) instead of pseudo-conversational hand-waving.
 
-Output (always JSON on stdout):
+Output (always JSON on stdout) — wrapped in the skill envelope, the answer
+under ``data``:
 
     {
-      "networks": [
-        {"id": "465", "name": "topologyyml-...", "snapshotCount": 12,
-         "latestProcessedSnapshot": {"id": "1008", "processedAtMillis": ..., "creationDateMillis": ...}}
-      ],
-      "defaults": {
-        "networkId": "465",        # only set when there is exactly 1 network
-        "snapshotId": "1008",      # only set when defaults.networkId is set AND that network has processed snapshots
-        "reason": "single network in tenant; using latest processed snapshot"
+      "ok": true, "schema": 1,
+      "data": {
+        "networks": [
+          {"id": "465", "name": "topologyyml-...", "snapshotCount": 12,
+           "latestProcessedSnapshot": {"id": "1008", "processedAtMillis": ..., "creationDateMillis": ...}}
+        ],
+        "defaults": {
+          "networkId": "465",        # only set when there is exactly 1 network
+          "snapshotId": "1008",      # only set when defaults.networkId is set AND that network has processed snapshots
+          "reason": "single network in tenant; using latest processed snapshot"
+        },
+        "summary": "1 network, 12 snapshots, latest processed 2026-05-04. Defaults pinned: net=465 snap=1008."
       },
-      "summary": "1 network, 12 snapshots, latest processed 2026-05-04. Defaults pinned: net=465 snap=1008."
+      "meta": {"network_count": 1}
     }
 """
 from __future__ import annotations
@@ -34,7 +39,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError, AuthError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_AUTH, ERR_NOT_FOUND
 
 
 def _fmt_ms(ms: Any) -> str:
@@ -67,11 +73,15 @@ def main() -> int:
     try:
         client = ForwardClient.from_env()
         networks = client.get("/api/networks")
+    except AuthError as e:
+        emit_error(ERR_AUTH, str(e), hint="check FORWARD_API_KEY / FORWARD_API_SECRET in .env")
+    except NotFoundError as e:
+        emit_error(ERR_NOT_FOUND, str(e))
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     if not isinstance(networks, list):
-        die(f"unexpected /api/networks response shape: {type(networks).__name__}")
+        emit_error(ERR_API, f"unexpected /api/networks response shape: {type(networks).__name__}")
 
     out_networks: list[dict] = []
     for n in networks:
@@ -134,7 +144,10 @@ def main() -> int:
         more = "" if len(out_networks) <= 5 else f" (+{len(out_networks)-5} more)"
         summary = f"{len(out_networks)} networks: {names}{more}. No default pinned."
 
-    emit_json({"networks": out_networks, "defaults": defaults, "summary": summary})
+    emit_success(
+        {"networks": out_networks, "defaults": defaults, "summary": summary},
+        meta={"network_count": len(out_networks)},
+    )
     return 0
 
 

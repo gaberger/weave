@@ -15,7 +15,6 @@ import json
 import argparse
 from typing import Dict, Any, List
 from pathlib import Path
-import yaml
 
 
 ARCHITECTURE_TEMPLATE = """# Network Architecture Intent

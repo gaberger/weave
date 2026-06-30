@@ -42,6 +42,17 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-nqe-query/scripts/refresh_catalog.
 
 ## Output format
 
+Every script emits one JSON envelope on stdout. Success carries the answer in `data` and facts about it (counts, network/snapshot IDs, echoed params) in `meta`; failure carries a stable `error` code. Branch on `ok`.
+
+```json
+{ "ok": true, "schema": 1, "data": ..., "meta": { } }
+```
+```json
+{ "ok": false, "schema": 1, "error": { "code": "...", "message": "...", "hint": "..." } }
+```
+
+Error `code` is one of `AUTH`, `NOT_FOUND`, `API`, `INPUT`, `EMPTY`. Exit code means *did the script run* (0) vs *could not produce a result* (non-zero) — severity lives in `data`/`meta`, not the exit code.
+
 Never paste raw JSON. Lead with a verdict, not a dump. Never dump more than ~20 rows without explicit opt-in.
 
 ### `smart_search_catalog.py`
@@ -250,7 +261,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-nqe-query/scripts/search_catalog.p
 | `--limit` | no | Max results (default: 20) |
 | `--list-categories` | no | Emit a `category | count` table instead of search results |
 
-Output shape: `[{queryId, path, category, repo, intent, lastCommitId}]` plus a `catalogEnriched` flag indicating whether intent text is available. Catalog is a bundled snapshot — operators should run `refresh_catalog.py` to align with live.
+Output shape: `data` is `[{queryId, path, category, repo, intent, lastCommitId}]`; `meta` carries `count`, `truncated`, and the `catalogEnriched` flag indicating whether intent text is available. Catalog is a bundled snapshot — operators should run `refresh_catalog.py` to align with live.
 
 ### get_query_source.py
 
@@ -507,18 +518,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-nqe-query/scripts/validate_bgp_nex
 - **Network migrations:** "After moving to EIGRP, are all next-hops still reachable?"
 - **Proactive monitoring:** "Alert on any unreachable next-hops"
 
-**Example output (unreachable next-hop detected):**
+**Example output (unreachable next-hop detected):** `data` is the list of validated routes; `meta` carries the totals.
 ```json
 {
-  "Device": "us-client-1",
-  "VRF": "default",
-  "BGP Prefix": "10.201.0.0/24",
-  "Next Hop IP": "1.1.1.1",
-  "Next Hop Interface": "et2",
-  "Next Hop Type": "REMOTE",
-  "Reachable": false,
-  "Covering Route": null,
-  "Issue": "UNREACHABLE_NEXTHOP"
+  "ok": true,
+  "schema": 1,
+  "data": [
+    {
+      "Device": "us-client-1",
+      "VRF": "default",
+      "BGP Prefix": "10.201.0.0/24",
+      "Next Hop IP": "1.1.1.1",
+      "Next Hop Interface": "et2",
+      "Next Hop Type": "REMOTE",
+      "Reachable": false,
+      "Covering Route": null,
+      "Issue": "UNREACHABLE_NEXTHOP"
+    }
+  ],
+  "meta": { "network_id": "NET_xyz", "snapshot_id": "1525", "total_bgp_routes": 312, "unreachable_next_hops": 1, "count": 1 }
 }
 ```
 
@@ -563,7 +581,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-nqe-query/scripts/monitor_bgp_heal
 | `--verbose` | no | Show all sessions including HEALTHY |
 | `--ibgp-pattern` | no | IP prefix string for iBGP peer detection (e.g., `10.` or `1.1.1.`); can repeat |
 
-*Note: output uses `print()`/`json.dumps()` rather than `emit_json()`. When parsing output programmatically, use `--format json`; the `human` and `prometheus` modes produce plain text, not JSON.*
+*Note: when parsing output programmatically, use `--format json` (emits the standard success envelope); the `human` and `prometheus` modes produce plain text, not JSON, and keep Nagios-style operator exit codes.*
 
 *To trace why next-hops are unreachable on a problem session, ask: "Validate BGP next-hop reachability on network NET_xyz."*
 

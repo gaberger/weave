@@ -80,6 +80,28 @@ All write/destructive scripts support `--dry-run` to preview the request body wi
 
 Never paste raw JSON. Lead with a verdict, not a dump.
 
+### Machine contract (JSON)
+
+Every script emits one JSON envelope. The list scripts (`list_changesets.py`,
+`get_version_history.py`, `list_directories.py`) produce JSON only with `--json`;
+all other scripts always emit JSON. Write paths echo the request under `data` with
+`meta.dry_run=true` when `--dry-run` is passed.
+
+Success:
+
+```json
+{ "ok": true, "schema": 1, "data": <result>, "meta": { "...": "counts / network_id / changeset_id / echoed params" } }
+```
+
+Failure (exit non-zero):
+
+```json
+{ "ok": false, "schema": 1, "error": { "code": "API|NOT_FOUND|INPUT|AUTH|EMPTY", "message": "...", "hint": "..." } }
+```
+
+`ok` is the only field to branch on. The human renderings below are the
+default (`--json` off) presentation, not the contract.
+
 ### `list_changesets.py`
 
 ```

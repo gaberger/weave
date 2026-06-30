@@ -23,7 +23,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_INPUT, ERR_NOT_FOUND
 
 
 def _matches(ad: dict, args) -> bool:
@@ -67,38 +68,44 @@ def main() -> int:
             query={"view": "summary"},
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     if "deviceToChanges" not in cs:
-        die(
+        emit_error(
+            ERR_API,
             f"change-set {args.changeset_id} summary does not include deviceToChanges — "
             "this Forward server only exposes view=summary which omits advertisement details; "
-            "cannot locate the advertisement to remove"
+            "cannot locate the advertisement to remove",
         )
 
     dev_changes = (cs.get("deviceToChanges") or {}).get(args.device) or {}
     ads = dev_changes.get("addedAdvertisements") or []
     if not ads:
-        die(
+        emit_error(
+            ERR_NOT_FOUND,
             f"no addedAdvertisements on device {args.device} in change-set "
-            f"{args.changeset_id}"
+            f"{args.changeset_id}",
         )
 
     matches = [a for a in ads if _matches(a, args)]
     if not matches:
-        die(
+        emit_error(
+            ERR_NOT_FOUND,
             f"no advertisement on {args.device} matches the given filters "
             f"(prefix={args.prefix!r}, vrf={args.vrf!r}, nextHop={args.next_hop!r}, "
-            f"externalPeer={args.external_peer!r}, type={args.ad_type!r})"
+            f"externalPeer={args.external_peer!r}, type={args.ad_type!r})",
         )
     if len(matches) > 1:
-        sys.stderr.write(
-            f"error: {len(matches)} advertisements match — narrow with --next-hop / "
-            f"--external-peer / --vrf / --type. Candidates:\n"
+        # Ambiguous filters — preserve exit code 2 and surface the candidates so
+        # the user can re-issue with more disambiguators.
+        candidates = "; ".join(str(m) for m in matches)
+        emit_error(
+            ERR_INPUT,
+            f"{len(matches)} advertisements match — narrow with --next-hop / "
+            f"--external-peer / --vrf / --type",
+            hint=f"candidates: {candidates}",
+            exit_code=2,
         )
-        for m in matches:
-            sys.stderr.write(f"  - {m}\n")
-        return 2
 
     target = matches[0]
     path = (
@@ -106,24 +113,34 @@ def main() -> int:
         f"/devices/{args.device}/bgp-advertisements"
     )
 
+    meta = {
+        "device": args.device,
+        "network_id": args.network_id,
+        "changeset_id": args.changeset_id,
+        "prefix": args.prefix,
+    }
+
     if args.dry_run:
-        emit_json(
-            {"method": "POST", "path": path, "query": {"action": "remove"}, "body": target}
+        emit_success(
+            {"method": "POST", "path": path, "query": {"action": "remove"}, "body": target},
+            meta={**meta, "dry_run": True},
         )
         return 0
 
     if not args.yes:
-        die("removal is destructive; pass --yes to confirm")
+        emit_error(ERR_INPUT, "removal is destructive; pass --yes to confirm")
 
     try:
         result = client.post(path, target, query={"action": "remove"})
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     if result is None:
-        emit_json({"removed": True, "device": args.device, "advertisement": target})
+        emit_success(
+            {"removed": True, "device": args.device, "advertisement": target}, meta=meta
+        )
     else:
-        emit_json(result)
+        emit_success(result, meta=meta)
     return 0
 
 

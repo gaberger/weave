@@ -29,6 +29,32 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
+# Shared skill-I/O contract
+# ---------------------------------------------------------------------------
+# This skill ships no `_bootstrap` module, so locate `skill_io.py` the same way
+# the references catalog is located (plugin root → _shared → walk up to shared/)
+# and put its directory on sys.path before importing the contract helpers.
+def _ensure_skill_io_on_path() -> None:
+    here = Path(__file__).resolve().parent
+    candidates: list[Path] = []
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if plugin_root:
+        candidates.append(Path(plugin_root) / "shared")
+    candidates.append(here / "_shared")
+    candidates.extend(parent / "shared" for parent in here.parents)
+    for d in candidates:
+        if (d / "skill_io.py").is_file():
+            if str(d) not in sys.path:
+                sys.path.insert(0, str(d))
+            return
+
+
+_ensure_skill_io_on_path()
+
+from skill_io import add_format_arg, emit_error, emit_success, ERR_INPUT, ERR_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
 # References catalog loader
 # ---------------------------------------------------------------------------
 
@@ -602,7 +628,11 @@ def render_html(doc: dict, template: str, title_override: str | None, scaffold: 
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Render a structured investigation as a report.")
-    p.add_argument("--format", choices=["markdown", "html"], default="markdown")
+    # markdown/html are the rendered-document registers (the skill's primary product) and
+    # are written out as-is. json wraps a result descriptor in the contract envelope; the
+    # document is rendered as markdown for the json register (the canonical text form) —
+    # use --format html for the styled HTML register directly.
+    add_format_arg(p, choices=("markdown", "html", "json"), default="markdown")
     p.add_argument("--template", choices=list(TEMPLATES.keys()), default="generic")
     p.add_argument("--title", default=None)
     p.add_argument("--input", default=None)
@@ -616,20 +646,48 @@ def main() -> int:
             print(f"{name:18s} {order}")
         return 0
 
-    if args.input:
-        with open(args.input, "r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    else:
-        doc = json.load(sys.stdin)
+    # Load the document — surface bad input as a contract error rather than a traceback.
+    try:
+        if args.input:
+            with open(args.input, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+        else:
+            doc = json.load(sys.stdin)
+    except FileNotFoundError:
+        emit_error(ERR_NOT_FOUND, f"input file not found: {args.input}",
+                   hint="check the --input path", fmt=args.format)
+    except json.JSONDecodeError as e:
+        emit_error(ERR_INPUT, f"input is not valid JSON: {e}",
+                   hint="pipe a JSON document on stdin or pass --input FILE", fmt=args.format)
 
     if not isinstance(doc, dict):
-        raise SystemExit("error: expected a JSON object document")
+        emit_error(ERR_INPUT, "expected a JSON object document",
+                   hint="the document must be a JSON object with title/sections", fmt=args.format)
 
-    if args.format == "markdown":
-        payload = render_markdown(doc, args.template, args.title, args.scaffold)
-    else:
+    # markdown is the canonical text register (also used for json); html is the styled
+    # standalone register.
+    if args.format == "html":
         payload = render_html(doc, args.template, args.title, args.scaffold)
+        doc_format = "html"
+    else:
+        payload = render_markdown(doc, args.template, args.title, args.scaffold)
+        doc_format = "markdown"
 
+    if args.format == "json":
+        # Wrap a result descriptor in the contract envelope. When written to a file we
+        # return {path, format, bytes}; otherwise we embed the rendered document string.
+        nbytes = len(payload.encode("utf-8"))
+        meta = {"template": args.template, "format": doc_format, "bytes": nbytes,
+                "output": args.output}
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            data = {"path": args.output, "format": doc_format, "bytes": nbytes}
+        else:
+            data = {"format": doc_format, "bytes": nbytes, "rendered": payload}
+        emit_success(data, meta=meta, fmt="json")
+
+    # markdown / html: the rendered document IS the output — write it as-is.
     if args.output:
         with open(args.output, "w", encoding="utf-8") as fh:
             fh.write(payload)

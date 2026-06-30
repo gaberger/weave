@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple
 import json
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _bootstrap  # noqa: F401 — puts local _shared on sys.path
+from skill_io import emit_success
+
 SCRIPT_DIR = Path(__file__).parent
 
 
@@ -85,7 +89,9 @@ class PreFlightChecker:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode in [0, 2]:  # 0=pass, 2=warnings (dark links)
-                data = json.loads(result.stdout)
+                # Sub-scripts now emit the skill_io envelope; unwrap to the inner data.
+                envelope = json.loads(result.stdout)
+                data = envelope.get("data", envelope)
                 has_warnings = len(data.get("dark_links", [])) > 0
                 return True, data
             else:
@@ -111,7 +117,9 @@ class PreFlightChecker:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             # Exit code 0=pass, 2=violations exist
             if result.returncode in [0, 2]:
-                data = json.loads(result.stdout)
+                # Sub-scripts now emit the skill_io envelope; unwrap to the inner data.
+                envelope = json.loads(result.stdout)
+                data = envelope.get("data", envelope)
                 return True, data
             else:
                 # Intent checks may not be available
@@ -133,7 +141,9 @@ class PreFlightChecker:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode in [0, 2]:  # 0=pass, 2=missing policies
-                data = json.loads(result.stdout)
+                # Sub-scripts now emit the skill_io envelope; unwrap to the inner data.
+                envelope = json.loads(result.stdout)
+                data = envelope.get("data", envelope)
                 return True, data
             else:
                 return False, {"error": result.stderr}
@@ -405,7 +415,16 @@ This prevents the anti-pattern:
     results = checker.run_all_checks(device_filter=args.device_filter)
 
     if args.json:
-        print(json.dumps(results, indent=2))
+        # Emit the envelope but DON'T exit here — preflight's exit code is a gate
+        # signal (blocked/warning/pass), preserved by the block below.
+        meta = {
+            "network_id": args.network_id,
+            "snapshot_id": args.snapshot_id,
+            "overall_status": results["overall_status"],
+            "blockers": len(results["blockers"]),
+            "warnings": len(results["warnings"]),
+        }
+        emit_success(results, meta=meta, fmt="json", exit_after=False)
     else:
         checker.print_summary()
 

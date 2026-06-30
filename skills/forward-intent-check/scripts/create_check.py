@@ -17,7 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, emit_success, ERR_API, ERR_INPUT, ERR_NOT_FOUND
 
 
 def validate_snapshot_state(client, snapshot_id):
@@ -249,7 +250,7 @@ Notes:
     # Pre-flight parameter validation
     is_valid, error_msg = validate_check_params(args)
     if not is_valid:
-        die(f"Parameter validation failed: {error_msg}")
+        emit_error(ERR_INPUT, f"Parameter validation failed: {error_msg}")
 
     client = ForwardClient.from_env()
 
@@ -258,10 +259,11 @@ Notes:
         networks = client.get("/api/networks")
         net = next((n for n in networks if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+                       hint="list networks with forward-inventory")
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
-            die(f"Network {args.network_id} has no processed snapshots")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} has no processed snapshots")
 
     # Validate snapshot state
     is_ready, state, message = validate_snapshot_state(client, args.snapshot_id)
@@ -273,9 +275,10 @@ Notes:
                 client, args.snapshot_id, max_wait_seconds=args.wait
             )
             if not success:
-                die(f"Snapshot not ready: {wait_message}")
+                emit_error(ERR_API, f"Snapshot not ready: {wait_message}")
         else:
-            die(f"Snapshot not ready: {message} (use --wait to auto-wait)")
+            emit_error(ERR_API, f"Snapshot not ready: {message}",
+                       hint="use --wait to auto-wait for processing")
 
     # Build check definition based on type
     definition = {"checkType": args.type}
@@ -285,13 +288,13 @@ Notes:
         definition["filters"] = filters
     elif args.type == "NQE":
         if not args.query_id:
-            die("--query-id is required for NQE checks")
+            emit_error(ERR_INPUT, "--query-id is required for NQE checks")
         definition["queryId"] = args.query_id
         if args.params:
             definition["params"] = json.loads(args.params)
     elif args.type == "Predefined":
         if not args.predefined_type:
-            die("--predefined-type is required for Predefined checks")
+            emit_error(ERR_INPUT, "--predefined-type is required for Predefined checks")
         definition["predefinedCheckType"] = args.predefined_type
         if args.params:
             definition["params"] = json.loads(args.params)
@@ -307,12 +310,13 @@ Notes:
     parameterized_nqe = args.type == "NQE" and bool(args.params)
     if args.type in ["Existential", "Isolation", "Reachability"]:
         if not args.name:
-            die(f"{args.type} checks require --name")
+            emit_error(ERR_INPUT, f"{args.type} checks require --name")
         body["name"] = args.name
     elif parameterized_nqe:
         if not args.name:
-            die("Parameterized NQE checks require --name (it becomes a suffix after "
-                "the query name).")
+            emit_error(ERR_INPUT,
+                       "Parameterized NQE checks require --name (it becomes a suffix "
+                       "after the query name).")
         body["name"] = args.name
     elif args.type in ["NQE", "Predefined"]:
         if args.name:
@@ -348,19 +352,25 @@ Notes:
         # Enhance error messages with hints
         error_str = str(e)
         if "'name' not allowed" in error_str:
-            die(
-                f"Failed to create check: {e}\n"
-                f"Hint: {args.type} checks cannot have custom names (Forward API restriction)"
+            emit_error(
+                ERR_API, f"Failed to create check: {e}",
+                hint=f"{args.type} checks cannot have custom names (Forward API restriction)",
             )
         elif "No hosts matching" in error_str:
-            die(
-                f"Failed to create check: {e}\n"
-                "Hint: Check requires host aliases configured in Forward UI, or use device names instead"
+            emit_error(
+                ERR_API, f"Failed to create check: {e}",
+                hint="Check requires host aliases configured in Forward UI, or use device names instead",
             )
         else:
-            die(f"Failed to create check: {e}")
+            emit_error(ERR_API, f"Failed to create check: {e}")
 
-    emit_json(result)
+    emit_success(result, meta={
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "type": args.type,
+        "check_id": result.get("id") if isinstance(result, dict) else None,
+        "status": result.get("status") if isinstance(result, dict) else None,
+    })
 
 
 if __name__ == "__main__":

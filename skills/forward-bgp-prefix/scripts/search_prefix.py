@@ -19,7 +19,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 from _common import add_scope_args, scope_query, validate_prefix, search
 
 
@@ -31,12 +32,26 @@ def main() -> int:
 
     try:
         prefix = validate_prefix(args.prefix)
+    except ForwardError as e:
+        emit_error(ERR_INPUT, str(e))
+
+    try:
         client = ForwardClient.from_env()
         result = search(client, args.network_id, prefix, scope_query(args))
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    by_outcome = result.get("devicesByOutcome", {}) or {}
+    emit_success(
+        result,
+        meta={
+            "network_id": args.network_id,
+            "snapshot_id": args.snapshot_id,
+            "prefix": prefix,
+            "origin_count": len(result.get("origin", []) or []),
+            "received_by_outcome": {k: len(v or []) for k, v in by_outcome.items()},
+        },
+    )
     return 0
 
 

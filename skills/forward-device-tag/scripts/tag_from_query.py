@@ -13,7 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_NOT_FOUND, ERR_EMPTY
 
 
 def main():
@@ -49,10 +50,10 @@ def main():
         networks = client.get("/api/networks")
         net = next((n for n in networks if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found")
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
-            die(f"Network {args.network_id} has no processed snapshots")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} has no processed snapshots")
 
     # Build NQE request
     nqe_body = {
@@ -70,12 +71,12 @@ def main():
     try:
         result = client.post("/api/nqe", body=nqe_body)
     except ForwardError as e:
-        die(f"Failed to run query: {e}")
+        emit_error(ERR_API, f"Failed to run query: {e}")
 
     # Extract device names from specified column
     items = result.get("items", [])
     if not items:
-        die(f"Query returned zero rows — no devices to tag")
+        emit_error(ERR_EMPTY, "Query returned zero rows — no devices to tag")
 
     devices = []
     for item in items:
@@ -86,7 +87,7 @@ def main():
             devices.append(device_name)
 
     if not devices:
-        die(f"No device names found in column '{args.device_column}'")
+        emit_error(ERR_EMPTY, f"No device names found in column '{args.device_column}'")
 
     # Remove duplicates
     devices = list(set(devices))
@@ -119,17 +120,22 @@ def main():
     try:
         client.post(tag_path, body=tag_body, query=tag_query if tag_query else None)
     except ForwardError as e:
-        die(f"Failed to tag devices: {e}")
+        emit_error(ERR_API, f"Failed to tag devices: {e}")
 
-    emit_json({
-        "tagged": True,
-        "queryId": args.query_id,
-        "tagName": args.tag_name,
-        "deviceColumn": args.device_column,
-        "deviceCount": len(devices),
-        "devices": devices[:10],  # First 10 for display
-        "snapshotId": args.snapshot_id,
-    })
+    emit_success(
+        {
+            "tagged": True,
+            "devices": devices[:10],  # First 10 for display
+        },
+        meta={
+            "network_id": args.network_id,
+            "query_id": args.query_id,
+            "tag_name": args.tag_name,
+            "device_column": args.device_column,
+            "device_count": len(devices),
+            "snapshot_id": args.snapshot_id,
+        },
+    )
 
 
 if __name__ == "__main__":

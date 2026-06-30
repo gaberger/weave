@@ -15,7 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 
 
 def main() -> int:
@@ -39,22 +40,33 @@ def main() -> int:
     )
 
     if args.dry_run:
-        emit_json({"method": "POST", "path": path, "query": {"action": "restore"}})
-        return 0
+        emit_success(
+            {"method": "POST", "path": path, "query": {"action": "restore"}},
+            meta={"dry_run": True},
+        )
 
     if not args.yes:
-        die(
+        emit_error(
+            ERR_INPUT,
             f"restoring to commit {args.commit_id} overwrites the current draft; "
-            "pass --yes to confirm"
+            "pass --yes to confirm",
+            hint="re-run with --yes",
         )
 
     try:
         client = ForwardClient.from_env()
         result = client.post(path, {}, query={"action": "restore"})
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
-    emit_json(result)
+    emit_success(
+        result,
+        meta={
+            "network_id": args.network_id,
+            "changeset_id": args.changeset_id,
+            "commit_id": args.commit_id,
+        },
+    )
     return 0
 
 

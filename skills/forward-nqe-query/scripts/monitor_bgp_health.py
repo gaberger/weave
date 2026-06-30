@@ -10,13 +10,19 @@ Use this to detect scenario-2 style problems: BGP sessions ESTABLISHED but route
 """
 import argparse
 import sys
-import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import (
+    add_format_arg,
+    emit_error,
+    emit_success,
+    ERR_API,
+    ERR_NOT_FOUND,
+)
 
 # Known query ID for "BGP Established Peerings"
 BGP_ESTABLISHED_QUERY_ID = "FQ_e3d40e190d769a6221ddcc21555473cf04e1384e"
@@ -86,12 +92,7 @@ def main():
         default="WARNING",
         help="Minimum alert level to report (default: WARNING)"
     )
-    parser.add_argument(
-        "--format",
-        choices=["human", "json", "prometheus"],
-        default="human",
-        help="Output format"
-    )
+    add_format_arg(parser, choices=("human", "json", "prometheus"))
     parser.add_argument("--verbose", action="store_true", help="Show all sessions including healthy")
     parser.add_argument(
         "--ibgp-pattern",
@@ -108,10 +109,13 @@ def main():
         networks = client.get("/api/networks")
         net = next((n for n in networks if n["id"] == args.network_id), None)
         if not net:
-            die(f"Network {args.network_id} not found")
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+                       hint="list networks with forward-inventory", fmt=args.format)
         args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
         if not args.snapshot_id:
-            die(f"Network {args.network_id} has no processed snapshots")
+            emit_error(ERR_NOT_FOUND,
+                       f"Network {args.network_id} has no processed snapshots",
+                       fmt=args.format)
 
     # Run BGP established peerings query
     try:
@@ -119,18 +123,12 @@ def main():
             f"/api/snapshots/{args.snapshot_id}/nqeQueries/{BGP_ESTABLISHED_QUERY_ID}/run"
         )
     except ForwardError as e:
-        die(f"Failed to run BGP query: {e}")
+        emit_error(ERR_API, f"Failed to run BGP query: {e}", fmt=args.format)
 
     items = result.get("items", [])
 
-    if not items:
-        if args.format == "json":
-            print(json.dumps({"status": "OK", "message": "No BGP sessions found"}))
-        else:
-            print("No BGP sessions found")
-        sys.exit(0)
-
-    # Classify all sessions
+    # Classify all sessions (an empty population flows through as zero counts —
+    # not a special case, so JSON/human/prometheus stay consistent)
     classifications = []
     ibgp_patterns = args.ibgp_pattern if hasattr(args, 'ibgp_pattern') and args.ibgp_pattern else None
     for item in items:
@@ -146,7 +144,13 @@ def main():
             "message": message
         })
 
-    # Filter by alert level
+    # Severity counts over the FULL population — meta must describe every
+    # session, not just the post-filter subset.
+    critical_count = sum(1 for c in classifications if c["severity"] == 2)
+    warning_count = sum(1 for c in classifications if c["severity"] == 1)
+    healthy_count = sum(1 for c in classifications if c["severity"] == 0)
+
+    # Filter by alert level (the actionable subset shown to the operator)
     severity_map = {"HEALTHY": 0, "WARNING": 1, "CRITICAL": 2}
     min_severity = severity_map[args.alert_level]
 
@@ -156,20 +160,24 @@ def main():
     # Sort by severity (critical first), then by device
     classifications.sort(key=lambda x: (-x["severity"], x["device"], x["peer"]))
 
+    meta = {
+        "network_id": args.network_id,
+        "snapshot_id": args.snapshot_id,
+        "total_sessions": len(items),
+        "healthy": healthy_count,
+        "warnings": warning_count,
+        "critical": critical_count,
+        "shown": len(classifications),
+        "alert_level": args.alert_level,
+    }
+
     # Output
     if args.format == "json":
-        output = {
-            "network_id": args.network_id,
-            "snapshot_id": args.snapshot_id,
-            "total_sessions": len(items),
-            "healthy": sum(1 for c in classifications if c["severity"] == 0),
-            "warnings": sum(1 for c in classifications if c["severity"] == 1),
-            "critical": sum(1 for c in classifications if c["severity"] == 2),
-            "sessions": classifications
-        }
-        print(json.dumps(output, indent=2))
+        # severity lives in data/meta, not the exit code — JSON always exits 0
+        # when the skill ran. (emit_success exits for us.)
+        emit_success({"sessions": classifications}, meta=meta, fmt="json")
 
-    elif args.format == "prometheus":
+    if args.format == "prometheus":
         # Prometheus exposition format
         print("# HELP bgp_session_health BGP session health status (0=healthy, 1=warning, 2=critical)")
         print("# TYPE bgp_session_health gauge")
@@ -188,12 +196,9 @@ def main():
         for c in classifications:
             labels = f'network_id="{args.network_id}",device="{c["device"]}",peer="{c["peer"]}"'
             print(f'bgp_received_prefixes{{{labels}}} {c["received"]}')
+        sys.exit(0)
 
-    else:  # human format
-        critical_count = sum(1 for c in classifications if c["severity"] == 2)
-        warning_count = sum(1 for c in classifications if c["severity"] == 1)
-        healthy_count = sum(1 for c in classifications if c["severity"] == 0)
-
+    else:  # human format — counts reflect the full population (computed above)
         print(f"\nBGP Health Summary (Network {args.network_id}, Snapshot {args.snapshot_id})")
         print("=" * 80)
         print(f"Total Sessions: {len(items)}")

@@ -7,7 +7,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError, AuthError, NotFoundError
+from skill_io import emit_success, emit_error, ERR_API, ERR_AUTH, ERR_NOT_FOUND
 
 
 def main() -> int:
@@ -30,17 +31,32 @@ def main() -> int:
             data = client.get(f"/api/networks/{args.network_id}/snapshots/latestProcessed")
         else:
             data = client.get(f"/api/networks/{args.network_id}/snapshots")
+    except AuthError as e:
+        emit_error(ERR_AUTH, str(e), hint="check FORWARD_API_KEY / FORWARD_API_SECRET in .env")
+    except NotFoundError as e:
+        emit_error(ERR_NOT_FOUND, str(e), hint=f"verify network {args.network_id} with list_networks.py")
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
+
+    # --latest returns a single snapshot object; emit it as-is (the answer).
+    if args.latest:
+        emit_success(data, meta={"network_id": args.network_id, "latest": True})
+
+    # Otherwise the answer is the snapshots list; meta carries counts + echoed filters.
+    snapshots = data.get("snapshots") if isinstance(data, dict) else data
 
     # --note: find snapshots by their note/annotation (case-insensitive substring).
-    if args.note and isinstance(data, dict) and isinstance(data.get("snapshots"), list):
+    if args.note and isinstance(snapshots, list):
         needle = args.note.lower()
-        matches = [s for s in data["snapshots"] if needle in str(s.get("note", "")).lower()]
-        data = {**{k: v for k, v in data.items() if k != "snapshots"}, "snapshots": matches,
-                "noteFilter": args.note, "matchCount": len(matches)}
+        snapshots = [s for s in snapshots if needle in str(s.get("note", "")).lower()]
 
-    emit_json(data)
+    meta = {"network_id": args.network_id}
+    if isinstance(snapshots, list):
+        meta["count"] = len(snapshots)
+    if args.note:
+        meta["note_filter"] = args.note
+
+    emit_success(snapshots, meta=meta)
     return 0
 
 

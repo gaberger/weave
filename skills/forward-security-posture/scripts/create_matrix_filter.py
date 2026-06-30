@@ -17,7 +17,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401
 
-from forward_client import ForwardClient, ForwardError, emit_json, die
+from forward_client import ForwardClient, ForwardError
+from skill_io import emit_success, emit_error, ERR_API, ERR_INPUT
 
 
 # IANA protocol numbers — small lookup so users don't have to memorize them.
@@ -57,33 +58,33 @@ _POOL_ALLOWED_KEYS = {
 def _validate_pool(pool: dict, idx: int) -> None:
     t = pool.get("type")
     if t not in _POOL_REQUIRED_KEYS:
-        die(f"resourcePools[{idx}].type must be one of {sorted(_POOL_REQUIRED_KEYS)}, got {t!r}")
+        emit_error(ERR_INPUT, f"resourcePools[{idx}].type must be one of {sorted(_POOL_REQUIRED_KEYS)}, got {t!r}")
     missing = _POOL_REQUIRED_KEYS[t] - pool.keys()
     if missing:
-        die(f"resourcePools[{idx}] (type={t}) missing required field(s) {sorted(missing)}")
+        emit_error(ERR_INPUT, f"resourcePools[{idx}] (type={t}) missing required field(s) {sorted(missing)}")
     extra = pool.keys() - _POOL_ALLOWED_KEYS[t]
     if extra:
-        die(f"resourcePools[{idx}] (type={t}) has unsupported field(s) {sorted(extra)}")
+        emit_error(ERR_INPUT, f"resourcePools[{idx}] (type={t}) has unsupported field(s) {sorted(extra)}")
     if not isinstance(pool.get("name"), str) or not pool["name"].strip():
-        die(f"resourcePools[{idx}].name must be a non-empty string")
+        emit_error(ERR_INPUT, f"resourcePools[{idx}].name must be a non-empty string")
 
 
 def _load_resource_pools(path: str):
     try:
         text = Path(path).read_text()
     except OSError as e:
-        die(f"cannot read --resource-pools-file {path!r}: {e}")
+        emit_error(ERR_INPUT, f"cannot read --resource-pools-file {path!r}: {e}")
     try:
         pools = json.loads(text)
     except json.JSONDecodeError as e:
-        die(f"--resource-pools-file is not valid JSON: {e}")
+        emit_error(ERR_INPUT, f"--resource-pools-file is not valid JSON: {e}")
     if not isinstance(pools, list):
-        die("--resource-pools-file must contain a JSON array of resource-pool objects")
+        emit_error(ERR_INPUT, "--resource-pools-file must contain a JSON array of resource-pool objects")
     if not pools:
-        die("resourcePools is empty — at least one entry is required")
+        emit_error(ERR_INPUT, "resourcePools is empty — at least one entry is required")
     for i, item in enumerate(pools):
         if not isinstance(item, dict):
-            die(f"resourcePools[{i}] is not an object")
+            emit_error(ERR_INPUT, f"resourcePools[{i}] is not an object")
         _validate_pool(item, i)
     return pools
 
@@ -116,7 +117,7 @@ def main() -> int:
 
     name = args.name.strip()
     if not name:
-        die("--name is empty after trimming whitespace; the server requires a non-empty name")
+        emit_error(ERR_INPUT, "--name is empty after trimming whitespace; the server requires a non-empty name")
 
     resource_pools = _load_resource_pools(args.resource_pools_file)
 
@@ -129,12 +130,13 @@ def main() -> int:
         try:
             body["protocolExclusions"] = _parse_protocols(args.exclude_protocols)
         except ValueError as e:
-            die(str(e))
+            emit_error(ERR_INPUT, str(e))
 
     if args.dry_run:
-        emit_json({"method": "POST",
-                   "path": f"/api/networks/{args.network_id}/securityMatrixFilters",
-                   "body": body})
+        emit_success({"method": "POST",
+                      "path": f"/api/networks/{args.network_id}/securityMatrixFilters",
+                      "body": body},
+                     meta={"dry_run": True, "network_id": args.network_id, "name": name})
         return 0
 
     try:
@@ -144,13 +146,14 @@ def main() -> int:
             body=body,
         )
     except ForwardError as e:
-        die(str(e))
+        emit_error(ERR_API, str(e))
 
     # POST may return the created filter, an array, or empty 2xx — normalize.
     if result is None:
-        emit_json({"created": True, "echo": body})
+        emit_success({"created": True, "echo": body},
+                     meta={"network_id": args.network_id, "name": name, "empty_response": True})
     else:
-        emit_json(result)
+        emit_success(result, meta={"network_id": args.network_id, "name": name})
     return 0
 
 

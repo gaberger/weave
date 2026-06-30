@@ -81,13 +81,25 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/forward-predict/scripts/import_advertiseme
 
 ## Output format
 
-Never paste raw JSON. Lead with a verdict, not a dump.
+Every script emits one JSON envelope on stdout (the weave skill I/O contract):
+
+```json
+{"ok": true,  "schema": 1, "data": <payload>, "meta": {...}}        // success, exit 0
+{"ok": false, "schema": 1, "error": {"code", "message", "hint?"}}  // failure, exit non-zero
+```
+
+Branch on `ok`. `data` is the answer; `meta` carries facts about it (counts, echoed
+`network_id` / `changeset_id`, `dry_run`). Error `code` is one of `INPUT`, `NOT_FOUND`,
+`API`, `AUTH`, `EMPTY`. `list_advertisements.py` without `--json` prints a human summary
+(then the raw array) instead of the envelope; with `--json` it emits the envelope.
+
+Never paste raw JSON to the user. Lead with a verdict, not a dump.
 
 ### `get_changeset.py`
 
-```markdown
-Lead with one line:
+`data` is the change-set record; `meta` echoes `network_id` / `changeset_id`. Lead with one line:
 
+```markdown
     Change-set <id> "<name>" on network <networkId> (snapshot <snapshotId>) — <N> device(s) with overrides, last updated <updatedAt>.
 
 Then per device, one line each:
@@ -100,14 +112,14 @@ To inspect the individual advertisements, ask: "List the BGP overrides on change
 
 ### `list_advertisements.py`
 
-```markdown
-Summarize as:
+Without `--json`: a human summary, then the raw JSON array (no envelope). With `--json`:
+the success envelope where `data` is the advertisement array and `meta` carries `count`,
+`device_count`, and the echoed scope. Summarize as:
 
+```markdown
     <N> added BGP advertisement(s) across <D> device(s) in <changesetId>:
       <device>:
         <type> vrf=<vrf> prefix=<prefix> nextHop=<nh> peer=<peer> as-path=[<csv>]
-
-If --json was passed, only the JSON array is emitted — relay it as a fenced block.
 ```
 
 Zero result: "No added BGP advertisements in change-set <id>[ on <device>]."
@@ -116,38 +128,45 @@ To run a path search using this change-set, ask: "Trace the path from 10.1.0.1 t
 
 ### `add_advertisement.py`
 
-```markdown
-On success:
+On success (`ok: true`), `data` is the API response, or `{"added": true, "echo": <body>}`
+when the server returns an empty 2xx (`--dry-run` puts the request preview in `data` with
+`meta.dry_run`). Summarize as:
 
+```markdown
     Added <type> <prefix> via <nextHop> (peer <externalPeer>, vrf <vrf>) on <device> in change-set <changesetId>.
 
-If the response is empty 2xx, the script emits {"added": true, "echo": <body>} — say so explicitly.
-On 4xx, surface the server's detail string verbatim — it identifies which field failed validation.
+If data.added is true with an echo body, say the server returned empty 2xx explicitly.
+On failure (ok: false), surface error.message verbatim — it identifies which field failed validation (code API for server rejections, INPUT for client-side validation).
 ```
 
 To verify the change-set after adding, ask: "Show me change-set CHG-XXX."
 
 ### `remove_advertisement.py`
 
-```markdown
-On success:
+On success (`ok: true`), `data` is the API response, or `{"removed": true, "advertisement": <record>}`
+on empty 2xx (`--dry-run` puts the request preview in `data`). Summarize as:
 
+```markdown
     Removed <type> <prefix> via <nextHop> on <device> in change-set <changesetId>.
 
-If the lookup matched zero or multiple records, the script exits non-zero with the candidates printed to stderr — relay those so the user can re-issue with extra disambiguators.
+If the lookup matched zero records, ok is false with code NOT_FOUND. If it matched multiple, ok is false with code INPUT (exit 2) and error.hint lists the candidates — relay those so the user can re-issue with extra disambiguators.
 ```
 
 To confirm removal, ask: "List the BGP overrides on change-set CHG-XXX."
 
 ### `import_advertisements.py`
 
+Always `ok: true` once the batch runs (exit 0): `data` is the per-row result array (each
+`{"row", "device", "ok", "response"|"error"}`) and `meta` carries `total` / `succeeded` /
+`failed`. Per-row failures show up in `meta.failed` and the row's `error`, not in the exit
+code. (`--dry-run` puts the request previews in `data`.) Summarize as:
+
 ```markdown
-Summarize as:
-    Imported <K>/<N> Predict BGP advertisements into <changesetId> (<M> failed).
+    Imported <succeeded>/<total> Predict BGP advertisements into <changesetId> (<failed> failed).
 For each failed row, surface row index, device, and the server error string.
 ```
 
-Zero result (all failed): "All <N> advertisements failed to import into <changesetId>. First error: <error>."
+Zero result (all failed): "All <total> advertisements failed to import into <changesetId>. First error: <error>."
 
 To verify what was imported, ask: "List the BGP overrides on change-set CHG-XXX."
 

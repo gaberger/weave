@@ -22,11 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _bootstrap  # noqa: F401 — side-effect: puts forward_client on sys.path
 
 from forward_client import ForwardClient, ForwardError
+from skill_io import emit_error, ERR_API
 
-
-def die_code(msg: str, code: int = 2) -> None:
-    sys.stderr.write(f"error: {msg}\n")
-    sys.exit(code)
+# Primary output is a raw unified diff (text), not a JSON envelope, and there is
+# no output --format flag. Errors go to stderr only (fmt="human") and preserve
+# this script's convention of exit code 2 for failures (0 = no diff, 1 = diff).
 
 
 def fetch(client: ForwardClient, snapshot_id: str, file_name: str) -> str:
@@ -63,7 +63,7 @@ def main() -> int:
         text_a = fetch(client, args.snapshot_a, file_name)
         text_b = fetch(client, args.snapshot_b, file_name)
     except ForwardError as e:
-        die_code(str(e))
+        emit_error(ERR_API, str(e), fmt="human", exit_code=2)
 
     lines_a = text_a.splitlines(keepends=False)
     lines_b = text_b.splitlines(keepends=False)
