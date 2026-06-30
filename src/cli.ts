@@ -175,7 +175,14 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "read-only", "no-embed", "no-context", "route", "no-tier", "no-color"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "read-only", "no-embed", "no-context", "route", "no-tier", "no-color", "verbose"]);
+
+/** The live feed / peer log skips `lease.renewed` heartbeats by default — they fire every tick while
+ *  a task is held and bury the substantive events. `--verbose` shows everything. */
+function logFilter(args: Args): (e: SealedEvent) => boolean {
+  const verbose = has(args, "verbose");
+  return (e) => verbose || e.kind !== TaskKind.LeaseRenewed;
+}
 
 function parseArgs(argv: string[]): Args {
   const _: string[] = [];
@@ -917,7 +924,8 @@ async function cmdUp(args: Args): Promise<void> {
   // Stream only events from here forward -- subscribing at 0 would replay (and print) the ENTIRE
   // log history on every `weave up`, burying the banner under a wall of past tasks. head()+1 is the
   // same live-tail pattern used elsewhere (status/chat).
-  weave.subscribe((await weave.head()) + 1, (e) => console.log(fmt(e)));
+  const keepLog = logFilter(args); // skip lease.renewed heartbeat spam unless --verbose
+  weave.subscribe((await weave.head()) + 1, (e) => { if (keepLog(e)) console.log(fmt(e)); });
 
   const ac = new AbortController();
   const keepAlive = setInterval(() => {}, 1 << 30);
@@ -2956,10 +2964,11 @@ async function cmdStatus(args: Args): Promise<void> {
 
 async function cmdLog(args: Args): Promise<void> {
   const weave = await openSubstrate(args);
-  for (const e of await readAll(weave)) console.log(fmt(e));
+  const keep = logFilter(args); // skip lease.renewed heartbeats unless --verbose
+  for (const e of await readAll(weave)) if (keep(e)) console.log(fmt(e));
   if (has(args, "follow")) {
     const head = await weave.head();
-    weave.subscribe(head + 1, (e) => console.log(fmt(e)));
+    weave.subscribe(head + 1, (e) => { if (keep(e)) console.log(fmt(e)); });
     process.on("SIGINT", () => {
       weave.close();
       process.exit(0);
