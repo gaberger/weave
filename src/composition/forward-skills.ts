@@ -59,6 +59,15 @@ export const TAG_MATCH = [
   "device tag", "tag the device", "tag devices", "tag these", "tag those", "tag all", "apply the tag",
   "untag", "create a tag", "delete the tag", "list tags",
 ] as const;
+export const PREDICT_MATCH = [
+  "predict", "what-if", "what if", "advertise the prefix", "inject a route", "inject an advertisement", "advertisement",
+] as const;
+export const INTENT_MATCH = [
+  "intent check", "intent-check", "create a check", "delete the check", "list checks", "predefined check", "verification check",
+] as const;
+export const SNAPSHOT_MATCH = [
+  "collect a snapshot", "start a collection", "snapshot collection", "recollect", "cancel the collection", "collection status", "collection schedule",
+] as const;
 
 function skill(
   make: (sp?: string) => Worker,
@@ -255,6 +264,50 @@ export function forwardDeviceTagSkill(make: (sp?: string) => Worker): Skill {
   );
 }
 
+/** Predicted BGP advertisements (what-if modeling on a change-set). WRITE. */
+export function forwardPredictSkill(make: (sp?: string) => Worker): Skill {
+  return writeSkill(
+    make,
+    "forward-predict",
+    "What-if BGP advertisement modeling on a change-set: list, add, remove, bulk-import predicted " +
+      "advertisements. Use for \"predict\", \"what-if advertise prefix X\", \"inject a route into the model\".",
+    ["forward_networks", "predict_advert_list", "predict_advert_add", "predict_advert_remove", "predict_advert_import"],
+    PREDICT_MATCH,
+    "- Read with `predict_advert_list` first. `predict_advert_add`/`import` stage advertisements; " +
+      "`predict_advert_remove` is destructive. All require a changesetId. Every mutator previews unless execute:true.",
+  );
+}
+
+/** Intent checks (verification rules). WRITE. */
+export function forwardIntentCheckSkill(make: (sp?: string) => Worker): Skill {
+  return writeSkill(
+    make,
+    "forward-intent-check",
+    "Manage intent / verification checks: list, get, list predefined types, create, delete, update. Use for " +
+      "\"create an intent check\", \"delete the check\", \"list checks\", \"update the check status\".",
+    ["forward_networks", "intent_list", "intent_get", "intent_predefined", "intent_create", "intent_delete", "intent_patch"],
+    INTENT_MATCH,
+    "- Read with `intent_list` / `intent_get` / `intent_predefined` first. `intent_create` (predefined type or an " +
+      "NQE queryId), `intent_delete`, `intent_patch` mutate. create/delete apply immediately when executed " +
+      "(synthetic preview); patch previews unless execute:true.",
+  );
+}
+
+/** Snapshot collection (trigger/cancel/inspect a network re-collection). WRITE. */
+export function forwardSnapshotCollectionSkill(make: (sp?: string) => Worker): Skill {
+  return writeSkill(
+    make,
+    "forward-snapshot-collection",
+    "Trigger or inspect network snapshot collection: start, cancel, status, schedules. Use for \"collect a " +
+      "snapshot\", \"recollect the network\", \"cancel the collection\", \"collection status\".",
+    ["forward_networks", "snapshot_schedules", "snapshot_status", "snapshot_collect", "snapshot_collect_cancel"],
+    SNAPSHOT_MATCH,
+    "- `snapshot_schedules` / `snapshot_status` are read. `snapshot_collect` starts a collection (returns a task " +
+      "id → poll with `snapshot_status`); `snapshot_collect_cancel` aborts it. Both apply immediately when " +
+      "executed (synthetic preview).",
+  );
+}
+
 /** All forward code skills, in routing order: narrow/specialized first, the broad query skills
  *  (nqe, inventory) last so they don't shadow a specific match; the persona catch-all backstops. */
 export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
@@ -266,6 +319,9 @@ export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
     forwardDeviceIntelSkill(make),
     forwardChangesetSkill(make),
     forwardDeviceTagSkill(make),
+    forwardPredictSkill(make),
+    forwardIntentCheckSkill(make),
+    forwardSnapshotCollectionSkill(make),
     forwardPathSkill(make),
     forwardDeviceConfigSkill(make),
     forwardNqeSkill(make),

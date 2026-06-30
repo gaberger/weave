@@ -22,12 +22,12 @@ def main():
 
     # Resolve snapshot ID
     if not args.snapshot_id:
-        networks = client.get("/api/networks")
-        net = next((n for n in networks if n["id"] == args.network_id), None)
-        if not net:
-            emit_error(ERR_NOT_FOUND, f"Network {args.network_id} not found",
+        try:
+            latest = client.get(f"/api/networks/{args.network_id}/snapshots/latestProcessed")
+        except ForwardError as e:
+            emit_error(ERR_NOT_FOUND, f"Network {args.network_id}: could not resolve latest processed snapshot: {e}",
                        hint="list networks with forward-inventory")
-        args.snapshot_id = str(net.get("latestProcessedSnapshotId", ""))
+        args.snapshot_id = str(latest.get("id", "")) if isinstance(latest, dict) else ""
         if not args.snapshot_id:
             emit_error(ERR_NOT_FOUND, f"Network {args.network_id} has no processed snapshots")
 

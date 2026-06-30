@@ -16,7 +16,8 @@ test("forwardSkills returns the expected code skills, each granted only forward_
     skills.map((s) => s.name),
     [
       "forward-vulnerability", "forward-compliance-check", "forward-security-posture", "forward-bgp-prefix",
-      "forward-device-intel", "forward-changeset", "forward-device-tag", "forward-path-analysis",
+      "forward-device-intel", "forward-changeset", "forward-device-tag", "forward-predict",
+      "forward-intent-check", "forward-snapshot-collection", "forward-path-analysis",
       "forward-device-config", "forward-nqe-query", "forward-inventory",
     ],
   );
@@ -46,6 +47,9 @@ test("routing: each domain goal selects its specialized skill before the catch-a
   assert.equal(sel("show the arp table on core-rtr-1"), "forward-device-intel");
   assert.equal(sel("create a change-set for this config"), "forward-changeset");
   assert.equal(sel("tag these devices as production"), "forward-device-tag");
+  assert.equal(sel("what-if advertise the prefix 10.0.0.0/24"), "forward-predict");
+  assert.equal(sel("create an intent check for reachability"), "forward-intent-check");
+  assert.equal(sel("collect a snapshot of the network"), "forward-snapshot-collection");
   assert.equal(sel("why is traffic to 10.0.0.1 dropping"), "forward-path-analysis");
   assert.equal(sel("show me the config for core-rtr-1"), "forward-device-config");
   assert.equal(sel("how many interfaces are down"), "forward-nqe-query");
