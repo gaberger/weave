@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 import type { Effect } from "../../domain/effect.js";
 import type { ToolDefinition, ToolResult } from "../../ports/tool-host.js";
@@ -115,6 +115,10 @@ function safeName(s: string): string {
   return s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 80) || "report";
 }
 
+/** A network id used as a path segment must be a strict slug — never a traversal. This keeps
+ *  auto-filed reports inside networks/<id>/reports/ (matches the cli.ts networkRoot guard). */
+const NETWORK_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
 /** Build the CLI argv for a spec from the orchestrator's args, or return an error string. */
 function buildFlags(spec: ScriptToolSpec, args: Readonly<Record<string, unknown>>): string[] | { error: string } {
   const flags: string[] = [];
@@ -228,15 +232,25 @@ function buildTool(opts: ForwardToolsOptions, spec: ScriptToolSpec): ToolDefinit
         const v = args[spec.stdinArg ?? ""];
         const stdin = v === undefined || v === null || v === "" ? undefined : typeof v === "string" ? v : JSON.stringify(v);
         const fwdId = asStr(args["networkId"]);
-        const reportsDir = fwdId && opts.reportsDir ? opts.reportsDir(fwdId) : undefined;
+        // Auto-file only for a STRICT-slug network id — never let it become a path traversal. An
+        // invalid id is surfaced (saveError), not silently used.
+        const idOk = fwdId !== undefined && NETWORK_ID_RE.test(fwdId);
+        const reportsDir = idOk && opts.reportsDir ? opts.reportsDir(fwdId!) : undefined;
         return runScript(opts, spec.script, flags, { ...(stdin ? { stdin } : {}), rawOutput: true }).then((r) => {
-          if (!r.ok || !reportsDir) return r;
+          if (!r.ok) return r;
           const content = (r.output as { content?: string }).content ?? "";
+          if (fwdId !== undefined && !idOk) {
+            return { ok: true, output: { content, saveError: `networkId ${JSON.stringify(fwdId)} is not a valid id (^[A-Za-z0-9_-]{1,64}$) — not auto-filed` } };
+          }
+          if (!reportsDir) return r; // no networkId given → just return the content
           const ext = FORMAT_EXT[asStr(args["format"]) ?? "markdown"] ?? "md";
           const file = `${safeName(asStr(args["name"]) ?? spec.name.replace(/^report_/, ""))}.${ext}`;
           try {
-            mkdirSync(reportsDir, { recursive: true });
-            const path = join(reportsDir, file);
+            const root = resolve(reportsDir);
+            const path = resolve(root, file);
+            // Defense-in-depth: the final path must stay inside the reports root.
+            if (path !== join(root, file) || !path.startsWith(root + sep)) throw new Error("refusing to write outside the reports dir");
+            mkdirSync(root, { recursive: true });
             writeFileSync(path, content);
             return { ok: true, output: { content, savedTo: path } };
           } catch (e) {

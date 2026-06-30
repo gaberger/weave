@@ -142,10 +142,15 @@ function networkId(args: Args): string {
 }
 
 /** Resolve the state root for a network: <stateRoot>/networks/<id>/ or <stateRoot>/ for default.
- *  In the ~/.weave home, stateRoot is "." so this yields networks/<id>/ and the home itself. */
+ *  In the ~/.weave home, stateRoot is "." so this yields networks/<id>/ and the home itself.
+ *  The id becomes a path segment (db/pid/log/reports), so it MUST be a strict slug — reject anything
+ *  that could traverse (`../`, separators, etc.) rather than escape the workspace. */
 function networkRoot(network: string): string {
   const base = stateRoot();
-  return network === DEFAULT_NETWORK ? base : join(base, "networks", network);
+  if (network === DEFAULT_NETWORK) return base;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(network))
+    throw new Error(`invalid network id ${JSON.stringify(network)} — must match [A-Za-z0-9_-]{1,64}`);
+  return join(base, "networks", network);
 }
 
 /** Resolve the db path for a network: <network-root>/weave.db. */

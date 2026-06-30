@@ -116,6 +116,23 @@ test("RENDER tool: networkId auto-files the artifact under the per-network repor
   assert.equal(readFileSync(savedTo, "utf8"), (r.output as { content: string }).content);
 });
 
+test("RENDER tool: a path-traversal networkId is rejected, not written (security)", async () => {
+  const root = fakePackageRoot();
+  const home = mkdtempSync(join(tmpdir(), "weave-home-"));
+  let resolverCalled = false;
+  const reportsDir = (fwd: string) => { resolverCalled = true; return join(home, "networks", fwd, "reports"); };
+  const t = Object.fromEntries(forwardTools({ packageRoot: root, reportsDir }).map((x) => [x.name, x]));
+  for (const bad of ["../../etc", "..", "a/b", "x/../../y", ""]) {
+    const r = await t["report_table"]!.execute({ data: [{ a: 1 }], format: "csv", networkId: bad });
+    assert.equal(r.ok, true);
+    const out = r.output as { savedTo?: string; saveError?: string; content?: string };
+    assert.equal(out.savedTo, undefined, `must not file for networkId ${JSON.stringify(bad)}`);
+    if (bad !== "") assert.match(String(out.saveError), /not a valid id/);
+    assert.ok(out.content !== undefined, "still returns the rendered content");
+  }
+  assert.equal(resolverCalled, false, "the reports-dir resolver is never called with an invalid id");
+});
+
 test("forward_networks runs the script and parses its JSON", async () => {
   const t = tools(fakePackageRoot());
   const r = await t["forward_networks"]!.execute({});
