@@ -57,10 +57,16 @@ test("router: soft pin falls back to predicate routing when the name is absent",
   assert.equal((await r.run(t, ctx())).summary, "netops");
 });
 
-test("router: soft pin still prefers an exact name match when present", async () => {
-  const r = new SkillRouterWorker([mkSkill("claude", true), mkSkill("netops", true)]);
-  const t: TaskAssignment = { taskId: "t", spec: { goal: "x", skill: "claude", softSkill: true } };
-  assert.equal((await r.run(t, ctx())).summary, "claude");
+test("router: soft pin routes to a SPECIALIZED match over the pinned catch-all", async () => {
+  // The routing-model fix: a domain turn must reach its specialized skill even though the
+  // conversational pin names the catch-all. Specialized skill is registered before the catch-all.
+  const specialized = { ...mkSkill("forward-vulnerability", false), match: (t: TaskAssignment) => t.spec.goal.includes("cve") };
+  const r = new SkillRouterWorker([specialized, mkSkill("netops", true)]);
+  const cve: TaskAssignment = { taskId: "t", spec: { goal: "show the cve audit", skill: "netops", softSkill: true } };
+  assert.equal((await r.run(cve, ctx())).summary, "forward-vulnerability");
+  // A general turn matches nothing specialized -> the catch-all (match-all, last) backstops it.
+  const chat: TaskAssignment = { taskId: "t", spec: { goal: "hello there", skill: "netops", softSkill: true } };
+  assert.equal((await r.run(chat, ctx())).summary, "netops");
 });
 
 test("router: soft pin with no matching skill -> failed no_skill", async () => {
