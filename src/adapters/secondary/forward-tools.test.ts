@@ -11,7 +11,7 @@ import { forwardTools } from "./forward-tools.js";
 function fakePackageRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "weave-fwd-"));
   for (const rel of ["forward-inventory/scripts", "forward-vulnerability/scripts",
-    "forward-changeset/scripts", "forward-device-tag/scripts"]) {
+    "forward-changeset/scripts", "forward-device-tag/scripts", "forward-report-table/scripts"]) {
     mkdirSync(join(root, "skills", rel), { recursive: true });
   }
   const echo = "import sys, json\nprint(json.dumps({'argv': sys.argv[1:]}))\n";
@@ -21,6 +21,9 @@ function fakePackageRoot(): string {
     "forward-changeset/scripts/delete_changeset.py", "forward-device-tag/scripts/create_tag.py"]) {
     writeFileSync(join(root, "skills", s), echo);
   }
+  // A renderer: reads JSON on stdin, emits FORMATTED TEXT (argv + the stdin data) — not JSON.
+  writeFileSync(join(root, "skills/forward-report-table/scripts/render.py"),
+    "import sys\nprint('ARGV ' + ' '.join(sys.argv[1:]))\nprint('DATA ' + sys.stdin.read())\n");
   // A separate failing script swapped in per-test by overwriting the target file.
   void chmodSync; void fail;
   return root;
@@ -77,6 +80,25 @@ test("WRITE gate: execute:true on a no-guard script spawns it (the real mutation
   assert.equal(r.ok, true);
   const argv = (r.output as { argv: string[] }).argv;
   assert.deepEqual(argv, ["--network-id", "1", "--tag-name", "prod"]);
+});
+
+test("RENDER tool: pipes `data` to stdin (JSON-stringified) and returns raw formatted text", async () => {
+  const t = tools(fakePackageRoot());
+  assert.equal(t["report_table"]!.effect, "read");
+  const r = await t["report_table"]!.execute({ data: { rows: [{ a: 1 }] }, format: "markdown" });
+  assert.equal(r.ok, true);
+  const content = (r.output as { content: string }).content;
+  assert.match(content, /ARGV .*--format markdown/, "format flag is passed");
+  assert.match(content, /DATA \{"rows":\[\{"a":1\}\]\}/, "data is JSON-stringified onto stdin");
+  // raw output: NOT JSON-parsed (no argv/dryRun keys at top level)
+  assert.equal((r.output as { argv?: unknown }).argv, undefined);
+});
+
+test("RENDER tool: listTemplates needs no data and does not hang on stdin", async () => {
+  const t = tools(fakePackageRoot());
+  const r = await t["report_table"]!.execute({ listTemplates: true });
+  assert.equal(r.ok, true);
+  assert.match((r.output as { content: string }).content, /ARGV .*--list-templates/);
 });
 
 test("forward_networks runs the script and parses its JSON", async () => {

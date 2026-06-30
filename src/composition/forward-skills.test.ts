@@ -17,7 +17,7 @@ test("forwardSkills returns the expected code skills, each granted only forward_
     [
       "forward-vulnerability", "forward-compliance-check", "forward-security-posture", "forward-bgp-prefix",
       "forward-device-intel", "forward-changeset", "forward-device-tag", "forward-predict",
-      "forward-intent-check", "forward-snapshot-collection", "forward-path-analysis",
+      "forward-intent-check", "forward-snapshot-collection", "forward-report", "forward-path-analysis",
       "forward-device-config", "forward-nqe-query", "forward-inventory",
     ],
   );
@@ -50,6 +50,10 @@ test("routing: each domain goal selects its specialized skill before the catch-a
   assert.equal(sel("what-if advertise the prefix 10.0.0.0/24"), "forward-predict");
   assert.equal(sel("create an intent check for reachability"), "forward-intent-check");
   assert.equal(sel("collect a snapshot of the network"), "forward-snapshot-collection");
+  assert.equal(sel("give me a mermaid diagram of the topology"), "forward-report");
+  assert.equal(sel("export the device list to csv"), "forward-report");
+  // "report" alone must still route to research (recall the indexed report), not the renderer.
+  assert.notEqual(sel("how do I see the BMP report"), "forward-report");
   assert.equal(sel("why is traffic to 10.0.0.1 dropping"), "forward-path-analysis");
   assert.equal(sel("show me the config for core-rtr-1"), "forward-device-config");
   assert.equal(sel("how many interfaces are down"), "forward-nqe-query");

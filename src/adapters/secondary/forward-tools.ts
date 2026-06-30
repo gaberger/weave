@@ -58,6 +58,11 @@ interface ScriptToolSpec {
   readonly write?: boolean;
   readonly dryRunFlag?: string; // flag that forces a SAFE preview when not executing (e.g. "--dry-run")
   readonly confirmFlag?: string; // flag the script needs to actually mutate (e.g. "--yes" / "--execute")
+  // --- renderer semantics (report-doc/graph/table). These read JSON on STDIN and emit a formatted
+  //     artifact (markdown/HTML/CSV/Mermaid), NOT JSON. `stdinArg` names the input key piped to stdin
+  //     (JSON-stringified if an object); `rawOutput` returns stdout as text instead of JSON-parsing. ---
+  readonly stdinArg?: string;
+  readonly rawOutput?: boolean;
 }
 
 /** Coerce a value the MCP bridge may have stringified (Haiku sends arrays/numbers as JSON strings,
@@ -122,8 +127,17 @@ function buildFlags(spec: ScriptToolSpec, args: Readonly<Record<string, unknown>
   return flags;
 }
 
-/** Run one forward-* python script with fixed args; resolve to a parsed-JSON ToolResult. */
-function runScript(opts: ForwardToolsOptions, scriptRelPath: string, flags: string[]): Promise<ToolResult> {
+interface RunOpts {
+  /** Piped to the child's stdin (for renderers that read JSON on stdin). */
+  readonly stdin?: string;
+  /** Return stdout as raw text (renderers emit markdown/HTML/CSV/Mermaid, not JSON). */
+  readonly rawOutput?: boolean;
+}
+
+/** Run one forward-* python script with fixed args; resolve to a parsed-JSON ToolResult (or raw
+ *  text for renderers). stdin is ALWAYS ended — a script that reads stdin gets the data or a clean
+ *  EOF, never a hang. */
+function runScript(opts: ForwardToolsOptions, scriptRelPath: string, flags: string[], run: RunOpts = {}): Promise<ToolResult> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
   const maxBytes = opts.maxBytes ?? 8 * 1024 * 1024;
   const script = join(opts.packageRoot, "skills", scriptRelPath);
@@ -132,6 +146,9 @@ function runScript(opts: ForwardToolsOptions, scriptRelPath: string, flags: stri
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
       env: process.env,
     });
+    // Always feed+close stdin so a stdin-reading script never blocks (renderers read JSON here).
+    if (run.stdin) child.stdin.write(run.stdin);
+    child.stdin.end();
     let stdout = "";
     let stderr = "";
     let truncated = false;
@@ -163,6 +180,11 @@ function runScript(opts: ForwardToolsOptions, scriptRelPath: string, flags: stri
         resolve({ ok: false, output: { error: "output exceeded cap; narrow the query (filters / --limit)", script: scriptRelPath } });
         return;
       }
+      if (run.rawOutput) {
+        // Renderer: stdout is the formatted artifact (markdown/HTML/CSV/Mermaid), not JSON.
+        resolve({ ok: true, output: { content: stdout } });
+        return;
+      }
       try {
         resolve({ ok: true, output: JSON.parse(stdout) });
       } catch {
@@ -176,6 +198,7 @@ function buildTool(opts: ForwardToolsOptions, spec: ScriptToolSpec): ToolDefinit
   const inputSchema: Record<string, string> = {};
   for (const a of spec.args) inputSchema[a.key] = a.desc;
   if (spec.write) inputSchema["execute"] = "boolean — MUST be true to actually apply this change; omit/false = a non-mutating dry-run preview";
+  if (spec.stdinArg) inputSchema[spec.stdinArg] = "the data to render — a JSON object/array (or JSON string) piped to the renderer";
   return {
     name: spec.name,
     description: spec.description,
@@ -185,6 +208,12 @@ function buildTool(opts: ForwardToolsOptions, spec: ScriptToolSpec): ToolDefinit
     execute: (args) => {
       const flags = buildFlags(spec, args);
       if (!Array.isArray(flags)) return Promise.resolve({ ok: false, output: { error: flags.error } });
+      // Renderer: pipe the data arg to stdin (JSON-stringify objects), return raw formatted text.
+      if (spec.stdinArg || spec.rawOutput) {
+        const v = args[spec.stdinArg ?? ""];
+        const stdin = v === undefined || v === null || v === "" ? undefined : typeof v === "string" ? v : JSON.stringify(v);
+        return runScript(opts, spec.script, flags, { ...(stdin ? { stdin } : {}), rawOutput: true });
+      }
       if (spec.write && !isTruthy(args["execute"])) {
         // NON-MUTATING preview. Prefer the script's own dry-run (real "what would happen"); else, for a
         // script that mutates immediately with no guard, do NOT spawn at all — synthesize the plan.
@@ -729,6 +758,58 @@ const SPECS: readonly ScriptToolSpec[] = [
     description: "Cancel the in-progress snapshot collection on a network. WRITE (no script guard): only applied when execute:true.",
     write: true,
     args: [{ key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" }],
+  },
+  // ============ RENDER tools (report-doc/graph/table) — read JSON via `data`, emit a formatted ============
+  // artifact (markdown/HTML/CSV/Mermaid) as text. Pure formatters, not API calls; data comes from a
+  // prior query the agent ran. listTemplates lists the available templates (no data needed).
+  {
+    name: "report_doc",
+    script: "forward-report-doc/scripts/render.py",
+    description:
+      "Render structured data as a NARRATIVE report (network review, incident report, change ticket, " +
+      "compliance/drift writeup) in markdown or standalone HTML. Pass the content as `data` (JSON). For " +
+      "\"write this up as a report\", \"give me an HTML report\". Set listTemplates:true to see templates.",
+    stdinArg: "data", rawOutput: true,
+    args: [
+      { key: "format", flag: "--format", kind: "string", desc: "markdown (default) | html | json" },
+      { key: "template", flag: "--template", kind: "string", desc: "template name (see listTemplates)" },
+      { key: "title", flag: "--title", kind: "string", desc: "report title" },
+      { key: "scaffold", flag: "--scaffold", kind: "bool", desc: "emit placeholder sections from the template" },
+      { key: "listTemplates", flag: "--list-templates", kind: "bool", desc: "list available templates (no data needed)" },
+    ],
+  },
+  {
+    name: "report_graph",
+    script: "forward-report-graph/scripts/render.py",
+    description:
+      "Render data as a DIAGRAM — Mermaid (default; pastes into GitHub/Notion), Graphviz DOT, or " +
+      "standalone interactive HTML. Pass the graph data as `data` (JSON). For \"draw the path\", \"show " +
+      "the topology\", \"graph the BGP peerings\", \"give me a Mermaid diagram\". listTemplates lists templates.",
+    stdinArg: "data", rawOutput: true,
+    args: [
+      { key: "format", flag: "--format", kind: "string", desc: "mermaid (default) | dot | html | json" },
+      { key: "template", flag: "--template", kind: "string", desc: "template name (path-trace, topology, bgp-mesh, config-diff)" },
+      { key: "direction", flag: "--direction", kind: "string", desc: "graph direction (e.g. LR, TB)" },
+      { key: "labelEdges", flag: "--label-edges", kind: "bool", desc: "label edges" },
+      { key: "listTemplates", flag: "--list-templates", kind: "bool", desc: "list available templates (no data needed)" },
+    ],
+  },
+  {
+    name: "report_table",
+    script: "forward-report-table/scripts/render.py",
+    description:
+      "Render rows as a TABLE — ANSI terminal, GitHub-flavored Markdown, standalone HTML (sortable), or " +
+      "CSV. Pass the rows as `data` (JSON). For \"show me a table of …\", \"format as a grid\", \"export to " +
+      "CSV\", \"a Markdown table I can paste\". listTemplates lists templates.",
+    stdinArg: "data", rawOutput: true,
+    args: [
+      { key: "format", flag: "--format", kind: "string", desc: "ansi (default) | markdown | html | csv | json" },
+      { key: "template", flag: "--template", kind: "string", desc: "template name (stig, device-list, security-matrix, diff)" },
+      { key: "columns", flag: "--columns", kind: "string", desc: "comma-separated columns to include/order" },
+      { key: "sort", flag: "--sort", kind: "string", desc: "column to sort by" },
+      { key: "groupBy", flag: "--group-by", kind: "string", desc: "column to group by" },
+      { key: "listTemplates", flag: "--list-templates", kind: "bool", desc: "list available templates (no data needed)" },
+    ],
   },
 ];
 

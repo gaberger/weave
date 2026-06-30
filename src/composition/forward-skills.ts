@@ -68,6 +68,12 @@ export const INTENT_MATCH = [
 export const SNAPSHOT_MATCH = [
   "collect a snapshot", "start a collection", "snapshot collection", "recollect", "cancel the collection", "collection status", "collection schedule",
 ] as const;
+// NOTE: deliberately NO bare "report" — that belongs to the research skill ("how do I see the BMP
+// report"). These are RENDER/format phrasings only.
+export const REPORT_MATCH = [
+  "render", "diagram", "mermaid", "graphviz", "draw the", "as a table", "table of", "csv", "export",
+  "write this up", "write it up", "as a report", "html report", "format as", "render as a graph",
+] as const;
 
 function skill(
   make: (sp?: string) => Worker,
@@ -308,6 +314,24 @@ export function forwardSnapshotCollectionSkill(make: (sp?: string) => Worker): S
   );
 }
 
+/** Reporting: gather data, then render it as a doc / diagram / table (markdown/HTML/CSV/Mermaid).
+ *  Read-only (the render tools are pure formatters; nqe_run gathers the data). */
+export function forwardReportSkill(make: (sp?: string) => Worker): Skill {
+  return skill(
+    make,
+    "forward-report",
+    "Produce a formatted artifact from network data: a narrative report, a diagram (Mermaid/Graphviz/" +
+      "HTML), or a table (Markdown/CSV/HTML). Use for \"write this up as a report\", \"draw the topology\", " +
+      "\"give me a Mermaid diagram\", \"export to CSV\", \"show me a table of …\".",
+    ["forward_networks", "nqe_run", "report_doc", "report_graph", "report_table"],
+    REPORT_MATCH,
+    "- GATHER the data first (e.g. `nqe_run` for tabular facts), THEN render it: `report_table` (tabular), " +
+      "`report_graph` (diagrams — Mermaid by default), `report_doc` (narrative). Pass the gathered JSON as " +
+      "the render tool's `data` arg. Use listTemplates:true to discover templates. Return the rendered " +
+      "artifact verbatim (it's already formatted) — don't re-summarize it.",
+  );
+}
+
 /** All forward code skills, in routing order: narrow/specialized first, the broad query skills
  *  (nqe, inventory) last so they don't shadow a specific match; the persona catch-all backstops. */
 export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
@@ -322,6 +346,7 @@ export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
     forwardPredictSkill(make),
     forwardIntentCheckSkill(make),
     forwardSnapshotCollectionSkill(make),
+    forwardReportSkill(make),
     forwardPathSkill(make),
     forwardDeviceConfigSkill(make),
     forwardNqeSkill(make),
