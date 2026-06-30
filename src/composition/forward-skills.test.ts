@@ -14,7 +14,10 @@ test("forwardSkills returns the expected code skills, each granted only forward_
   const skills = forwardSkills(make);
   assert.deepEqual(
     skills.map((s) => s.name),
-    ["forward-vulnerability", "forward-nqe-query", "forward-path-analysis", "forward-device-config", "forward-inventory"],
+    [
+      "forward-vulnerability", "forward-compliance-check", "forward-security-posture", "forward-bgp-prefix",
+      "forward-device-intel", "forward-path-analysis", "forward-device-config", "forward-nqe-query", "forward-inventory",
+    ],
   );
   for (const s of skills) assert.equal(typeof s.run, "function");
 });
@@ -36,9 +39,13 @@ test("routing: each domain goal selects its specialized skill before the catch-a
   const router = new SkillRouterWorker([...forwardSkills(make), claudeSkill(make)]);
   const sel = (g: string) => router.select(task(g))?.name;
   assert.equal(sel("show the CVEs we filtered out and why"), "forward-vulnerability");
-  assert.equal(sel("how many interfaces are down"), "forward-nqe-query");
+  assert.equal(sel("run a STIG compliance check"), "forward-compliance-check");
+  assert.equal(sel("what can reach the DMZ — security posture"), "forward-security-posture");
+  assert.equal(sel("who originates bgp prefix 10.0.0.0/8"), "forward-bgp-prefix");
+  assert.equal(sel("show the arp table on core-rtr-1"), "forward-device-intel");
   assert.equal(sel("why is traffic to 10.0.0.1 dropping"), "forward-path-analysis");
   assert.equal(sel("show me the config for core-rtr-1"), "forward-device-config");
+  assert.equal(sel("how many interfaces are down"), "forward-nqe-query");
   assert.equal(sel("list devices in DemoFoundry"), "forward-inventory");
   // General conversational turns match no specialized skill → the catch-all backstops them.
   assert.equal(sel("thanks, that's helpful"), "claude");

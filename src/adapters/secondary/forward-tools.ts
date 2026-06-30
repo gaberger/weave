@@ -319,6 +319,116 @@ const SPECS: readonly ScriptToolSpec[] = [
       { key: "ignoreCase", flag: "--ignore-case", kind: "bool", desc: "case-insensitive match" },
     ],
   },
+  // -- device intel (parsed live state: arp / bgp peers / interfaces / device info) --
+  // All four share _entity.add_common_args: --network-id (req), --snapshot-id, --device-name, --limit.
+  ...(["arp", "bgp_peers", "device_info", "interfaces"] as const).map((kind) => {
+    const meta: Record<string, { tool: string; what: string }> = {
+      arp: { tool: "device_arp", what: "ARP table entries (IP↔MAC↔interface)" },
+      bgp_peers: { tool: "device_bgp_peers", what: "BGP neighbor sessions and their state" },
+      device_info: { tool: "device_info", what: "device platform / OS version / model" },
+      interfaces: { tool: "device_interfaces", what: "interface inventory and status (up/down, speed, IP)" },
+    };
+    const m = meta[kind]!;
+    return {
+      name: m.tool,
+      script: `forward-device-intel/scripts/get_${kind}.py`,
+      description: `Parsed ${m.what} from a snapshot. Optionally filter to one device. Returns rows.`,
+      args: [
+        { key: "networkId", flag: "--network-id", kind: "string" as const, required: true, desc: "network id (required)" },
+        { key: "snapshotId", flag: "--snapshot-id", kind: "string" as const, desc: "snapshot id (default latest processed)" },
+        { key: "deviceName", flag: "--device-name", kind: "string" as const, desc: "filter to one device name" },
+        { key: "limit", flag: "--limit", kind: "int" as const, desc: "max rows (default 1000)" },
+      ],
+    };
+  }),
+  // -- compliance (STIG sweep) --
+  {
+    name: "stig_sweep",
+    script: "forward-compliance-check/scripts/stig_sweep.py",
+    description:
+      "Run STIG / hardening compliance checks across the network and summarize pass/fail. For 'STIG " +
+      "compliance', 'hardening posture', 'are we compliant'. Narrow with vendor/platform; bound with " +
+      "limitQueries/rowLimit (the full catalog sweep is slow). Returns per-check results.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+      { key: "vendor", flag: "--vendor", kind: "string", desc: "filter to a vendor (e.g. Cisco)" },
+      { key: "platform", flag: "--platform", kind: "string", desc: "filter to a platform/OS" },
+      { key: "pathContains", flag: "--path-contains", kind: "string", desc: "only checks whose catalog path contains this" },
+      { key: "limitQueries", flag: "--limit-queries", kind: "int", desc: "cap how many STIG checks run (bound runtime)" },
+      { key: "rowLimit", flag: "--row-limit", kind: "int", desc: "cap rows per check" },
+    ],
+  },
+  // -- BGP prefix (where a prefix lives / is originated / how it's reached) --
+  {
+    name: "bgp_prefix_search",
+    script: "forward-bgp-prefix/scripts/search_prefix.py",
+    description: "Find where a BGP prefix lives across the network (which devices carry it). For 'where is prefix X'.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+      { key: "prefix", flag: "--prefix", kind: "string", required: true, desc: "CIDR, e.g. 10.24.0.0/24 (required)" },
+    ],
+  },
+  {
+    name: "bgp_prefix_details",
+    script: "forward-bgp-prefix/scripts/prefix_details.py",
+    description: "BGP attributes/details for a prefix (optionally on a specific device). For 'show me the BGP details for X'.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+      { key: "prefix", flag: "--prefix", kind: "string", required: true, desc: "CIDR (required)" },
+      { key: "device", flag: "--device", kind: "string", desc: "limit to a device" },
+    ],
+  },
+  {
+    name: "bgp_prefix_trace",
+    script: "forward-bgp-prefix/scripts/trace_prefix.py",
+    description: "Trace a prefix's origin and propagation (who originates it, how it spreads). For 'who originates X', 'trace prefix X'.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+      { key: "prefix", flag: "--prefix", kind: "string", required: true, desc: "CIDR (required)" },
+      { key: "device", flag: "--device", kind: "string", desc: "start device" },
+      { key: "vrf", flag: "--vrf", kind: "string", desc: "VRF" },
+      { key: "originVrf", flag: "--origin-vrf", kind: "string", desc: "origin VRF" },
+    ],
+  },
+  {
+    name: "bgp_prefix_on_device",
+    script: "forward-bgp-prefix/scripts/device_prefix_info.py",
+    description: "What a specific device knows about a prefix (its RIB/attributes for it). For 'what does device X know about prefix Y'.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+      { key: "device", flag: "--device", kind: "string", required: true, desc: "device name (required)" },
+      { key: "prefix", flag: "--prefix", kind: "string", required: true, desc: "CIDR (required)" },
+    ],
+  },
+  // -- security posture (zone-to-zone reachability matrix; read) --
+  {
+    name: "security_matrix",
+    script: "forward-security-posture/scripts/get_matrix.py",
+    description:
+      "Zone-to-zone security posture matrix: what traffic is allowed between zones/regions. For 'security " +
+      "posture', 'what can reach the DMZ', 'segmentation matrix'. Returns the allowed/blocked matrix.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "snapshotId", flag: "--snapshot-id", kind: "string", desc: "snapshot id (default latest processed)" },
+      { key: "filterId", flag: "--filter-id", kind: "string", desc: "a saved matrix filter id" },
+      { key: "src", flag: "--src", kind: "string", desc: "source zone/region" },
+      { key: "dst", flag: "--dst", kind: "string", desc: "destination zone/region" },
+    ],
+  },
+  {
+    name: "security_matrix_filters",
+    script: "forward-security-posture/scripts/list_matrix_filters.py",
+    description: "List saved security-matrix filters (named zone definitions) for a network.",
+    args: [
+      { key: "networkId", flag: "--network-id", kind: "string", required: true, desc: "network id (required)" },
+      { key: "name", flag: "--name", kind: "string", desc: "filter by name substring" },
+    ],
+  },
 ];
 
 /** Build the Forward NetOps tools. Registered only when the netops pack is active (cli.ts). */

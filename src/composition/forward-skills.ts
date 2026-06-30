@@ -28,7 +28,7 @@ export const VULN_MATCH = [
 ] as const;
 export const NQE_MATCH = [
   "nqe", "run a query", "run query", "query the network", "how many devices", "how many interfaces",
-  "which devices", "catalog query", "stig",
+  "which devices", "catalog query",
 ] as const;
 export const PATH_MATCH = [
   "path from", "trace the path", "can it reach", "reachability", "why is traffic", "is traffic dropping",
@@ -39,6 +39,18 @@ export const CONFIG_MATCH = [
 ] as const;
 export const INVENTORY_MATCH = [
   "list networks", "what networks", "list devices", "how many devices", "list snapshots", "inventory", "what devices",
+] as const;
+export const COMPLIANCE_MATCH = [
+  "stig", "compliance", "hardening", "cis benchmark", "are we compliant",
+] as const;
+export const SECURITY_MATCH = [
+  "security matrix", "security posture", "what can reach", "segmentation", "zone matrix", "allowed flows",
+] as const;
+export const BGP_PREFIX_MATCH = [
+  "bgp prefix", "where is the prefix", "who originates", "trace prefix", "prefix details", "advertises the prefix",
+] as const;
+export const DEVICE_INTEL_MATCH = [
+  "arp", "bgp peer", "bgp neighbor", "interface status", "interfaces on", "device info", "mac address",
 ] as const;
 
 function skill(
@@ -130,13 +142,74 @@ export function forwardInventorySkill(make: (sp?: string) => Worker): Skill {
   );
 }
 
-/** All forward code skills, in routing order (specialized; the persona catch-all backstops). */
+/** STIG / hardening compliance sweep. */
+export function forwardComplianceSkill(make: (sp?: string) => Worker): Skill {
+  return skill(
+    make,
+    "forward-compliance-check",
+    "STIG / hardening compliance across the network: pass/fail per check. Use for \"STIG compliance\", " +
+      "\"are we hardened/compliant\", \"hardening posture\".",
+    ["forward_networks", "stig_sweep"],
+    COMPLIANCE_MATCH,
+    "- Call `stig_sweep`; narrow with vendor/platform and bound with limitQueries/rowLimit (the full sweep is " +
+      "slow). Lead with the pass/fail headline, then the notable failures.",
+  );
+}
+
+/** Zone-to-zone security posture matrix (read). */
+export function forwardSecurityPostureSkill(make: (sp?: string) => Worker): Skill {
+  return skill(
+    make,
+    "forward-security-posture",
+    "Zone-to-zone security posture: what traffic is allowed between zones/regions. Use for \"security " +
+      "posture\", \"what can reach the DMZ\", \"segmentation matrix\".",
+    ["forward_networks", "security_matrix", "security_matrix_filters"],
+    SECURITY_MATCH,
+    "- `security_matrix` for the allowed/blocked matrix (optionally scoped by src/dst or a saved filterId " +
+      "from `security_matrix_filters`). Lead with the posture verdict, then the notable allowed flows.",
+  );
+}
+
+/** BGP prefix location / origin / propagation. */
+export function forwardBgpPrefixSkill(make: (sp?: string) => Worker): Skill {
+  return skill(
+    make,
+    "forward-bgp-prefix",
+    "BGP prefix analysis: where a prefix lives, its attributes, who originates it, how it propagates. Use for " +
+      "\"where is prefix X\", \"who originates X\", \"trace prefix X\", \"BGP details for X\".",
+    ["forward_networks", "bgp_prefix_search", "bgp_prefix_details", "bgp_prefix_trace", "bgp_prefix_on_device"],
+    BGP_PREFIX_MATCH,
+    "- Locate → `bgp_prefix_search`. Attributes → `bgp_prefix_details`. Origin/propagation → `bgp_prefix_trace`. " +
+      "One device's view → `bgp_prefix_on_device`. Always pass the prefix as CIDR. Lead with the answer.",
+  );
+}
+
+/** Parsed live device state: ARP / BGP peers / interfaces / device info. */
+export function forwardDeviceIntelSkill(make: (sp?: string) => Worker): Skill {
+  return skill(
+    make,
+    "forward-device-intel",
+    "Parsed live device state: ARP table, BGP neighbor sessions, interface status, device platform/OS. Use for " +
+      "\"show the arp table\", \"bgp peers on X\", \"interface status\", \"what platform is X\".",
+    ["forward_networks", "device_arp", "device_bgp_peers", "device_info", "device_interfaces"],
+    DEVICE_INTEL_MATCH,
+    "- ARP → `device_arp`. BGP sessions → `device_bgp_peers`. Interfaces → `device_interfaces`. Platform/OS → " +
+      "`device_info`. Filter to one device with deviceName. Lead with the answer, then a compact table.",
+  );
+}
+
+/** All forward code skills, in routing order: narrow/specialized first, the broad query skills
+ *  (nqe, inventory) last so they don't shadow a specific match; the persona catch-all backstops. */
 export function forwardSkills(make: (sp?: string) => Worker): Skill[] {
   return [
     forwardVulnerabilitySkill(make),
-    forwardNqeSkill(make),
+    forwardComplianceSkill(make),
+    forwardSecurityPostureSkill(make),
+    forwardBgpPrefixSkill(make),
+    forwardDeviceIntelSkill(make),
     forwardPathSkill(make),
     forwardDeviceConfigSkill(make),
+    forwardNqeSkill(make),
     forwardInventorySkill(make),
   ];
 }
