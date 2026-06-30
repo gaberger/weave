@@ -20,7 +20,17 @@ export class SkillRouterWorker implements Worker {
   select(task: TaskAssignment): Skill | undefined {
     const skills = this.skillsOf();
     const explicit = task.spec.skill;
-    if (explicit !== undefined) return skills.find((s) => s.name === explicit);
+    if (explicit !== undefined) {
+      const named = skills.find((s) => s.name === explicit);
+      if (named !== undefined) return named;
+      // A SOFT pin (a conversational default, not a user's explicit `--skill`) tolerates a missing
+      // skill: a thin chat client pins its own catch-all name (e.g. "claude"), but the answering
+      // daemon may run a different persona whose catch-all is named differently (e.g. "netops").
+      // Rather than hard-fail, fall back to predicate routing so the peer still answers. An explicit
+      // pin (softSkill unset) keeps the hard "no such skill" error so typos surface.
+      if (task.spec.softSkill === true) return skills.find((s) => s.match(task));
+      return undefined;
+    }
     return skills.find((s) => s.match(task));
   }
 

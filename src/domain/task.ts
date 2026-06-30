@@ -5,6 +5,11 @@ export interface TaskSpec {
   readonly goal: string;
   /** Optional explicit routing to a named skill (ADR-0012); else skills match by predicate. */
   readonly skill?: string;
+  /** When `skill` is a SOFT default (e.g. chat's conversational catch-all) rather than a user's
+   *  explicit demand: if the answering peer has no skill by that name (a persona mismatch between a
+   *  thin client and its daemon), fall back to predicate routing instead of hard-failing. An explicit
+   *  `--skill X` leaves this unset, so a genuinely missing skill still errors. */
+  readonly softSkill?: boolean;
   /** Optional model override for this task (ADR-0022 per-task tiering). When set, the Worker uses
    *  it for this task; when absent, the Worker uses its own startup default. */
   readonly model?: string;

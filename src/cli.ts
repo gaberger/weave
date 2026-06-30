@@ -1907,11 +1907,14 @@ function chatTurn(
   onProgress?: (note: string) => void, // streamed answer text / status notes (voice TTS streaming)
   utterance?: string, // original user utterance (for learning tracking)
   networkId?: string, // network context (for learning tracking)
+  softSkill?: boolean, // pinnedSkill is a conversational default, not an explicit --skill demand
 ): Promise<{ answer: string; ok: boolean; cancelled: boolean }> {
   return new Promise((resolve) => {
     const id = `chat-${randomUUID().slice(0, 8)}`;
-    const spec: { goal: string; skill?: string; model?: string } = { goal };
-    if (pinnedSkill) spec.skill = pinnedSkill;
+    const spec: { goal: string; skill?: string; model?: string; softSkill?: boolean } = { goal };
+    // A soft pin (conversational default) routes by predicate if the answering peer lacks the name,
+    // so a persona-mismatched daemon (e.g. --persona netops) still replies instead of hard-failing.
+    if (pinnedSkill) { spec.skill = pinnedSkill; if (softSkill) spec.softSkill = true; }
     if (model) spec.model = model; // ADR-0022: per-turn tier (cheap for chat, escalates on hard asks)
 
     // Extract original utterance for learning (strip network context prefix like "[Network context: network 111]")
@@ -2757,6 +2760,9 @@ async function cmdChat(args: Args): Promise<void> {
   const pack = selectedPack(args);
   const convoAgent = pack ? pack.name : str(args, "persona", "") ? "agent" : "claude";
   const pinnedSkill = explicitSkill ?? (route ? undefined : convoAgent);
+  // The conversational pin is a SOFT default (this client guesses its own catch-all name), so a
+  // daemon running a different persona still answers. An explicit `--skill` stays a hard demand.
+  const softPin = !explicitSkill && !route;
   const timeoutMs = durationFlag(args, "timeout", "180s");
   const carry = !has(args, "no-context");
   const history: ChatTurn[] = [];
@@ -2841,7 +2847,7 @@ async function cmdChat(args: Args): Promise<void> {
     turnAbort = new AbortController();
     const { answer, ok, cancelled } = await chatTurn(
       weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal,
-      undefined, line, net // utterance, networkId for learning
+      undefined, line, net, softPin // utterance, networkId for learning; soft conversational pin
     );
     turnAbort = null;
     if (cancelled) { console.log(`${gray("(cancelled)")} ${answer}\n`); continue; } // don't pollute context with a cancel

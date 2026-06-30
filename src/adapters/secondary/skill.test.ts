@@ -49,6 +49,28 @@ test("router: unknown explicit skill -> failed", async () => {
   assert.equal(res.status, "failed");
 });
 
+test("router: soft pin falls back to predicate routing when the name is absent", async () => {
+  // A thin chat client pins its own catch-all name ("claude"); the daemon runs a different persona
+  // whose catch-all is "netops". Soft pin => route by predicate to "netops" instead of failing.
+  const r = new SkillRouterWorker([mkSkill("netops", true)]);
+  const t: TaskAssignment = { taskId: "t", spec: { goal: "x", skill: "claude", softSkill: true } };
+  assert.equal((await r.run(t, ctx())).summary, "netops");
+});
+
+test("router: soft pin still prefers an exact name match when present", async () => {
+  const r = new SkillRouterWorker([mkSkill("claude", true), mkSkill("netops", true)]);
+  const t: TaskAssignment = { taskId: "t", spec: { goal: "x", skill: "claude", softSkill: true } };
+  assert.equal((await r.run(t, ctx())).summary, "claude");
+});
+
+test("router: soft pin with no matching skill -> failed no_skill", async () => {
+  const r = new SkillRouterWorker([mkSkill("netops", false)]);
+  const t: TaskAssignment = { taskId: "t", spec: { goal: "x", skill: "claude", softSkill: true } };
+  const res = await r.run(t, ctx());
+  assert.equal(res.status, "failed");
+  assert.equal(res.status === "failed" ? res.error : null, "no_skill");
+});
+
 test("loadSkills: loads a plugin module from a directory", async () => {
   const dir = mkdtempSync(join(tmpdir(), "weave-skills-"));
   writeFileSync(
