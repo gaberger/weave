@@ -1,6 +1,6 @@
 # NQE Primer (for Claude)
 
-A minimal primer for reasoning about NQE (Network Query Engine). This file is intentionally small — the **authoritative source of NQE syntax is the query catalog itself**. When writing or adapting a query, always inspect real sources first.
+A minimal primer for reasoning about NQE (Network Query Engine). This file is intentionally small — for the full grammar (clauses, operators, built-in functions, pattern matching, the data-model schema, enums) see **`nqe-reference.md`** in this directory. The query catalog remains the source of **working, current examples**; consult it for the exact shape of the data you want, and the reference for any syntax an example doesn't show.
 
 ## What NQE is
 
@@ -23,10 +23,11 @@ Do NOT attempt to write NQE from your training data — syntax has evolved and y
 1. search_catalog.py <keywords>                    # find a similar query
 2. get_query_source.py --path <path> --head        # read its source
 3. Adapt the source. Keep the same column shape where possible.
+   For any clause/function the example doesn't cover, check nqe-reference.md.
 4. run_query.py --query-file adapted.nqe --limit 50
 ```
 
-Step 2 gives you ground truth — the real, working syntax for the exact patterns you need.
+Step 2 gives you ground truth — the real, working syntax for the exact patterns you need. `nqe-reference.md` is the grammar backstop when no example covers what you're writing (or when authoring from scratch).
 
 ## Common catalog categories (counts as of bundled snapshot)
 
