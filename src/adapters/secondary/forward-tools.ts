@@ -44,6 +44,8 @@ interface ArgSpec {
   readonly required?: boolean;
   /** One-line schema/usage hint shown to the orchestrator. */
   readonly desc: string;
+  /** Optional strict validation (defense-in-depth for argv-injection-sensitive args like ssh host). */
+  readonly pattern?: RegExp;
 }
 
 interface ScriptToolSpec {
@@ -140,6 +142,14 @@ function buildFlags(spec: ScriptToolSpec, args: Readonly<Record<string, unknown>
     if (val === undefined) {
       if (a.required) return { error: `${a.key} is required` };
       continue;
+    }
+    // SECURITY: a positional value must NOT start with "-", or the downstream program (esp. ssh) reads
+    // it as an OPTION — classic argv flag smuggling, e.g. host="-oProxyCommand=..." → RCE. Reject it.
+    if (a.kind === "positional" && val.startsWith("-")) {
+      return { error: `${a.key} must not start with "-" (rejected: argv flag smuggling)` };
+    }
+    if (a.pattern && !a.pattern.test(val)) {
+      return { error: `${a.key} ${JSON.stringify(val)} is not a valid value (must match ${a.pattern})` };
     }
     if (a.kind === "positional") flags.push(val);
     else if (a.flag) flags.push(a.flag, val);
@@ -891,9 +901,9 @@ const SPECS: readonly ScriptToolSpec[] = [
       "run on X over ssh'. Prefer the read-only Forward tools (config_get, device_*) for state you can " +
       "get from a snapshot — use SSH only for live/interactive actions.",
     args: [
-      { key: "host", kind: "positional", required: true, desc: "device hostname/IP (required)" },
+      { key: "host", kind: "positional", required: true, pattern: /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, desc: "device hostname/IP (required)" },
       { key: "command", kind: "positional", required: true, desc: "command to run on the device (required)" },
-      { key: "username", kind: "positional", desc: "SSH username (optional)" },
+      { key: "username", kind: "positional", pattern: /^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/, desc: "SSH username (optional)" },
     ],
   },
   {
@@ -905,9 +915,9 @@ const SPECS: readonly ScriptToolSpec[] = [
       "execute:true. Use for 'push this config to <device>'. The config must already be a file on disk " +
       "(e.g. write it with write_file first). Confirm the exact device + config with the user before execute.",
     args: [
-      { key: "device", kind: "positional", required: true, desc: "target device hostname/IP (required)" },
+      { key: "device", kind: "positional", required: true, pattern: /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, desc: "target device hostname/IP (required)" },
       { key: "configFile", kind: "positional", required: true, desc: "path to the config file to push (required)" },
-      { key: "username", kind: "positional", desc: "SSH username (optional)" },
+      { key: "username", kind: "positional", pattern: /^[A-Za-z0-9_.][A-Za-z0-9_.-]*$/, desc: "SSH username (optional)" },
     ],
   },
 ];

@@ -65,6 +65,20 @@ test("SSH tool: positional args via bash, execute-gated, raw output (no live dev
   assert.match(String((bad.output as { error: string }).error), /command is required/);
 });
 
+test("SSH tool: argv flag-smuggling is rejected (host/username can't inject ssh options)", async () => {
+  const t = tools(fakePackageRoot());
+  // A host that ssh would read as an option (ProxyCommand RCE) — rejected before spawn.
+  const proxy = await t["ssh_run"]!.execute({ host: "-oProxyCommand=touch /tmp/pwned", command: "x", execute: true });
+  assert.equal(proxy.ok, false);
+  assert.match(String((proxy.output as { error: string }).error), /must not start with "-"|not a valid value/);
+  // A host with shell/option metacharacters fails the strict pattern.
+  const weird = await t["ssh_run"]!.execute({ host: "rtr;rm -rf /", command: "x", execute: true });
+  assert.equal(weird.ok, false);
+  // A bad username is rejected too.
+  const baduser = await t["ssh_run"]!.execute({ host: "rtr-1", command: "show ver", username: "-l attacker", execute: true });
+  assert.equal(baduser.ok, false);
+});
+
 test("WRITE gate: a script with --dry-run previews (spawns with --dry-run) when execute is not set", async () => {
   const t = tools(fakePackageRoot());
   const r = await t["changeset_create"]!.execute({ networkId: "1", name: "cs" });
