@@ -25,9 +25,12 @@ function fakePackageRoot(): string {
 
 const tools = (root: string) => Object.fromEntries(forwardTools({ packageRoot: root }).map((t) => [t.name, t]));
 
-test("forward tools are typed read tools with the expected names", () => {
+test("forward tools are typed read tools incl. the Slice-1 + batch-2 read surface", () => {
   const t = tools(fakePackageRoot());
-  assert.deepEqual(Object.keys(t).sort(), ["forward_cve_audit", "forward_networks", "forward_snapshots"]);
+  for (const name of ["forward_networks", "forward_snapshots", "forward_devices", "forward_cve_audit",
+    "nqe_search", "nqe_get_source", "nqe_run", "path_search", "config_get", "config_grep"]) {
+    assert.ok(t[name], `missing tool ${name}`);
+  }
   for (const def of Object.values(t)) assert.equal(def.effect, "read");
 });
 
@@ -56,13 +59,14 @@ test("forward_cve_audit maps args to flags (incl. coerced stringified severity l
   ]);
 });
 
-test("forward_cve_audit omits disposition=all and requires networkId", async () => {
+test("forward_cve_audit requires networkId and omits absent optional args", async () => {
   const t = tools(fakePackageRoot());
   const missing = await t["forward_cve_audit"]!.execute({});
   assert.equal(missing.ok, false);
   assert.match(String((missing.output as { error: string }).error), /networkId is required/);
 
-  const r = await t["forward_cve_audit"]!.execute({ networkId: "1", disposition: "all" });
+  // Only networkId given -> optional flags omitted (the scaffold drops undefined args).
+  const r = await t["forward_cve_audit"]!.execute({ networkId: "1" });
   assert.deepEqual((r.output as { argv: string[] }).argv, ["--network-id", "1"]);
 });
 

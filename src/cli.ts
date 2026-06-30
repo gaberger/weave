@@ -78,7 +78,7 @@ import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
 import { startHttpGateway } from "./adapters/primary/http-gateway.js";
 import { echoSkill, claudeSkill, personaAgentSkill, researchSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
-import { forwardVulnerabilitySkill } from "./composition/forward-skills.js";
+import { forwardSkills } from "./composition/forward-skills.js";
 import { forwardTools } from "./adapters/secondary/forward-tools.js";
 import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
 import { loadPack, loadPackFile, globToRegExp, type Pack } from "./composition/pack.js";
@@ -644,7 +644,7 @@ async function assembleSkills(
   // engineers NQE / credentials / network ids. Built BEFORE claudeSkills and pre-seeded into `seen`
   // so the declarative same-named skill is skipped (code skill wins).
   const packBundlesForward = !!(pack && pack.bundles.some((b) => globToRegExp(b).test("forward-vulnerability")));
-  const forwardPack: Skill[] = llm && packBundlesForward ? [forwardVulnerabilitySkill(llm.make)] : [];
+  const forwardPack: Skill[] = llm && packBundlesForward ? forwardSkills(llm.make) : [];
   for (const s of forwardPack) seen.add(s.name);
   const claudeSkills: Skill[] = [];
   if (llm) {
