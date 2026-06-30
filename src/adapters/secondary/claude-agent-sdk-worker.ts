@@ -51,10 +51,18 @@ export interface ClaudeRunOptions {
  *  Code's bundled skills (e.g. `deep-research`), which narrate "I launched the workflow, I'll
  *  present the report once it completes" and then fan out via `Workflow` — so even with Workflow
  *  denied the turn ends on a false promise. weave routes its OWN skills a layer up; the worker
- *  should research inline (WebSearch/WebFetch) and fan out on the substrate via `spawn_task`. */
+ *  should research inline (WebSearch/WebFetch) and fan out on the substrate via `spawn_task`.
+ *
+ *  `AskUserQuestion` and `Monitor` are denied for the same headless reason (found by analyzing the
+ *  peer log): a weave worker has NO interactive interlocutor, so `AskUserQuestion` always strands
+ *  the turn — it blocks, no one answers, then the agent "defaults" anyway after a stall (24 such
+ *  stranded turns in one log). The worker must pick a sensible default and proceed, never ask.
+ *  `Monitor` spawns a detached background watch that notifies the main loop the worker can't see —
+ *  same out-of-band-completion trap as Task/Workflow. */
 const SDK_BUILTIN_TOOLS = [
   "Bash", "BashOutput", "KillBash", "KillShell", "Read", "Write", "Edit", "MultiEdit",
   "NotebookEdit", "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "Workflow", "Skill", "TodoWrite", "ExitPlanMode",
+  "AskUserQuestion", "Monitor",
 ];
 export type ClaudeQuery = (params: {
   prompt: string;

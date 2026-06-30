@@ -45,7 +45,10 @@ export const realClaudeCliRunner: ClaudeCliRunner = (args, signal, onData) =>
  *  `Workflow` — so even with Workflow denied the turn ends on a false "report coming" promise.
  *  The worker researches inline (WebSearch/WebFetch); fan-out belongs on the substrate via
  *  `spawn_task`. See the --disallowedTools push in run(). */
-const DENIED_TOOLS = ["Workflow", "Task", "Skill"] as const;
+// Workflow/Task/Skill: detached / interactive-harness machinery a headless worker can't drive
+// (ADR-0024). AskUserQuestion/Monitor: same headless trap — AskUserQuestion strands the turn (no one
+// answers, the agent stalls then defaults), Monitor detaches a background watch. (Log analysis.)
+const DENIED_TOOLS = ["Workflow", "Task", "Skill", "AskUserQuestion", "Monitor"] as const;
 
 export interface ClaudeCliConfig {
   readonly model?: string;
