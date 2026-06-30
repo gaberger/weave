@@ -77,7 +77,7 @@ import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondar
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
 import { startHttpGateway } from "./adapters/primary/http-gateway.js";
-import { echoSkill, claudeSkill, personaAgentSkill, researchSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
+import { echoSkill, claudeSkill, personaAgentSkill, researchSkill, RESEARCH_MATCH, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
 import { loadAgentSkills, loadClaudeSkills, makeAgentSkill } from "./composition/agent-skill.js";
 import { loadPack, loadPackFile, globToRegExp, type Pack } from "./composition/pack.js";
 import { notifyTool } from "./composition/notify-tool.js";
@@ -2844,10 +2844,17 @@ async function cmdChat(args: Args): Promise<void> {
     // Classify on the raw utterance (not the context-carried goal): conversational turns → Haiku,
     // hard asks ("design…", "audit…") escalate to Opus. --no-tier leaves it to the peer's default.
     const turnModel = has(args, "no-tier") ? undefined : modelForGoal(args, line);
+    // A research/report-shaped turn ROUTES to the `research` skill (it recalls the indexed report
+    // bundle first, then fans out) instead of being answered by the pinned conversational catch-all
+    // (ADR-0024 §2). Only override the SOFT conversational default — an explicit --skill or --route
+    // is left exactly as the user set it. Detected on the raw utterance, like the model tiering.
+    const researchShaped = softPin && RESEARCH_MATCH.some((k) => line.toLowerCase().includes(k.toLowerCase()));
+    const turnSkill = researchShaped ? undefined : pinnedSkill;
+    const turnSoft = researchShaped ? false : softPin;
     turnAbort = new AbortController();
     const { answer, ok, cancelled } = await chatTurn(
-      weave, newId, actor, goal, pinnedSkill, turnModel, timeoutMs, turnAbort.signal,
-      undefined, line, net, softPin // utterance, networkId for learning; soft conversational pin
+      weave, newId, actor, goal, turnSkill, turnModel, timeoutMs, turnAbort.signal,
+      undefined, line, net, turnSoft // utterance, networkId for learning; soft conversational pin
     );
     turnAbort = null;
     if (cancelled) { console.log(`${gray("(cancelled)")} ${answer}\n`); continue; } // don't pollute context with a cancel
