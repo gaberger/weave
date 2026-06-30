@@ -71,6 +71,7 @@ import { httpFetchTool } from "./adapters/secondary/http-fetch-tool.js";
 import { bashTool } from "./adapters/secondary/bash-tool.js";
 import { spawnTaskTool } from "./adapters/secondary/spawn-task-tool.js";
 import { fanoutTool } from "./adapters/secondary/fanout-tool.js";
+import { researchSaveTool } from "./adapters/secondary/research-tool.js";
 import { registerInspectTools } from "./composition/inspect-tools.js";
 import { writeSkillTool } from "./adapters/secondary/write-skill-tool.js";
 import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondary/channels.js";
@@ -713,6 +714,9 @@ async function assembleSkills(
   registry.register(notifyTool(channelsFrom(channelConfig(args)))); // notifications
   // recall: search accumulated knowledge so skills/inference build on prior reports (ADR-0021 §4).
   registry.register(recallTool(reportsDirFor(args), pickEmbedder(args)));
+  // research_save: the research agent files each deliverable in its OWN project folder —
+  // <home>/research/<topic>/report.md (+ sources/) — separate from the per-network bundles.
+  if (llm && opts.weave) registry.register(researchSaveTool(() => resolve(join(stateRoot(), "research"))));
   if (has(args, "bash") || pack?.tools.includes("Bash")) {
     // Shell access. Opt-in via --bash, or whenever the selected pack declares it (e.g. the netops
     // pack: every forward-* skill runs `python3 .../scripts/*.py`, so without bash the agent can't

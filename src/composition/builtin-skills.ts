@@ -58,6 +58,10 @@ export const RESEARCH_PROMPT =
   "general knowledge.\n" +
   "For a small or single-faceted question, after `recall` you may answer directly with `http_fetch` / " +
   "`read_file` instead of fanning out.\n" +
+  "5. For a substantial deep-dive (a fan-out research effort), SAVE the deliverable to its own project " +
+  "folder: call `research_save` with the topic (the question/title), the full markdown report, and the key " +
+  "sources — it files research/<topic>/report.md (+ sources/) under the weave home and returns savedTo. " +
+  "Then give your answer and mention the saved path. (Skip research_save for a quick one-line lookup.)\n" +
   "Produce the final answer NOW in this turn — never say a report is 'running' or 'coming once it completes'.";
 
 /** Goal keywords that route to the research skill (ADR-0024 §2). Exported so the chat front door can
@@ -80,7 +84,7 @@ export function researchSkill(make: (systemPrompt?: string) => Worker): Skill {
       name: "research",
       description: "Answer a research or report question by recalling the indexed report bundle first, then fanning out parallel sub-questions on the weave and synthesizing the results.",
       prompt: RESEARCH_PROMPT,
-      tools: ["fanout", "http_fetch", "recall", "read_file", "write_file"],
+      tools: ["fanout", "http_fetch", "recall", "read_file", "write_file", "research_save"],
       match: [...RESEARCH_MATCH],
     },
     make(RESEARCH_PROMPT),
