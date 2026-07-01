@@ -54,6 +54,8 @@ import { classifyIntent, type Intent } from "./domain/intent.js";
 import { classifyTier, type Tier } from "./domain/model-tier.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
+import { publishTwin } from "./usecases/publish-twin.js";
+import { parseTwinGraph } from "./domain/twin.js";
 import { declareQuestion, resolveQuestion } from "./usecases/learning.js";
 import { compactWeave } from "./usecases/compaction.js";
 import { getCachedAnswer, cacheAnswer } from "./usecases/cache.js";
@@ -78,6 +80,8 @@ import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondar
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
 import { startHttpGateway } from "./adapters/primary/http-gateway.js";
+import { startSseSurface } from "./adapters/primary/sse-surface.js";
+import { BLACKBOARD_HTML } from "./adapters/primary/blackboard-page.js";
 import { echoSkill, claudeSkill, personaAgentSkill, researchSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
 import { forwardSkills } from "./composition/forward-skills.js";
 import { forwardTools } from "./adapters/secondary/forward-tools.js";
@@ -176,7 +180,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "read-only", "no-embed", "no-context", "route", "no-tier", "no-color", "verbose"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "read-only", "no-embed", "no-context", "route", "no-tier", "no-color", "verbose", "no-stream"]);
 
 /** The live feed / peer log skips `lease.renewed` heartbeats by default — they fire every tick while
  *  a task is held and bury the substantive events. `--verbose` shows everything. */
@@ -1334,6 +1338,43 @@ async function cmdTask(args: Args): Promise<void> {
   weave.close();
 }
 
+/**
+ * `weave twin` — publish a network view onto the blackboard (ADR-0025). Reads a `{nodes,edges,title}`
+ * graph (the `forward-report-graph` shape) from a file, a positional path, or stdin, and appends a
+ * `twin.graph` event any connected blackboard renders live. So a Forward path trace or topology flows
+ * straight to the canvas:  `forward-report-graph … | weave twin`  (or  `weave twin topo.json`).
+ */
+async function cmdTwin(args: Args): Promise<void> {
+  const file = str(args, "file", "") || args._[0] || "-";
+  let raw: string;
+  try {
+    raw = file === "-" ? readFileSync(0, "utf8") : readFileSync(file, "utf8");
+  } catch (e) {
+    console.error(`weave twin: cannot read ${file === "-" ? "stdin" : file}: ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+  let graph;
+  try {
+    const json = JSON.parse(raw) as unknown;
+    // `--view <name>` overrides/sets the view so re-published traces can target distinct canvases.
+    graph = parseTwinGraph(has(args, "view") && json && typeof json === "object"
+      ? { ...(json as object), view: str(args, "view", "") }
+      : json);
+  } catch (e) {
+    console.error(`weave twin: ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const weave = await openSubstrate(args);
+  await publishTwin(weave, () => randomUUID(), "cli", graph);
+  console.log(
+    `weave: published twin view "${graph.view}" — ${graph.nodes.length} node(s), ${graph.edges.length} edge(s)` +
+      (graph.title ? ` — ${graph.title}` : ""),
+  );
+  weave.close();
+}
+
 async function cmdLoop(args: Args): Promise<void> {
   const skill = str(args, "skill", "");
   if (!skill) {
@@ -1516,21 +1557,51 @@ async function cmdServe(args: Args): Promise<void> {
     return { taskId };
   };
 
+  // The blackboard (below) lets you speak a task; its voice input POSTs a declare to THIS gateway
+  // from the surface's origin, so enable CORS on the gateway exactly when the stream is on.
+  const streamOn = !has(args, "no-stream");
+  const streamPort = numPos(args, "stream-port", 8788);
+
   const handle = await startHttpGateway({
     port,
     host,
     route,
     ...(secret ? { secret } : {}),
+    ...(streamOn ? { cors: true } : {}),
     onEvent,
     log: (m) => console.log(gray(m)),
   });
+
+  // Outbound event surface (ADR-0025): the read-only mirror of the inbound gateway. It pushes the
+  // substrate stream to browsers over SSE and serves the blackboard. Runs on its own port so the
+  // inbound and outbound halves stay independent (either can be disabled). `--no-stream` opts out.
+  const surface = streamOn
+    ? await startSseSurface({
+        port: streamPort,
+        host,
+        ...(secret ? { secret } : {}),
+        // Inject the real subscribe + the terminal's log filter — this adapter imports no substrate.
+        subscribe: (from, h) => weave.subscribe(from, h),
+        filter: logFilter(args),
+        page: BLACKBOARD_HTML,
+        // Tell the page where to POST voice-declared tasks (this gateway). Declare stays on the gateway.
+        gateway: { port, route },
+        log: (m) => console.log(gray(m)),
+      })
+    : undefined;
+
   const net = networkId(args);
   const netBadge = net !== DEFAULT_NETWORK ? ` ${cyan(`[${net}]`)}` : "";
   console.log(`${green("✓")} gateway listening on ${cyan(`http://${host}:${handle.port}${route}`)}${netBadge}`);
   console.log(`  ${gray("POST")}  a body (or JSON {"goal","skill"}) → declares a task any peer can claim`);
-  console.log(`  ${gray("auth:")} ${secret ? "X-Weave-Secret required" : "none (loopback)"}\n`);
+  console.log(`  ${gray("auth:")} ${secret ? "X-Weave-Secret required" : "none (loopback)"}`);
+  if (surface) {
+    const q = secret ? `?secret=${secret}` : "";
+    console.log(`${green("✓")} blackboard on ${cyan(`http://${host}:${surface.port}/${q}`)} ${gray("(live SSE + 🎙 speak/listen in-browser)")}`);
+  }
+  console.log("");
   if (!secret && host !== "127.0.0.1") {
-    console.error(yellow("weave: serving on a non-loopback host with NO --secret — anyone who can reach this port can declare tasks."));
+    console.error(yellow("weave: serving on a non-loopback host with NO --secret — anyone who can reach this port can declare tasks (and watch the stream)."));
     console.error(yellow("  → set --secret <token> (or WEAVE_GATEWAY_SECRET), and put it behind a reverse proxy / TLS."));
   }
 
@@ -1543,7 +1614,7 @@ async function cmdServe(args: Args): Promise<void> {
     clearInterval(keepAlive);
     const pidFile = process.env.WEAVE_PID_FILE;
     if (pidFile) try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
-    void handle.close().then(() => {
+    void Promise.all([handle.close(), surface?.close()]).then(() => {
       weave.close();
       process.exit(0);
     });
@@ -3031,11 +3102,16 @@ usage:
                   (--notify alerts on completed results; pick channels with --to, same as 'weave notify')
                   (--daemon detaches to the background; stop with weave down)
   weave serve     [--port 8787] [--host 127.0.0.1] [--route /hook] [--skill <name>]
-                  [--secret <token>] [--daemon] [--pid-file <path>] [--log-file <path>]
-                  inbound event gateway (ADR-0023): each POST declares a task any peer claims —
-                  the reactive trigger half of autonomy (webhook → task → peer acts → notify)
-                  (POST a body or JSON {"goal","skill"}; --secret gates via the X-Weave-Secret header;
-                   binds loopback by default — use --host 0.0.0.0 + --secret to expose)
+                  [--secret <token>] [--stream-port 8788] [--no-stream]
+                  [--daemon] [--pid-file <path>] [--log-file <path>]
+                  inbound event gateway (ADR-0023) + outbound blackboard (ADR-0025): each POST
+                  declares a task any peer claims, and the live event stream is pushed to a web
+                  blackboard over SSE (open http://<host>:<stream-port>/)
+                  (POST a body or JSON {"goal","skill"}; --secret gates the gateway header AND the
+                   stream ?secret=; --no-stream disables the blackboard; loopback by default)
+  weave twin      [<graph.json> | --file <path> | -] [--view <name>]
+                  publish a {nodes,edges,title} graph (the forward-report-graph shape) onto the
+                  blackboard as a live network view — e.g.  forward-report-graph … | weave twin
   weave skills    [--skills-dir <dir>] [--claude-skills [--claude-skills-dir <dir>]] [--fake]
                   list code + declarative skills (--claude-skills inherits Claude SKILL.md)
   weave notify <text...> [--to slack,telegram,email] [--title T]
@@ -3196,6 +3272,8 @@ async function main(): Promise<void> {
       return cmdDoctor(args);
     case "task":
       return cmdTask(args);
+    case "twin":
+      return cmdTwin(args);
     case "report":
       return cmdReport(args);
     case "index":

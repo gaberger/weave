@@ -4,6 +4,7 @@ Append-only log of architectural decisions for `weave`. Newest at top.
 
 | ADR | Title | Status | Impl | Date |
 |-----|-------|--------|------|------|
+| [0025](ADR-0025-outbound-event-surface.md) | Outbound event surface (live SSE push + the blackboard) | Accepted | Complete (v1) | 2026-07-01 |
 | [0024](ADR-0024-substrate-native-fanout.md) | Substrate-native fan-out (deny detached backend orchestration; join over `spawn_task`) | Accepted | Complete | 2026-06-29 |
 | [0023](ADR-0023-inbound-event-gateway.md) | Inbound event gateway (reactive triggers) | Accepted | Complete | 2026-06-27 |
 | [0022](ADR-0022-model-tiering.md) | Per-task model tiering (Haiku/Sonnet/Opus by task) | Accepted | Complete | 2026-06-21 |

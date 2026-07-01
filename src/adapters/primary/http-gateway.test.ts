@@ -4,13 +4,14 @@ import assert from "node:assert/strict";
 import { startHttpGateway, type GatewayEvent } from "./http-gateway.js";
 
 /** Start a gateway on an ephemeral port; returns the base URL + the events onEvent saw. */
-async function gateway(opts: { secret?: string; fail?: boolean } = {}) {
+async function gateway(opts: { secret?: string; fail?: boolean; cors?: boolean } = {}) {
   const seen: GatewayEvent[] = [];
   let n = 0;
   const h = await startHttpGateway({
     port: 0,
     route: "/hook",
     ...(opts.secret ? { secret: opts.secret } : {}),
+    ...(opts.cors ? { cors: true } : {}),
     onEvent: async (e) => {
       if (opts.fail) throw new Error("nope");
       seen.push(e);
@@ -79,6 +80,45 @@ test("an onEvent that throws becomes a 400 with the error (declaration rejected,
     const res = await fetch(`${g.url}/hook`, { method: "POST", body: "x" });
     assert.equal(res.status, 400);
     assert.match(JSON.stringify(await res.json()), /nope/);
+  } finally {
+    await g.close();
+  }
+});
+
+test("with cors on, OPTIONS preflight is 204 with CORS headers and POST echoes the origin", async () => {
+  const g = await gateway({ cors: true });
+  try {
+    const pre = await fetch(`${g.url}/hook`, { method: "OPTIONS", headers: { origin: "http://127.0.0.1:8788" } });
+    assert.equal(pre.status, 204);
+    assert.equal(pre.headers.get("access-control-allow-origin"), "http://127.0.0.1:8788");
+    assert.match(pre.headers.get("access-control-allow-headers") ?? "", /x-weave-secret/);
+    // the actual declare also carries the ACAO so the browser can read the 202
+    const res = await fetch(`${g.url}/hook`, { method: "POST", headers: { origin: "http://127.0.0.1:8788" }, body: JSON.stringify({ goal: "hi" }) });
+    assert.equal(res.status, 202);
+    assert.equal(res.headers.get("access-control-allow-origin"), "http://127.0.0.1:8788");
+    assert.equal(g.seen.length, 1);
+  } finally {
+    await g.close();
+  }
+});
+
+test("preflight does not require the secret, but the POST still does", async () => {
+  const g = await gateway({ cors: true, secret: "s3cr3t" });
+  try {
+    assert.equal((await fetch(`${g.url}/hook`, { method: "OPTIONS" })).status, 204, "preflight carries no secret");
+    assert.equal((await fetch(`${g.url}/hook`, { method: "POST", body: "x" })).status, 401, "POST still gated");
+    assert.equal(g.seen.length, 0);
+  } finally {
+    await g.close();
+  }
+});
+
+test("without cors, OPTIONS is not special-cased (405) and no ACAO header leaks", async () => {
+  const g = await gateway();
+  try {
+    const res = await fetch(`${g.url}/hook`, { method: "OPTIONS" });
+    assert.equal(res.status, 405);
+    assert.equal(res.headers.get("access-control-allow-origin"), null);
   } finally {
     await g.close();
   }
