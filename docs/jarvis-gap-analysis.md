@@ -100,9 +100,13 @@ The keystone. Add a stateful server that pushes. **Done (ADR-0025):**
 - Shipped a minimal **web blackboard** (`blackboard-page.ts`): a live canvas rendering the event feed
   and the derived task grid (state folded per subject). The first "hologram." Verified live +
   mutation-proven tests; full suite green.
-- *Next within this phase:* feed live twin state into the canvas; token-delta (not block) streaming;
-  a WebSocket control channel so the canvas can act (approve a gate).
-- *Outcome (v1):* blackboard 5→~25%, realtime 15→~25%, multimodal 14→~20% — one build, three moved.
+- **Live twin on the canvas (2026-07-01):** the blackboard now renders a force-directed network
+  topology from `twin.graph` events (the `forward-report-graph` `{nodes,edges}` shape). `weave twin`
+  publishes one from a file/stdin, so a Forward path trace or topology pipes straight to the hologram
+  (`forward-report-graph … | weave twin`). Headless-browser render verified.
+- *Next within this phase:* token-delta (not block) streaming; a WebSocket control channel so the
+  canvas can act (approve a gate); auto-publish twin views from path-analysis runs.
+- *Outcome (v1):* blackboard 5→~30%, realtime 15→~25%, multimodal 14→~20% — one build, three moved.
 
 ### Phase 2 — Realtime voice loop
 - Introduce a realtime-audio path that bypasses the job substrate for conversational turns (OpenAI

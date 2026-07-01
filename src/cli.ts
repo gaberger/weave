@@ -54,6 +54,8 @@ import { classifyIntent, type Intent } from "./domain/intent.js";
 import { classifyTier, type Tier } from "./domain/model-tier.js";
 import { currentHolder, isSettled } from "./domain/claim.js";
 import { declareTask } from "./usecases/declare.js";
+import { publishTwin } from "./usecases/publish-twin.js";
+import { parseTwinGraph } from "./domain/twin.js";
 import { declareQuestion, resolveQuestion } from "./usecases/learning.js";
 import { compactWeave } from "./usecases/compaction.js";
 import { getCachedAnswer, cacheAnswer } from "./usecases/cache.js";
@@ -1333,6 +1335,43 @@ async function cmdTask(args: Args): Promise<void> {
     const netArg = has(args, "network-id") ? ` --network-id ${networkId(args)}` : "";
     console.log(gray(`  → a running peer will pick this up; if none is running, start one:  weave up${netArg}  (add --fake to run offline)`));
   }
+  weave.close();
+}
+
+/**
+ * `weave twin` — publish a network view onto the blackboard (ADR-0025). Reads a `{nodes,edges,title}`
+ * graph (the `forward-report-graph` shape) from a file, a positional path, or stdin, and appends a
+ * `twin.graph` event any connected blackboard renders live. So a Forward path trace or topology flows
+ * straight to the canvas:  `forward-report-graph … | weave twin`  (or  `weave twin topo.json`).
+ */
+async function cmdTwin(args: Args): Promise<void> {
+  const file = str(args, "file", "") || args._[0] || "-";
+  let raw: string;
+  try {
+    raw = file === "-" ? readFileSync(0, "utf8") : readFileSync(file, "utf8");
+  } catch (e) {
+    console.error(`weave twin: cannot read ${file === "-" ? "stdin" : file}: ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+  let graph;
+  try {
+    const json = JSON.parse(raw) as unknown;
+    // `--view <name>` overrides/sets the view so re-published traces can target distinct canvases.
+    graph = parseTwinGraph(has(args, "view") && json && typeof json === "object"
+      ? { ...(json as object), view: str(args, "view", "") }
+      : json);
+  } catch (e) {
+    console.error(`weave twin: ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+  const weave = await openSubstrate(args);
+  await publishTwin(weave, () => randomUUID(), "cli", graph);
+  console.log(
+    `weave: published twin view "${graph.view}" — ${graph.nodes.length} node(s), ${graph.edges.length} edge(s)` +
+      (graph.title ? ` — ${graph.title}` : ""),
+  );
   weave.close();
 }
 
@@ -3056,11 +3095,16 @@ usage:
                   (--notify alerts on completed results; pick channels with --to, same as 'weave notify')
                   (--daemon detaches to the background; stop with weave down)
   weave serve     [--port 8787] [--host 127.0.0.1] [--route /hook] [--skill <name>]
-                  [--secret <token>] [--daemon] [--pid-file <path>] [--log-file <path>]
-                  inbound event gateway (ADR-0023): each POST declares a task any peer claims —
-                  the reactive trigger half of autonomy (webhook → task → peer acts → notify)
-                  (POST a body or JSON {"goal","skill"}; --secret gates via the X-Weave-Secret header;
-                   binds loopback by default — use --host 0.0.0.0 + --secret to expose)
+                  [--secret <token>] [--stream-port 8788] [--no-stream]
+                  [--daemon] [--pid-file <path>] [--log-file <path>]
+                  inbound event gateway (ADR-0023) + outbound blackboard (ADR-0025): each POST
+                  declares a task any peer claims, and the live event stream is pushed to a web
+                  blackboard over SSE (open http://<host>:<stream-port>/)
+                  (POST a body or JSON {"goal","skill"}; --secret gates the gateway header AND the
+                   stream ?secret=; --no-stream disables the blackboard; loopback by default)
+  weave twin      [<graph.json> | --file <path> | -] [--view <name>]
+                  publish a {nodes,edges,title} graph (the forward-report-graph shape) onto the
+                  blackboard as a live network view — e.g.  forward-report-graph … | weave twin
   weave skills    [--skills-dir <dir>] [--claude-skills [--claude-skills-dir <dir>]] [--fake]
                   list code + declarative skills (--claude-skills inherits Claude SKILL.md)
   weave notify <text...> [--to slack,telegram,email] [--title T]
@@ -3221,6 +3265,8 @@ async function main(): Promise<void> {
       return cmdDoctor(args);
     case "task":
       return cmdTask(args);
+    case "twin":
+      return cmdTwin(args);
     case "report":
       return cmdReport(args);
     case "index":

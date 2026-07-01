@@ -1,16 +1,23 @@
 # ADR-0025: Outbound event surface (live push + the blackboard)
 
 - **Status:** Accepted
-- **Implementation:** Complete (v1) — `adapters/primary/sse-surface.ts`, `adapters/primary/blackboard-page.ts`, `weave serve` (cli.ts); tests in `sse-surface.test.ts` (mutation-checked)
+- **Implementation:** Complete (v1) — `adapters/primary/sse-surface.ts`, `adapters/primary/blackboard-page.ts`, `domain/twin.ts`, `usecases/publish-twin.ts`, `weave serve` + `weave twin` (cli.ts); tests in `sse-surface.test.ts`, `domain/twin.test.ts`, `usecases/publish-twin.test.ts` (mutation-checked)
 - **Date:** 2026-07-01
 - **Deciders:** project owner
 
 > **v1 shipped (2026-07-01):** SSE surface on its own port (default 8788), served by `weave serve`
 > alongside the inbound gateway. Routes: `GET /` (blackboard), `GET /events` (stream w/ `Last-Event-ID`/
 > `?from` replay + `?secret`/header auth), `GET /health`. Injected `weave.subscribe` + the terminal's
-> `logFilter`; read-only. Verified live (declare→push, offset replay, secret gate) and via a
-> mutation-proven test harness; full suite green (252/252). **Deferred, as designed:** the WebSocket
-> control channel (approve-from-canvas), token-delta streaming, and a richer React/three.js canvas.
+> `logFilter`; read-only.
+>
+> **Live twin on the canvas (2026-07-01):** the blackboard now renders a spatial network view (the
+> "hologram") from `twin.graph` events — a hand-rolled force-directed topology folded per view. The
+> `{nodes,edges,title}` payload reuses the `forward-report-graph` shape, and `weave twin`
+> (`domain/twin.ts` + `usecases/publish-twin.ts`) publishes one from a file/stdin, so a Forward path
+> trace or topology pipes straight to the canvas: `forward-report-graph … | weave twin`. Verified live
+> and with a headless-browser render (nodes/edges draw, status colours, offset replay to a late-joining
+> browser). Full suite green (258/258). **Deferred, as designed:** the WebSocket control channel
+> (approve-from-canvas), token-delta streaming, and a richer React/three.js canvas.
 
 ## Context
 
