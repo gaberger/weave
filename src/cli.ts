@@ -1557,11 +1557,17 @@ async function cmdServe(args: Args): Promise<void> {
     return { taskId };
   };
 
+  // The blackboard (below) lets you speak a task; its voice input POSTs a declare to THIS gateway
+  // from the surface's origin, so enable CORS on the gateway exactly when the stream is on.
+  const streamOn = !has(args, "no-stream");
+  const streamPort = numPos(args, "stream-port", 8788);
+
   const handle = await startHttpGateway({
     port,
     host,
     route,
     ...(secret ? { secret } : {}),
+    ...(streamOn ? { cors: true } : {}),
     onEvent,
     log: (m) => console.log(gray(m)),
   });
@@ -1569,16 +1575,17 @@ async function cmdServe(args: Args): Promise<void> {
   // Outbound event surface (ADR-0025): the read-only mirror of the inbound gateway. It pushes the
   // substrate stream to browsers over SSE and serves the blackboard. Runs on its own port so the
   // inbound and outbound halves stay independent (either can be disabled). `--no-stream` opts out.
-  const streamOn = !has(args, "no-stream");
   const surface = streamOn
     ? await startSseSurface({
-        port: numPos(args, "stream-port", 8788),
+        port: streamPort,
         host,
         ...(secret ? { secret } : {}),
         // Inject the real subscribe + the terminal's log filter — this adapter imports no substrate.
         subscribe: (from, h) => weave.subscribe(from, h),
         filter: logFilter(args),
         page: BLACKBOARD_HTML,
+        // Tell the page where to POST voice-declared tasks (this gateway). Declare stays on the gateway.
+        gateway: { port, route },
         log: (m) => console.log(gray(m)),
       })
     : undefined;
@@ -1590,7 +1597,7 @@ async function cmdServe(args: Args): Promise<void> {
   console.log(`  ${gray("auth:")} ${secret ? "X-Weave-Secret required" : "none (loopback)"}`);
   if (surface) {
     const q = secret ? `?secret=${secret}` : "";
-    console.log(`${green("✓")} blackboard on ${cyan(`http://${host}:${surface.port}/${q}`)} ${gray("(live SSE stream at /events)")}`);
+    console.log(`${green("✓")} blackboard on ${cyan(`http://${host}:${surface.port}/${q}`)} ${gray("(live SSE + 🎙 speak/listen in-browser)")}`);
   }
   console.log("");
   if (!secret && host !== "127.0.0.1") {

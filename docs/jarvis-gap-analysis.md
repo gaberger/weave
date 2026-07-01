@@ -104,9 +104,15 @@ The keystone. Add a stateful server that pushes. **Done (ADR-0025):**
   topology from `twin.graph` events (the `forward-report-graph` `{nodes,edges}` shape). `weave twin`
   publishes one from a file/stdin, so a Forward path trace or topology pipes straight to the hologram
   (`forward-report-graph … | weave twin`). Headless-browser render verified.
+- **The hologram talks (2026-07-01):** the blackboard now speaks task outcomes (`speechSynthesis`,
+  gated to fresh events) and takes spoken commands (`SpeechRecognition`, 🎤 click-to-talk). Voice input
+  declares on the *gateway* (the write path) via opt-in CORS + a read-only `GET /config`, so the surface
+  stays read-only. This is a *second* voice channel from the CLI `weave voice` — browser-native and
+  cross-platform. Verified end-to-end headless.
 - *Next within this phase:* token-delta (not block) streaming; a WebSocket control channel so the
   canvas can act (approve a gate); auto-publish twin views from path-analysis runs.
-- *Outcome (v1):* blackboard 5→~30%, realtime 15→~25%, multimodal 14→~20% — one build, three moved.
+- *Outcome (v1):* blackboard 5→~30%, realtime 15→~25%, multimodal 14→~22%, voice 28→~34% — the
+  hologram now sees, speaks, and listens from one browser tab.
 
 ### Phase 2 — Realtime voice loop
 - Introduce a realtime-audio path that bypasses the job substrate for conversational turns (OpenAI

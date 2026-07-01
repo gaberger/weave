@@ -29,6 +29,10 @@ export interface SseSurfaceConfig {
   readonly filter?: (e: SealedEvent) => boolean;
   /** The blackboard HTML served at `GET /`. */
   readonly page: string;
+  /** The inbound gateway's port + route, exposed at `GET /config` so the blackboard can build the
+   *  gateway URL from its own hostname and POST voice-declared tasks there (the write path stays on
+   *  the gateway; this surface stays read-only). Omit to disable voice input in the page. */
+  readonly gateway?: { readonly port: number; readonly route: string };
   /** Comment-ping interval to keep proxies/browsers from idling the connection out (default 15s). */
   readonly heartbeatMs?: number;
   readonly log?: (msg: string) => void;
@@ -92,6 +96,13 @@ export function startSseSurface(cfg: SseSurfaceConfig): Promise<SseSurfaceHandle
     if (path === "/health") {
       res.writeHead(200, { "content-type": "text/plain" });
       return void res.end("ok");
+    }
+
+    // Read-only config for the page: where to POST voice-declared tasks (the gateway). Returns
+    // {gateway:null} when no gateway is wired, so the blackboard disables its mic.
+    if (path === "/config") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return void res.end(JSON.stringify({ gateway: cfg.gateway ?? null }));
     }
 
     if (path === "/" || path === "/index.html") {

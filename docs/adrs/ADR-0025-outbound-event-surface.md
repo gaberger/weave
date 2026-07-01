@@ -16,8 +16,20 @@
 > (`domain/twin.ts` + `usecases/publish-twin.ts`) publishes one from a file/stdin, so a Forward path
 > trace or topology pipes straight to the canvas: `forward-report-graph … | weave twin`. Verified live
 > and with a headless-browser render (nodes/edges draw, status colours, offset replay to a late-joining
-> browser). Full suite green (258/258). **Deferred, as designed:** the WebSocket control channel
-> (approve-from-canvas), token-delta streaming, and a richer React/three.js canvas.
+> browser).
+>
+> **The hologram talks (2026-07-01):** the blackboard now speaks and listens via the browser's Web
+> Speech API — `speechSynthesis` announces task outcomes (the actual `summary`, gated to fresh events
+> so a full-log replay isn't read aloud), and `SpeechRecognition` (🎤 click-to-talk) turns a spoken
+> command into a task. Crucially, voice **input** POSTs the declare to the **gateway** (ADR-0023, the
+> write path) — NOT to this surface, which stays read-only. That cross-origin POST (page on the stream
+> port → gateway on its own port) is enabled by opt-in CORS on the gateway (`cors`, on only when the
+> stream is), and the page discovers the gateway's coords from a read-only `GET /config`. So the safety
+> invariant holds: the outbound surface still declares nothing and holds no authority; the microphone
+> is just another client of the inbound gateway. Verified end-to-end in a headless browser (config load,
+> cross-origin declare → 202, task flows back onto the canvas). Full suite green (263/263).
+> **Deferred, as designed:** the WebSocket control channel (approve-from-canvas), token-delta streaming,
+> a richer React/three.js canvas, and server-side realtime voice (OpenAI Realtime — the Phase-2 CLI bar).
 
 ## Context
 

@@ -20,6 +20,10 @@ export interface HttpGatewayConfig {
   readonly secret?: string;
   /** Max request body bytes (default 1 MiB) — a runaway/abusive POST can't exhaust memory. */
   readonly maxBytes?: number;
+  /** Allow cross-origin browser declares (the blackboard's voice input POSTs here from the surface's
+   *  origin). Off by default so the gateway stays same-origin-only unless composition opts in. When on,
+   *  OPTIONS preflight is answered and Access-Control-Allow-Origin echoes the request Origin. */
+  readonly cors?: boolean;
   /** Turn a validated inbound event into a declared task; returns the new task id (or throws). */
   readonly onEvent: (e: GatewayEvent) => Promise<{ taskId: string }>;
   readonly log?: (msg: string) => void;
@@ -33,9 +37,24 @@ export interface HttpGatewayHandle {
 
 const DEFAULT_MAX_BYTES = 1 << 20; // 1 MiB
 
-function send(res: ServerResponse, status: number, body: unknown): void {
+/** CORS headers for a browser declare. Echoes the caller's Origin (credentials aren't used — the
+ *  secret rides a custom header, not a cookie — so a reflected origin is safe and precise). */
+function corsHeaders(origin: string | undefined): Record<string, string> {
+  return {
+    "access-control-allow-origin": origin || "*",
+    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-headers": "content-type, x-weave-secret",
+    "access-control-max-age": "600",
+    vary: "origin",
+  };
+}
+
+function send(res: ServerResponse, status: number, body: unknown, extra?: Record<string, string>): void {
   const text = typeof body === "string" ? body : JSON.stringify(body);
-  res.writeHead(status, { "content-type": typeof body === "string" ? "text/plain" : "application/json" });
+  res.writeHead(status, {
+    "content-type": typeof body === "string" ? "text/plain" : "application/json",
+    ...extra,
+  });
   res.end(text);
 }
 
@@ -73,13 +92,22 @@ export function startHttpGateway(cfg: HttpGatewayConfig): Promise<HttpGatewayHan
     void (async () => {
       const path = (req.url ?? "/").split("?")[0];
       const method = (req.method ?? "GET").toUpperCase();
+      // When CORS is enabled, tag every response so a browser at the blackboard origin can read it.
+      const cors = cfg.cors ? corsHeaders(req.headers.origin as string | undefined) : undefined;
+
+      // CORS preflight: the browser asks before a POST with a custom header. Answer it WITHOUT the
+      // secret gate (preflight carries none) — the actual POST below is still gated.
+      if (cfg.cors && method === "OPTIONS") {
+        res.writeHead(204, cors);
+        return void res.end();
+      }
 
       // Health: GET the route or /health. Never declares.
       if (method === "GET" && (path === cfg.route || path === "/health")) {
-        return send(res, 200, "ok");
+        return send(res, 200, "ok", cors);
       }
-      if (path !== cfg.route) return send(res, 404, "not found");
-      if (method !== "POST") return send(res, 405, "method not allowed");
+      if (path !== cfg.route) return send(res, 404, "not found", cors);
+      if (method !== "POST") return send(res, 405, "method not allowed", cors);
 
       // Auth: a configured secret must match the X-Weave-Secret header. Without a secret, rely on the
       // loopback bind (the default) — declaring is still gated by the peers' grant ceiling downstream.
@@ -87,7 +115,7 @@ export function startHttpGateway(cfg: HttpGatewayConfig): Promise<HttpGatewayHan
         const got = req.headers["x-weave-secret"];
         if (got !== cfg.secret) {
           cfg.log?.("gateway: rejected POST — bad/missing X-Weave-Secret");
-          return send(res, 401, "unauthorized");
+          return send(res, 401, "unauthorized", cors);
         }
       }
 
@@ -95,17 +123,17 @@ export function startHttpGateway(cfg: HttpGatewayConfig): Promise<HttpGatewayHan
       try {
         body = await readBody(req, maxBytes);
       } catch (e) {
-        return send(res, 413, e instanceof Error ? e.message : "bad body");
+        return send(res, 413, e instanceof Error ? e.message : "bad body", cors);
       }
 
       try {
         const { taskId } = await cfg.onEvent({ method, path, headers: req.headers, body });
         cfg.log?.(`gateway: declared ${taskId} from ${method} ${path}`);
-        return send(res, 202, { taskId });
+        return send(res, 202, { taskId }, cors);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         cfg.log?.(`gateway: event rejected — ${msg}`);
-        return send(res, 400, { error: msg });
+        return send(res, 400, { error: msg }, cors);
       }
     })();
   });

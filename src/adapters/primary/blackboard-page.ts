@@ -42,6 +42,13 @@ export const BLACKBOARD_HTML = String.raw`<!doctype html>
   .dot.off { background:var(--red);   box-shadow:var(--glow) var(--red); }
   .dot.wait{ background:var(--amber); box-shadow:var(--glow) var(--amber); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .vbtn { font:inherit; font-size:15px; line-height:1; background:#0b141d; border:1px solid var(--line);
+          border-radius:6px; padding:3px 7px; cursor:pointer; color:var(--ink); filter:grayscale(.4); }
+  .vbtn:hover { border-color:var(--cyan); }
+  .vbtn.off { opacity:.4; filter:grayscale(1); }
+  .vbtn.live { border-color:var(--red); box-shadow:var(--glow) rgba(255,92,114,.5); animation:pulse 1.3s infinite; filter:none; }
+  .vstat { color:var(--dim); min-width:120px; font-size:12px; }
+  .vstat b { color:var(--cyan); }
   main { flex:1; display:flex; flex-direction:column; min-height:0; }
   .lower { flex:1; display:grid; grid-template-columns:1.3fr 1fr; gap:1px; background:var(--line); min-height:0; }
   section { background:var(--panel); display:flex; flex-direction:column; min-height:0; }
@@ -101,6 +108,9 @@ export const BLACKBOARD_HTML = String.raw`<!doctype html>
 <header>
   <span class="brand">◇ WEAVE<small>blackboard</small></span>
   <span class="spacer"></span>
+  <button id="mic" class="vbtn off" title="click to speak a command" style="display:none">🎤</button>
+  <button id="spk" class="vbtn" title="toggle voice output">🔊</button>
+  <span id="vstat" class="vstat"></span>
   <span class="stat"><span id="dot" class="dot wait"></span><span id="conn">connecting…</span></span>
   <span class="stat">tasks <b id="ntasks">0</b></span>
   <span class="stat">events <b id="nev">0</b></span>
@@ -303,6 +313,68 @@ export const BLACKBOARD_HTML = String.raw`<!doctype html>
     $("nev").textContent = ++nev;
   }
 
+  // ---- voice: the hologram speaks (speechSynthesis) + listens (SpeechRecognition) ---------------
+  var speakOn = true, gwUrl = null;
+  var synth = window.speechSynthesis;
+  function vstat(html) { $("vstat").innerHTML = html; }
+  function clip(s, n) { s = String(s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n) + "…" : s; }
+  function speak(text) {
+    if (!speakOn || !synth || !text) return;
+    var u = new SpeechSynthesisUtterance(clip(text, 260));
+    u.rate = 1.05; u.pitch = 1;
+    synth.speak(u);
+  }
+  // Announce task outcomes — the actual answer, not just "done" (payload carries the summary). Gate
+  // on wall-clock recency: a fresh page replays the WHOLE log from seq 0, so without this every
+  // historical completion would be spoken at once. Only events from the last 15s (i.e. things that
+  // happened while you're watching) are announced; the replay backlog is silent.
+  function announce(e) {
+    if (!e.ts || Date.now() - e.ts > 15000) return;
+    var p = e.payload || {};
+    if (e.kind === "task.completed") speak("Task complete. " + (p.summary || (tasks.get(e.subject) || {}).goal || ""));
+    else if (e.kind === "task.failed") speak("Task failed. " + (p.summary || p.error || ""));
+  }
+  $("spk").onclick = function () {
+    speakOn = !speakOn; $("spk").textContent = speakOn ? "🔊" : "🔇"; $("spk").classList.toggle("off", !speakOn);
+    if (!speakOn && synth) synth.cancel(); else speak("Voice on.");
+  };
+
+  // Speech-to-text → declare a task on the GATEWAY (the write path; this page's origin is read-only).
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var rec = null, listening = false;
+  function declare(goal) {
+    if (!gwUrl) return;
+    var headers = { "content-type": "application/json" };
+    if (qs.get("secret")) headers["x-weave-secret"] = qs.get("secret");
+    vstat("declaring…");
+    fetch(gwUrl, { method: "POST", headers: headers, body: JSON.stringify({ goal: goal }) })
+      .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t); }); })
+      .then(function (j) { vstat('declared <b>' + esc(j.taskId || "") + '</b>'); speak("On it."); })
+      .catch(function (err) { vstat('<span style="color:var(--red)">declare failed</span>'); console.error(err); });
+  }
+  function setupMic() {
+    if (!SR || !gwUrl) return; // no browser STT, or nowhere to send → leave the mic hidden
+    var mic = $("mic"); mic.style.display = ""; mic.classList.remove("off");
+    rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.maxAlternatives = 1;
+    rec.onresult = function (ev) {
+      var txt = "", fin = false;
+      for (var i = ev.resultIndex; i < ev.results.length; i++) { txt += ev.results[i][0].transcript; if (ev.results[i].isFinal) fin = true; }
+      vstat('heard: <b>' + esc(clip(txt, 60)) + '</b>');
+      if (fin && txt.trim()) declare(txt.trim());
+    };
+    rec.onend = function () { listening = false; mic.classList.remove("live"); };
+    rec.onerror = function (ev) { listening = false; mic.classList.remove("live"); vstat('<span style="color:var(--red)">mic: ' + esc(ev.error) + '</span>'); };
+    mic.onclick = function () {
+      if (listening) { rec.stop(); return; }
+      if (synth) synth.cancel(); // don't transcribe our own TTS
+      try { rec.start(); listening = true; mic.classList.add("live"); vstat("listening…"); } catch (_) {}
+    };
+  }
+  // Ask the surface where the gateway is (read-only /config), then enable the mic if present.
+  fetch("/config").then(function (r) { return r.json(); }).then(function (c) {
+    if (c && c.gateway) { gwUrl = location.protocol + "//" + location.hostname + ":" + c.gateway.port + c.gateway.route; setupMic(); }
+  }).catch(function () {});
+
   // ---- stream -----------------------------------------------------------------------------------
   function setConn(cls, text) { $("dot").className = "dot " + cls; $("conn").textContent = text; }
   var rafPending = false;
@@ -311,7 +383,7 @@ export const BLACKBOARD_HTML = String.raw`<!doctype html>
 
   function onEvent(e) {
     if (e.kind === "twin.graph" && e.payload) foldTwin(e.subject, e.payload);
-    else fold(e), scheduleTasks();
+    else { fold(e); scheduleTasks(); announce(e); }
     pushFeed(e);
   }
   function connect() {

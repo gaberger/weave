@@ -13,7 +13,7 @@ function ev(seq: number, kind = "task.declared"): SealedEvent {
  * events into any connected stream and (b) assert on the offset the surface subscribed from and on
  * unsubscribe-on-disconnect — no real substrate needed.
  */
-async function surface(opts: { secret?: string; filter?: (e: SealedEvent) => boolean } = {}) {
+async function surface(opts: { secret?: string; filter?: (e: SealedEvent) => boolean; gateway?: { port: number; route: string } } = {}) {
   const handlers: Array<(e: SealedEvent) => void> = [];
   let lastFrom: number | undefined;
   let unsubs = 0;
@@ -21,6 +21,7 @@ async function surface(opts: { secret?: string; filter?: (e: SealedEvent) => boo
     port: 0,
     ...(opts.secret ? { secret: opts.secret } : {}),
     ...(opts.filter ? { filter: opts.filter } : {}),
+    ...(opts.gateway ? { gateway: opts.gateway } : {}),
     subscribe: (from, handler) => {
       lastFrom = from;
       handlers.push(handler);
@@ -62,6 +63,26 @@ test("GET / serves the blackboard page; /health is ok", async () => {
     const health = await fetch(`${s.url}/health`);
     assert.equal(health.status, 200);
     assert.equal(await health.text(), "ok");
+  } finally {
+    await s.close();
+  }
+});
+
+test("GET /config advertises the gateway coords so the page can build the declare URL", async () => {
+  const s = await surface({ gateway: { port: 8787, route: "/hook" } });
+  try {
+    const res = await fetch(`${s.url}/config`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { gateway: { port: 8787, route: "/hook" } });
+  } finally {
+    await s.close();
+  }
+});
+
+test("GET /config returns {gateway:null} when no gateway is wired (page hides the mic)", async () => {
+  const s = await surface();
+  try {
+    assert.deepEqual(await (await fetch(`${s.url}/config`)).json(), { gateway: null });
   } finally {
     await s.close();
   }
