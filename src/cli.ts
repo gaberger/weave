@@ -78,6 +78,8 @@ import { channelsFrom, notifyAll, type ChannelConfig } from "./adapters/secondar
 import { ClaudeCliWorker } from "./adapters/secondary/claude-cli-worker.js";
 import { readMcpServers, mcpToolGrants } from "./adapters/secondary/mcp-config.js";
 import { startHttpGateway } from "./adapters/primary/http-gateway.js";
+import { startSseSurface } from "./adapters/primary/sse-surface.js";
+import { BLACKBOARD_HTML } from "./adapters/primary/blackboard-page.js";
 import { echoSkill, claudeSkill, personaAgentSkill, researchSkill, GENERIC_VOICE_SUMMARY } from "./composition/builtin-skills.js";
 import { forwardSkills } from "./composition/forward-skills.js";
 import { forwardTools } from "./adapters/secondary/forward-tools.js";
@@ -176,7 +178,7 @@ interface Args {
 }
 
 /** Flags that never take a value (so they don't greedily consume the next positional arg). */
-const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "read-only", "no-embed", "no-context", "route", "no-tier", "no-color", "verbose"]);
+const BOOLEAN_FLAGS = new Set(["fake", "once", "follow", "lenient", "notify", "help", "daemon", "claude-skills", "bash", "read-only", "no-embed", "no-context", "route", "no-tier", "no-color", "verbose", "no-stream"]);
 
 /** The live feed / peer log skips `lease.renewed` heartbeats by default — they fire every tick while
  *  a task is held and bury the substantive events. `--verbose` shows everything. */
@@ -1524,13 +1526,36 @@ async function cmdServe(args: Args): Promise<void> {
     onEvent,
     log: (m) => console.log(gray(m)),
   });
+
+  // Outbound event surface (ADR-0025): the read-only mirror of the inbound gateway. It pushes the
+  // substrate stream to browsers over SSE and serves the blackboard. Runs on its own port so the
+  // inbound and outbound halves stay independent (either can be disabled). `--no-stream` opts out.
+  const streamOn = !has(args, "no-stream");
+  const surface = streamOn
+    ? await startSseSurface({
+        port: numPos(args, "stream-port", 8788),
+        host,
+        ...(secret ? { secret } : {}),
+        // Inject the real subscribe + the terminal's log filter — this adapter imports no substrate.
+        subscribe: (from, h) => weave.subscribe(from, h),
+        filter: logFilter(args),
+        page: BLACKBOARD_HTML,
+        log: (m) => console.log(gray(m)),
+      })
+    : undefined;
+
   const net = networkId(args);
   const netBadge = net !== DEFAULT_NETWORK ? ` ${cyan(`[${net}]`)}` : "";
   console.log(`${green("✓")} gateway listening on ${cyan(`http://${host}:${handle.port}${route}`)}${netBadge}`);
   console.log(`  ${gray("POST")}  a body (or JSON {"goal","skill"}) → declares a task any peer can claim`);
-  console.log(`  ${gray("auth:")} ${secret ? "X-Weave-Secret required" : "none (loopback)"}\n`);
+  console.log(`  ${gray("auth:")} ${secret ? "X-Weave-Secret required" : "none (loopback)"}`);
+  if (surface) {
+    const q = secret ? `?secret=${secret}` : "";
+    console.log(`${green("✓")} blackboard on ${cyan(`http://${host}:${surface.port}/${q}`)} ${gray("(live SSE stream at /events)")}`);
+  }
+  console.log("");
   if (!secret && host !== "127.0.0.1") {
-    console.error(yellow("weave: serving on a non-loopback host with NO --secret — anyone who can reach this port can declare tasks."));
+    console.error(yellow("weave: serving on a non-loopback host with NO --secret — anyone who can reach this port can declare tasks (and watch the stream)."));
     console.error(yellow("  → set --secret <token> (or WEAVE_GATEWAY_SECRET), and put it behind a reverse proxy / TLS."));
   }
 
@@ -1543,7 +1568,7 @@ async function cmdServe(args: Args): Promise<void> {
     clearInterval(keepAlive);
     const pidFile = process.env.WEAVE_PID_FILE;
     if (pidFile) try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
-    void handle.close().then(() => {
+    void Promise.all([handle.close(), surface?.close()]).then(() => {
       weave.close();
       process.exit(0);
     });
